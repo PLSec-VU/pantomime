@@ -12,15 +12,16 @@ import GHC.Driver.Config.Core.Lint (initLintConfig)
 import Data.Bifunctor (second)
 import qualified Data.Map as Map
 import Data.Map (Map)
-import Data.List (foldl', find)
+import Data.List (foldl', find, nubBy)
 import Data.Maybe (fromJust)
 
 import Data.Data
 import Generics.SYB hiding (empty)
 
-import Control.Applicative ((<|>), empty)
-import Control.Monad ((>=>))
--- import Control.Monad.Trans.Maybe
+import Control.Applicative ((<|>), empty, Alternative (..))
+import Control.Monad ((>=>), guard)
+import Control.Monad.Trans.Maybe
+import Control.Monad.Trans.Class
 
 data UC = UC
   deriving (Show, Eq, Ord, Data, Typeable)
@@ -53,9 +54,6 @@ pass guts = do
 printBind :: CoreBind -> CoreM CoreBind
 printBind bndr@(NonRec x e) = do
   dflags <- getDynFlags
-  -- putMsgS $ "Non-recursive binding named " ++ showSDoc dflags (ppr b)
-  -- putMsg $ ppr e
-  -- putMsgS "--------------------------------"
   e' <- transforms e
   let bndr' = NonRec x e'
   putMsg . ppr $ bndr'
@@ -63,120 +61,202 @@ printBind bndr@(NonRec x e) = do
   let cfg = initLintConfig dflags []
   let res = lintCoreBindings' cfg [bndr']
   putMsg . ppr $ res
-
-  -- putMsgS $ gshow e'
   return bndr
 printBind bndr = return bndr
 
-type FixPass = (CoreExpr -> CoreM (Maybe CoreExpr))
-type FixPass' = (CoreExpr -> Maybe CoreExpr)
+type FixPass = (CoreExpr -> MaybeT CoreM CoreExpr)
+
+dbg :: Outputable o => o -> MaybeT CoreM ()
+dbg = lift . putMsg . ppr
+
+dbg' :: String -> MaybeT CoreM ()
+dbg' = lift . putMsgS
 
 transforms :: CoreExpr -> CoreM CoreExpr
-transforms = fix fused -- >=> caseFold Map.empty 
+transforms = fix fused >=> caseFold Map.empty 
 
 fix :: FixPass -> CoreExpr -> CoreM CoreExpr
 fix f = everywhereM $ mkM go
   where
-    go e = f e >>= \case
+    go e = runMaybeT (f e) >>= \case
       Just e' -> fix f e'
       Nothing -> return e
 
 fuse :: [FixPass] -> FixPass
-fuse = foldl' fuse' (\_ -> return Nothing)
+fuse = foldl' fuse' $ const empty
 
 fuse' :: FixPass -> FixPass -> FixPass
-fuse' p p' e = p e >>= \case
-  Just e' -> return $ Just e'
-  Nothing -> p' e
+fuse' p p' e = p e <|> p' e
 
 fused :: FixPass
 fused = fuse
-  [ return . inlineLet
-  -- , return . betaReduce
-  , return . caseDistribute
-  -- , return . caseReduce
-  -- , return . redundantCase
+  [ inlineLet
+  , betaReduce
+  , caseDistribute
+  , caseReduce
+  , redundantCase
   ]
 
 -- | Beta reduction (but with a let)
-inlineLet :: FixPass'
+inlineLet :: FixPass
 inlineLet = \case
-  Let (NonRec bind expr) body -> Just $ substitute body bind expr
-  _ -> Nothing
+  Let (NonRec bind expr) body -> return $ substitute body bind expr
+  _ -> empty
 
 -- | Beta reduction
-betaReduce :: FixPass'
+betaReduce :: FixPass
 betaReduce = \case
-  App (Lam bind body) arg -> Just $ substitute body bind arg
-  _ -> Nothing
+  App (Lam bind body) arg -> return $ substitute body bind arg
+  _ -> empty
 
 -- | substitute e1 x e2 = e1[x:=e2]
 substitute :: CoreExpr -> CoreBndr -> CoreExpr -> CoreExpr
 substitute body bind expr = do
-  let inScope = mkInScopeSet $ exprFreeVars body
+  let inScope = mkInScopeSet $ exprFreeVars body `unionVarSet` exprFreeVars expr
   let subst = extendIdSubst (mkEmptySubst inScope) bind expr
   let body' = substExpr subst body
   body'
 
 -- | Reduces a case expression if the spine of the scrutinee is a constructor.
-caseReduce :: FixPass'
+caseReduce :: FixPass
 caseReduce = \case
   Case scrut bind _ alts -> do
-    -- Get the spine if it is a constructor
+    -- Get the spine if it is a constructor.
     (ac, es) <- spine scrut
 
-    -- Get the alt matching this spine
+    -- Remove any type applications, these are never bound by the case.
+    let isType = \case
+          Type _ -> True
+          _ -> False
+    let es' = filter (not . isType) es
+
+    -- Get the alt matching this spine.
     Alt _ bs rhs <- matchingAlt alts ac
+
+    -- Get the variables that are in scope already.
+    let inscope = mkInScopeSet $ unionVarSets
+          [ exprFreeVars rhs
+          , exprFreeVars scrut
+          , mkVarSet bs
+          ]
 
     -- Map all the binders of the case to the expressions along the spine.
     -- Additionally, the binder should be substituted by the scrutinee.
-    let mapping = (bind, scrut) : zip bs es
+    let errmsg = "arguments on constructor should be equivalent to binders in pattern"
+    let mapping = (bind, scrut) : zipEqual errmsg bs es'
 
-    -- Make the substition using the mapping and perform the substitution
-    let subst = extendIdSubstList (mkEmptySubst $ mkInScopeSet $ exprFreeVars rhs) mapping
-    let expr = substExpr subst rhs
-    return expr
-  _ -> Nothing
-  where
-    -- | Get the constructor spine (if available) of this expression with all
-    -- the arguments that are applied to it.
-    spine :: CoreExpr -> Maybe (AltCon, [CoreExpr])
-    spine = \case
-      App fun arg -> second (arg :) <$> spine fun
-      Var v | isDataConWorkId v -> return (DataAlt (idDataCon v), [])
-      Lit l -> return (LitAlt l, [])
-      _ -> Nothing
+    -- Make the substition using the mapping.
+    let subst = extendIdSubstList (mkEmptySubst inscope) mapping
 
--- | Distrubte expressions over a case. This pushes case expressions towards the
--- root of the expression.
-caseDistribute :: FixPass'
-caseDistribute = \case
-  -- Nested case
-  -- Case cas@(Case {}) bind ty alts -> distribute (\e -> Case e bind ty alts) cas
-
-  -- Inline function into case
-  App fun@(Case {}) arg -> distribute (`App` arg) fun
-
-  -- Inline argument into case
-  App fun arg@(Case {}) -> distribute (App fun) arg
+    -- Perform the substitution.
+    return $ substExpr subst rhs
 
   _ -> empty
   where
-    distribute f = \case
-      Case scrut bind _ alts -> do
-        let distribute' (Alt c bs e) = Alt c bs (f e)
-        let alts' = distribute' <$> alts
-        let ty' = coreAltsType alts'
-        let expr = Case scrut bind ty' alts'
-        return expr
+    -- | Get the constructor spine (if available) of this expression with all
+    -- the arguments that are applied to it.
+    spine = \case
+      App fun arg -> second (++ [arg]) <$> spine fun
+      Var v | isDataConWorkId v -> return (DataAlt (idDataCon v), [])
+      Lit l -> return (LitAlt l, [])
       _ -> empty
 
--- TODO: Implement redundant case pass.
-redundantCase :: FixPass'
-redundantCase = const Nothing
+-- | Distrubte expressions over a case. This pushes case expressions towards the
+-- root of the expression.
+caseDistribute :: FixPass
+caseDistribute = \case
+  -- Nested case
+  Case cas@(Case {}) bind ty alts -> do
+    unique <- lift getUniqueM
+    let temp = flip setVarType (exprType cas)
+             . flip setVarUnique unique
+             . flip lazySetIdInfo (setOneShotInfo vanillaIdInfo OneShotLam)
+             $ bind
+    let fun = Lam temp (Case (Var temp) bind ty alts)
+    distribute fun cas
 
-matchingAlt :: [Alt a] -> AltCon -> Maybe (Alt a)
-matchingAlt alts ac = matching <|> default'
+  -- Inline argument into case
+  App cas@(Case _ bind _ _) arg -> do
+    unique <- lift getUniqueM
+    let temp = flip setVarType (exprType cas)
+             . flip setVarUnique unique
+             . flip lazySetIdInfo (setOneShotInfo vanillaIdInfo OneShotLam)
+             $ bind
+    let fun = Lam temp (App (Var temp) arg)
+
+    distribute fun cas
+
+  -- Inline function into case
+  App fun cas@Case {} -> distribute fun cas
+
+  _ -> empty
+  where
+    distribute fun = \case
+      Case scrut bind _ alts -> do
+        -- Create a temporary unique variable. We will substitute this variable
+        -- for the given function using substExpr, which will make sure that all
+        -- the variable renaming is correctly handled.
+        unique <- lift getUniqueM
+        let temp = flip setVarType (exprType fun)
+                 . flip setVarUnique unique
+                 . flip lazySetIdInfo (setOneShotInfo vanillaIdInfo OneShotLam)
+                 $ bind
+
+        -- Distribute the temporary variable as the function to every rhs.
+        let distribute' (Alt c bs rhs) = Alt c bs (App (Var temp) rhs)
+        let alts' = distribute' <$> alts
+
+        -- Get the type for the new case statement and create the new case.
+        let ty' = coreAltsType alts'
+        let expr = Case scrut bind ty' alts'
+
+        -- Get all variables that are in scope
+        let inscope = mkInScopeSet $ exprFreeVars expr `unionVarSet` exprFreeVars fun
+
+        -- Use the in-scope set to make a substitution from the temporary
+        -- argument to the given function.
+        let subst = extendIdSubst (mkEmptySubst inscope) temp fun
+
+        -- Substitute the temporary variable for the given function.
+        return $ substExpr subst expr
+
+      _ -> empty
+
+-- | Removes obselete cases. That is, cases whose result will not change
+-- depending on the value of the scrutinee.
+redundantCase :: FixPass
+redundantCase = \case
+  Case scrut bind _ alts -> do
+    -- Check if all alts are equivalent
+    let cmp (Alt _ _ rhs) (Alt _ _ rhs') = CmpExpr rhs == CmpExpr rhs'
+    let equal = length (nubBy cmp alts) == 1
+
+    -- Check if all alts do not bind any of their pattern (which would make
+    -- them not equivalent due to different binding variables).
+    let uses (Alt _ bs rhs) = exprFreeVars rhs `disjointVarSet` mkVarSet bs
+    let unbound = all uses alts
+
+    -- Check if the case is indeed redundant. That is, all alts are equal and
+    -- they don't bind the variables in the pattern.
+    guard (equal && unbound)
+
+    -- Take the rhs of first alt (since they're all equivalent, and alts is
+    -- non-empty).
+    let (Alt _ _ expr) = head alts
+
+    -- Get all free variables in this expression for the in-scope set.
+    let inscope = mkInScopeSet $ exprFreeVars expr
+
+    -- Use the in-scope set to make a substitution for the scrutinee.
+    let subst = extendIdSubst (mkEmptySubst inscope) bind scrut
+
+    -- Perform the substitution.
+    return $ substExpr subst expr
+
+  _ -> empty
+
+matchingAlt :: Alternative f => [Alt a] -> AltCon -> f (Alt a)
+matchingAlt alts ac = maybe empty pure $ matching <|> default'
   where
     matching = find (\(Alt con _ _) -> con == ac) alts
     default' = find (\(Alt con _ _) -> con == DEFAULT) alts
@@ -188,21 +268,25 @@ instance Outputable CmpExpr where
   ppr (CmpExpr e) = ppr e
 
 instance Eq CmpExpr where
-  (==) = eq'
+  (==) = geq'
     where
-      eq' :: GenericQ (GenericQ Bool)
-      eq' x y
+      -- Modification of the normal geq in SYB, with a special case for
+      -- variables.
+      geq' :: GenericQ (GenericQ Bool)
+      geq' x y
         | toConstr x == toConstr y = case (cast x, cast y) of
-            (Just (v1 :: Var), Just (v2 :: Var)) -> v1 == v2
-            _ -> and (gzipWithQ eq' x y)
+            (Just (v :: Var), Just (v' :: Var)) -> v == v'
+            _ -> and (gzipWithQ geq' x y)
         | otherwise = False
 
 instance Ord CmpExpr where
   compare = gcompare'
     where
+      -- Modification of the normal gcompare in SYB, with a special case for
+      -- variables.
       gcompare' :: (Data a, Data b) => a -> b -> Ordering
       gcompare' x y = case (cast x, cast y) of
-        (Just (v1 :: Var), Just (v2 :: Var)) -> compare v1 v2
+        (Just (v :: Var), Just (v' :: Var)) -> compare v v'
         _ -> case (repX, repY) of
           (AlgConstr nX,   AlgConstr nY)   ->
             nX `compare` nY `mappend` mconcat (gzipWithQ gcompare' x y)
@@ -216,7 +300,7 @@ instance Ord CmpExpr where
           repX = constrRep x'
           repY = constrRep y'
 
--- FIXME: I think there is an issue with the fold in the default branch:
+-- FIXME: I think there is an issue with the fold given a default branch:
 -- we cannot always fold a branch in this case I think. Maybe we could do
 -- something like include it in the outer case?
 caseFold :: Map CmpExpr (AltCon, [CoreBndr]) -> CoreExpr -> CoreM CoreExpr
@@ -232,8 +316,11 @@ caseFold scruts = \case
     -- Additionally, the binder should be substituted by the scrutinee.
     let mapping = (bind, scrut) : zip bs' (Var <$> bs)
 
+    -- Get the inscope variables
+    let inscope = mkInScopeSet $ exprFreeVars rhs
+
     -- Make the substition using the mapping and perform the substitution
-    let subst = extendIdSubstList (mkEmptySubst $ mkInScopeSet $ exprFreeVars rhs) mapping
+    let subst = extendIdSubstList (mkEmptySubst inscope) mapping
 
     -- Substitute the alts in the expression
     let expr = substExpr subst rhs
