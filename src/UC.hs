@@ -73,7 +73,7 @@ dbg' :: String -> MaybeT CoreM ()
 dbg' = lift . putMsgS
 
 transforms :: CoreExpr -> CoreM CoreExpr
-transforms = fix fused >=> caseFold Map.empty 
+transforms = fix fused >=> duplicateCase Map.empty 
 
 fix :: FixPass -> CoreExpr -> CoreM CoreExpr
 fix f = everywhereM $ mkM go
@@ -90,36 +90,34 @@ fuse' p p' e = p e <|> p' e
 
 fused :: FixPass
 fused = fuse
-  [ inlineLet
-  , betaReduce
+  [ betaReduce
   , caseDistribute
-  , caseReduce
+  , foldCase
   , redundantCase
   ]
-
--- | Beta reduction (but with a let)
-inlineLet :: FixPass
-inlineLet = \case
-  Let (NonRec bind expr) body -> return $ substitute body bind expr
-  _ -> empty
 
 -- | Beta reduction
 betaReduce :: FixPass
 betaReduce = \case
+  -- Normal beta reduction.
   App (Lam bind body) arg -> return $ substitute body bind arg
-  _ -> empty
 
--- | substitute e1 x e2 = e1[x:=e2]
-substitute :: CoreExpr -> CoreBndr -> CoreExpr -> CoreExpr
-substitute body bind expr = do
-  let inScope = mkInScopeSet $ exprFreeVars body `unionVarSet` exprFreeVars expr
-  let subst = extendIdSubst (mkEmptySubst inScope) bind expr
-  let body' = substExpr subst body
-  body'
+  -- Reduction on let binding.
+  Let (NonRec bind expr) body -> return $ substitute body bind expr
+
+  _ -> empty
+  where
+    -- | substitute e1 x e2 = e1[x:=e2]
+    substitute :: CoreExpr -> CoreBndr -> CoreExpr -> CoreExpr
+    substitute body bind expr = do
+      let inScope = mkInScopeSet $ exprFreeVars body `unionVarSet` exprFreeVars expr
+      let subst = extendIdSubst (mkEmptySubst inScope) bind expr
+      let body' = substExpr subst body
+      body'
 
 -- | Reduces a case expression if the spine of the scrutinee is a constructor.
-caseReduce :: FixPass
-caseReduce = \case
+foldCase :: FixPass
+foldCase = \case
   Case scrut bind _ alts -> do
     -- Get the spine if it is a constructor.
     (ac, es) <- spine scrut
@@ -167,23 +165,14 @@ caseDistribute :: FixPass
 caseDistribute = \case
   -- Nested case
   Case cas@(Case {}) bind ty alts -> do
-    unique <- lift getUniqueM
-    let temp = flip setVarType (exprType cas)
-             . flip setVarUnique unique
-             . flip lazySetIdInfo (setOneShotInfo vanillaIdInfo OneShotLam)
-             $ bind
+    temp <- tempVar bind $ exprType cas
     let fun = Lam temp (Case (Var temp) bind ty alts)
     distribute fun cas
 
   -- Inline argument into case
   App cas@(Case _ bind _ _) arg -> do
-    unique <- lift getUniqueM
-    let temp = flip setVarType (exprType cas)
-             . flip setVarUnique unique
-             . flip lazySetIdInfo (setOneShotInfo vanillaIdInfo OneShotLam)
-             $ bind
+    temp <- tempVar bind $ exprType cas
     let fun = Lam temp (App (Var temp) arg)
-
     distribute fun cas
 
   -- Inline function into case
@@ -196,19 +185,15 @@ caseDistribute = \case
         -- Create a temporary unique variable. We will substitute this variable
         -- for the given function using substExpr, which will make sure that all
         -- the variable renaming is correctly handled.
-        unique <- lift getUniqueM
-        let temp = flip setVarType (exprType fun)
-                 . flip setVarUnique unique
-                 . flip lazySetIdInfo (setOneShotInfo vanillaIdInfo OneShotLam)
-                 $ bind
+        temp <- tempVar bind (exprType fun)
 
         -- Distribute the temporary variable as the function to every rhs.
         let distribute' (Alt c bs rhs) = Alt c bs (App (Var temp) rhs)
         let alts' = distribute' <$> alts
 
         -- Get the type for the new case statement and create the new case.
-        let ty' = coreAltsType alts'
-        let expr = Case scrut bind ty' alts'
+        let ty = coreAltsType alts'
+        let expr = Case scrut bind ty alts'
 
         -- Get all variables that are in scope
         let inscope = mkInScopeSet $ exprFreeVars expr `unionVarSet` exprFreeVars fun
@@ -221,6 +206,19 @@ caseDistribute = \case
         return $ substExpr subst expr
 
       _ -> empty
+
+    -- Creates a temporary var that should be used for a single substitution.
+    -- Substituting this temporary variable via substExpr makes sure that
+    -- variable renaming is handled correctly. Otherwise, we must take great
+    -- care to avoid variable capture.
+    tempVar bind ty = do
+        unique <- lift getUniqueM
+        let info = setOneShotInfo vanillaIdInfo OneShotLam
+        let temp = flip setVarType ty
+                 . flip setVarUnique unique
+                 . flip lazySetIdInfo info
+                 $ bind
+        return temp
 
 -- | Removes obselete cases. That is, cases whose result will not change
 -- depending on the value of the scrutinee.
@@ -303,8 +301,8 @@ instance Ord CmpExpr where
 -- FIXME: I think there is an issue with the fold given a default branch:
 -- we cannot always fold a branch in this case I think. Maybe we could do
 -- something like include it in the outer case?
-caseFold :: Map CmpExpr (AltCon, [CoreBndr]) -> CoreExpr -> CoreM CoreExpr
-caseFold scruts = \case
+duplicateCase :: Map CmpExpr (AltCon, [CoreBndr]) -> CoreExpr -> CoreM CoreExpr
+duplicateCase scruts = \case
   -- We have case split over this scrutinee if we enter this case. Thus, we can
   -- remove the case split by selecting the branch that was taken previously.
   -- We take care of the binders in the term to reference the outer case.
@@ -326,7 +324,7 @@ caseFold scruts = \case
     let expr = substExpr subst rhs
 
     -- Attempt to fold more cases in the new expression.
-    caseFold scruts expr
+    duplicateCase scruts expr
 
   -- We have not case split over this scrutinee before, thus we add it to the
   -- map and continue. We do not have to traverse the scrutinee itself for the
@@ -335,8 +333,8 @@ caseFold scruts = \case
   Case scrut bind ty alts -> do
     let withAlt (Alt c bs rhs) = do
           let scruts' = Map.insert (CmpExpr scrut) (c, bs) scruts
-          Alt c bs <$> caseFold scruts' rhs
+          Alt c bs <$> duplicateCase scruts' rhs
 
     Case scrut bind ty <$> mapM withAlt alts
 
-  e -> gmapM (mkM $ caseFold scruts) e
+  e -> gmapM (mkM $ duplicateCase scruts) e
