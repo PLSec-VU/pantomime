@@ -21,8 +21,10 @@ description:         Please see the README on GitHub at <https://github.com/gith
 
 default-extensions:
 - DeriveDataTypeable
-- TypeApplications
+- DeriveTraversable
 - LambdaCase
+- TemplateHaskell
+- TypeApplications
 
 dependencies:
 - base >= 4.7 && < 5
@@ -30,6 +32,7 @@ dependencies:
 - syb >= 0.7.2.4
 - containers
 - transformers
+- template-haskell
 
 ghc-options:
 - -Wall

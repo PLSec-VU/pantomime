@@ -1,12 +1,13 @@
+{-# LANGUAGE TemplateHaskell #-}
 module Main
   ( main
-  , adder'
-  , adder''
+  , adder
+  -- , adder''
   -- , test
   -- , testRedundantCase
   ) where
 
-import UC (UC (..))
+import UC
 
 -- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
 -- adder = \s -> \i -> case s of
@@ -37,33 +38,40 @@ import UC (UC (..))
 --     circuit _ (Just (a, b)) = (Just (a + b), Nothing)
 --     circuit _ _ = (Nothing, Nothing)
 
-{-# ANN adder' UC #-}
-adder' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
-adder' = sproj ignore circuit
-  where
-    sproj proj impl s i = let (s', o) = impl s i in (proj s', o)
+ignore :: Eq a => Num a => Maybe a -> Maybe Bool
+ignore (Just v) = Just (v == 0)
+ignore _ = Nothing
 
-    ignore (Just v) = Just (v == 0)
-    ignore _ = Nothing
+{-# ANN adder (UC 'ignore) #-}
+adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
+adder s i = case s of
+  Just val -> (Nothing, Just val)
+  _ -> case i of
+    Just ab -> case ab of
+      (a, b) -> (Just $ a + b, Nothing)
+    Nothing -> (Nothing, Nothing)
 
-    circuit :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
-    circuit (Just val) _ = (Nothing, Just (val == 0))
-    circuit _ (Just (a, b)) = (Just (a + b), Nothing)
-    circuit _ _ = (Nothing, Nothing)
+-- {-# ANN adder' UC #-}
+-- adder' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+-- adder' = sproj ignore circuit
+--   where
+--     sproj proj impl s i = let (s', o) = impl s i in (proj s', o)
 
-{-# ANN adder'' UC #-}
-adder'' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
-adder'' = sproj' ignore circuit
-  where
-    sproj' proj impl s = impl (proj s)
+--     circuit :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
+--     circuit (Just val) _ = (Nothing, Just (val == 0))
+--     circuit _ (Just (a, b)) = (Just (a + b), Nothing)
+--     circuit _ _ = (Nothing, Nothing)
 
-    ignore (Just v) = Just (v == 0)
-    ignore _ = Nothing
+-- {-# ANN adder'' UC #-}
+-- adder'' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+-- adder'' = sproj' ignore circuit
+--   where
+--     sproj' proj impl s = impl (proj s)
 
-    circuit :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
-    circuit (Just val) _ = (Nothing, Just val)
-    circuit _ (Just (a, b)) = (Just (a + b == 0), Nothing)
-    circuit _ _ = (Nothing, Nothing)
+--     circuit :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+--     circuit (Just val) _ = (Nothing, Just val)
+--     circuit _ (Just (a, b)) = (Just (a + b == 0), Nothing)
+--     circuit _ _ = (Nothing, Nothing)
 
 -- {-# ANN testRedundantCase UC #-}
 -- testRedundantCase :: Int -> Int
