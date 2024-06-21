@@ -1,97 +1,112 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Main
   ( main
-  , adder
-  -- , adder''
-  -- , test
-  -- , testRedundantCase
+  --, adder
+  --, before_sproj
+  --, sproj_left
+  --, sproj_right
+   , after_sproj
+  , sim 
   ) where
 
 import UC
+----------------------------
+-- | Helper functions
+----------------------------
+ignore :: Maybe a -> Maybe ()
+ignore = \i -> case i of
+  (Just _) -> Just ()
+  _        -> Nothing
 
--- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
--- adder = \s -> \i -> case s of
---   Just val -> (Nothing, Just val)
---   _ -> case i of
---     Just ab -> case ab of
---       (a, b) -> (Just (a + b), Nothing)
---     Nothing -> (Nothing, Nothing)
+-- ------------------------------------------------------------------------  
+-- {-- Rewrite step 1: initial to just before the state projection.  --}
+-- ------------------------------------------------------------------------  
 
--- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
--- adder s i = case s of
---   Just val -> (Nothing, Just val)
---   _ -> case i of
---     Just ab -> case ab of
---       (a, b) -> (Just (a + b), Nothing)
---     Nothing -> (Nothing, Nothing)
-
--- {-# ANN adder' UC #-}
--- adder' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
--- adder' = oproj ignore circuit
---   where
---     oproj obs impl s i = let (s', o) = impl s i in (s', obs o)
-
---     ignore (Just v) = Just (v == 0)
---     ignore Nothing = Nothing
-
---     circuit (Just val) _ = (Nothing, Just val)
---     circuit _ (Just (a, b)) = (Just (a + b), Nothing)
---     circuit _ _ = (Nothing, Nothing)
-
-ignore :: Eq a => Num a => Maybe a -> Maybe Bool
-ignore (Just v) = Just (v == 0)
-ignore _ = Nothing
-
+-- | the annotation (UC 'ignore) means we'll apply ignore as the output projection
 {-# ANN adder (UC 'ignore) #-}
 adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
-adder s i = case s of
-  Just val -> (Nothing, Just val)
+adder = \s -> \i -> case s of
+    Just val -> (Nothing, Just val)
+    _        -> case i of
+      Just ab -> case ab of
+       (a, b) -> (Just (a + b), Nothing)
+      Nothing -> (Nothing, Nothing)
+
+-- | Here, we're only applying output projection id
+{-# ANN before_sproj (UC 'id) #-}
+before_sproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
+before_sproj = \s -> \i -> case s of
+  Just _ -> (Nothing, Just ())
   _ -> case i of
     Just ab -> case ab of
-      (a, b) -> (Just $ a + b, Nothing)
+      (a, b) -> (Just (a + b), Nothing)
     Nothing -> (Nothing, Nothing)
 
--- {-# ANN adder' UC #-}
--- adder' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
--- adder' = sproj ignore circuit
---   where
---     sproj proj impl s i = let (s', o) = impl s i in (proj s', o)
+------------------------------------------------------------------------------------------------------  
+{-- Rewrite step 2: this is the rewrite we need to show in order to apply the state projection.  --}
+------------------------------------------------------------------------------------------------------    
 
---     circuit :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
---     circuit (Just val) _ = (Nothing, Just (val == 0))
---     circuit _ (Just (a, b)) = (Just (a + b), Nothing)
---     circuit _ _ = (Nothing, Nothing)
+{-# ANN sproj_left (UC 'id) #-}
+sproj_left :: Maybe Int -> Maybe (Int, Int) -> (Maybe (), Maybe ())
+sproj_left = sproj ignore go
+  where
+    sproj mask impl s i =  case impl s i of (s', o) -> (mask s', o)
+    -- 
+    ignore (Just _) = Just ()
+    ignore _ = Nothing
+    --
+    go = \s -> \i -> case s of
+      Just _ -> (Nothing, Just ())
+      _   -> case i of
+        Just ab -> case ab of
+          (a, b) -> (Just (a + b), Nothing)
+        Nothing -> (Nothing, Nothing)
 
--- {-# ANN adder'' UC #-}
--- adder'' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
--- adder'' = sproj' ignore circuit
---   where
---     sproj' proj impl s = impl (proj s)
 
---     circuit :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
---     circuit (Just val) _ = (Nothing, Just val)
---     circuit _ (Just (a, b)) = (Just (a + b == 0), Nothing)
---     circuit _ _ = (Nothing, Nothing)
+{-# ANN sproj_right (UC 'id) #-}
+sproj_right :: Maybe Int -> Maybe (Int, Int) -> (Maybe (), Maybe ())
+sproj_right s i = go (ignore s) i
+  where
+    --
+    ignore (Just _) = Just ()
+    ignore _ = Nothing
+    --
+    go = \s -> \i -> case s of
+      Just _ -> (Nothing, Just ())
+      _   -> case i of
+        Just ab -> case ab of
+          (a, b) -> (Just (), Nothing)
+        Nothing -> (Nothing, Nothing)
 
--- {-# ANN testRedundantCase UC #-}
--- testRedundantCase :: Int -> Int
--- testRedundantCase x = case x of
---   0 -> x + 1
---   _ -> x + 1
+-- ----------------------------------------------------------------------------------------------  
+-- {-- Rewrite step 3: after the state projection to leakage description + simulator.  --}
+-- ----------------------------------------------------------------------------------------------  
 
--- {-# ANN adder' UC #-}
--- adder' :: Int -> Int
--- adder' x = (case x of
---   0 -> 5
---   _ -> x)
---   + 1
+{-# ANN after_sproj (UC 'id) #-}
+after_sproj :: Maybe () -> Maybe (Int, Int) -> (Maybe (), Maybe ())
+after_sproj = (\s -> \i -> case s of
+  Just val -> (Nothing, Just ())
+  _ -> case i of
+    Just ab -> case ab of
+      (a, b) -> (ignore $ Just (a, b), Nothing)
+    Nothing -> (Nothing, Nothing))
+  where 
+    ignore (Just _) = Just ()
+    ignore _ = Nothing
 
--- plus1 :: Maybe Int -> Maybe Int
--- plus1 = fmap (+1)
+{-# ANN sim (UC 'id) #-}
+sim :: Maybe () -> Maybe (Int, Int) -> (Maybe (), Maybe ())
+sim s i = go s (ignore i)
+  where
+  go = \s -> \i -> case s of
+    Just () -> (Nothing, Just ())
+    _       -> case i of
+      Just () -> (Just (), Nothing)
+      Nothing -> (Nothing, Nothing)
 
--- {-# ANN test UC #-}
--- test :: Maybe Int -> (Maybe Int, Maybe Int)
--- test y = let plus1 = fmap (+1) in let x = plus1 y in (x, x)
+  ignore (Just _) = Just ()
+  ignore _ = Nothing
+
 
 main :: IO ()
 main = return ()
