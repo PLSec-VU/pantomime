@@ -1,7 +1,12 @@
+{-# LANGUAGE FlexibleContexts #-}
 module Types
   ( UC (..)
   , UCGenerated (..)
   , ucGenAnn
+
+  , UCCompare (..)
+  , UCCheck (..)
+  -- , mkCheck
 
   , Bind' (..)
   , CoreBind'
@@ -13,6 +18,42 @@ module Types
 import Data.Data
 import GHC.Plugins
 
+data UCCheck a = UCCheck
+  { ch_obs :: a
+  -- ^ Observation function
+  --
+  -- o -> o'
+
+  , ch_impl :: a
+  -- ^ Implementation
+  --
+  -- Circuit s i o
+
+  , ch_ignfun :: a
+  -- ^ Ignore state
+  --
+  -- s -> s'
+
+  , ch_ignsim :: a
+  -- ^ Simulator that uses sub-state
+  --
+  -- Circuit s' i o'
+
+  , ch_leak :: a
+  -- ^ Leakage function
+  --
+  -- i -> i'
+
+  , ch_sim :: a
+  -- ^ Simulator
+  --
+  -- Circuit s' i' o'
+  }
+  deriving (Data, Typeable, Functor, Traversable, Foldable)
+
+newtype UCCompare a = UCCompare a
+  deriving (Data, Typeable, Functor, Traversable, Foldable)
+
 -- | The main annotation for this plugin.
 newtype UC a = UC
   { observable :: a
@@ -23,18 +64,21 @@ instance Outputable a => Outputable (UC a) where
   ppr (UC obs) = text "UC" <+> ppr obs
 
 -- | An annotation we use to denote binders that were generated for a UC check.
-data UCGenerated = UCGenerated
+-- In general, the checks will perform rewrites that are generally not optimal
+-- for codegen. Hence, we create new binders so we can perform rewrites without
+-- affecting the eventual program synthesis.
+newtype UCGenerated a = UCGenerated a
   deriving (Data, Typeable)
 
 -- | Create an annotation to mark that the given binder was generated.
-ucGenAnn :: CoreBind' -> Annotation
-ucGenAnn (Bind' var _) = Annotation
+ucGenAnn :: Data a => a -> CoreBind' -> Annotation
+ucGenAnn x (Bind' var _) = Annotation
   { ann_target = NamedTarget $ varName var
-  , ann_value = toSerialized serializeWithData UCGenerated
+  , ann_value = toSerialized serializeWithData (UCGenerated x)
   }
 
-instance Outputable UCGenerated where
-  ppr _ = text "UCGenerated"
+instance Outputable a => Outputable (UCGenerated a) where
+  ppr x = text "UCGenerated:" <+> ppr x
 
 -- | An always non-recursive binder.
 data Bind' a = Bind' a (Expr a)

@@ -55,6 +55,7 @@ library
 executable uc-plugin-exe
   main-is: Main.hs
   other-modules:
+      RW
       Paths_uc_plugin
   autogen-modules:
       Paths_uc_plugin

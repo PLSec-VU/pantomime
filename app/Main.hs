@@ -1,13 +1,11 @@
-{-# LANGUAGE TemplateHaskell #-}
 module Main
   ( main
   , adder
-  -- , adder''
-  -- , test
-  -- , testRedundantCase
+  , test
   ) where
 
 import UC
+import Types (UCCheck (..))
 
 -- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
 -- adder = \s -> \i -> case s of
@@ -38,7 +36,11 @@ import UC
 --     circuit _ (Just (a, b)) = (Just (a + b), Nothing)
 --     circuit _ _ = (Nothing, Nothing)
 
-ignore :: Eq a => Num a => Maybe a -> Maybe Bool
+-- ignore :: Eq a => Num a => Maybe a -> Maybe Bool
+-- ignore (Just v) = Just (v == 0)
+-- ignore _ = Nothing
+
+ignore :: Maybe Int -> Maybe Bool
 ignore (Just v) = Just (v == 0)
 ignore _ = Nothing
 
@@ -49,49 +51,53 @@ adder s i = case s of
   _ -> case i of
     Just ab -> case ab of
       (a, b) -> (Just $ a + b, Nothing)
-    Nothing -> (Nothing, Nothing)
+    _ -> (Nothing, Nothing)
 
--- {-# ANN adder' UC #-}
--- adder' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
--- adder' = sproj ignore circuit
---   where
---     sproj proj impl s i = let (s', o) = impl s i in (proj s', o)
+ignsim :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+ignsim s i = case s of
+  Just val -> (Nothing, Just val)
+  _ -> case i of
+    Just ab -> case ab of
+      (a, b) -> (Just $ a + b == 0, Nothing)
+    _ -> (Nothing, Nothing)
 
---     circuit :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
---     circuit (Just val) _ = (Nothing, Just (val == 0))
---     circuit _ (Just (a, b)) = (Just (a + b), Nothing)
---     circuit _ _ = (Nothing, Nothing)
+leak :: Maybe (Int, Int) -> Maybe Bool
+leak (Just (a, b)) = Just $ a + b == 0
+leak _ = Nothing
 
--- {-# ANN adder'' UC #-}
--- adder'' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
--- adder'' = sproj' ignore circuit
---   where
---     sproj' proj impl s = impl (proj s)
+sim :: Maybe Bool -> Maybe Bool -> (Maybe Bool, Maybe Bool)
+sim s i = case s of
+  Just val -> (Nothing, Just val)
+  _ -> case i of
+    Just eq -> (Just eq, Nothing)
+    _ -> (Nothing, Nothing)
 
---     circuit :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
---     circuit (Just val) _ = (Nothing, Just val)
---     circuit _ (Just (a, b)) = (Just (a + b == 0), Nothing)
---     circuit _ _ = (Nothing, Nothing)
+{-# ANN test UCCheck
+  { ch_obs = 'ignore
+  , ch_impl = 'adder
+  , ch_ignfun = 'ignore
+  , ch_ignsim = 'ignsim
+  , ch_leak = 'leak
+  , ch_sim = 'sim
+  } #-}
+test :: ()
+test = ()
 
--- {-# ANN testRedundantCase UC #-}
--- testRedundantCase :: Int -> Int
--- testRedundantCase x = case x of
---   0 -> x + 1
---   _ -> x + 1
+-- void :: Maybe a -> Maybe ()
+-- void (Just _) = Just ()
+-- void _ = Nothing
 
--- {-# ANN adder' UC #-}
--- adder' :: Int -> Int
--- adder' x = (case x of
---   0 -> 5
---   _ -> x)
---   + 1
+-- adder2 :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
+-- adder2 = Projection.oproj void adder
 
--- plus1 :: Maybe Int -> Maybe Int
--- plus1 = fmap (+1)
-
--- {-# ANN test UC #-}
--- test :: Maybe Int -> (Maybe Int, Maybe Int)
--- test y = let plus1 = fmap (+1) in let x = plus1 y in (x, x)
+-- {-# ANN test (UCCompare 'adder2)#-}
+-- test :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
+-- test s i = case s of
+--   Just _ -> (Nothing, Just ())
+--   _ -> case i of
+--     Just ab -> case ab of
+--       (a, b) -> (Just $ a + b, Nothing)
+--     Nothing -> (Nothing, Nothing)
 
 main :: IO ()
 main = return ()

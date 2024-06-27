@@ -3,10 +3,12 @@ module Util
   , unwrap
   , (??=)
 
+  , freshTyVar
   , freshLocalVar
   , freshGlobalVar
 
   , resolveTH
+  , nameToCoreBind
   , thNameToGhcName'
 
   , polyApp
@@ -44,6 +46,13 @@ infixl 0 ??=
 (??=) :: MonadFail m => MaybeT m a -> String -> m a
 (??=) = unwrap
 
+freshTyVar :: MonadCore m => String -> Kind -> m Var
+freshTyVar name kind = do
+  unique <- liftCore getUniqueM
+  let name' = mkSystemName unique $ mkVarOcc name
+  let var = mkTyVar name' kind
+  return var
+
 -- | Creates a fresh variable.
 freshLocalVar :: MonadCore m => String -> Type -> m Var
 freshLocalVar name ty = do
@@ -62,9 +71,11 @@ freshGlobalVar name ty = do
 
 -- | Resolves all the binders in the UC structure.
 resolveTH :: (Alternative m, MonadCore m) => CoreProgram -> TH.Name -> m CoreBind'
-resolveTH prog = thNameToGhcName' >=> toCorebind
-  where
-    toCorebind name = findInProgram prog name <|> getUnfolding name
+resolveTH prog = thNameToGhcName' >=> nameToCoreBind prog
+
+-- | Fetches the (non-recursive) core binder corresponding to the name.
+nameToCoreBind :: (Alternative m, MonadCore m) => CoreProgram -> Name -> m CoreBind'
+nameToCoreBind prog name = findInProgram prog name <|> getUnfolding name
 
 -- | Attempts to convert a template haskell name into a Core name. Wrapper of
 -- `thNameToGhcName`, but made polymorphic on the monad.
@@ -108,6 +119,10 @@ polyApp fExpr aExpr = do
 
   -- Try to unify the required argument with the actual argument type.
   subst@(Subst _ _ tvSubst _) <- maybeM $ tcUnifyTy argTyRequired argTy
+  -- TODO: Really I want to give some Result type here as return. For error
+  -- reporting, it would be really nice if it tells us why unification failed
+  -- (or with the check above that the first argument was not actually a
+  -- function).
 
   -- Converts a type variable into its corresponding type application. The
   -- only thing this does is use the unified version of said type variable if
@@ -143,15 +158,10 @@ polyApp fExpr aExpr = do
   aExpr' <- apply aTyVars aPiTys aExpr
   let expr = App fExpr' aExpr'
 
-  -- Adjusts the type of the typeclass variables to match the unification.
-  let adjustTy var = do
-        let ty = substTy subst $ varType var
-        setVarType var ty
+  -- Get the free type variables and dictionaries in the expression. We
+  -- introduce abstractions for all the free variables, making the expression
+  -- well-formed.
+  let tyVarsAndPiArgs = exprFreeVarsList expr
+  let expr' = foldr Lam expr tyVarsAndPiArgs
 
-  -- Get the free type variables and typeclass in the expression. Map them to
-  -- match the unification.
-  let tyVarsAndPiTys = adjustTy <$> exprFreeVarsList expr
-
-  -- Now we introduce abstractions for all the free variables, making the
-  -- expression well-formed.
-  return $ foldr Lam expr tyVarsAndPiTys
+  return expr'
