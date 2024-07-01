@@ -44,10 +44,21 @@ ignore :: Maybe Int -> Maybe Bool
 ignore (Just v) = Just (v == 0)
 ignore _ = Nothing
 
+-- | the annotation (UC 'ignore) means we'll apply ignore as the output projection
 {-# ANN adder (UC 'ignore) #-}
 adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
-adder s i = case s of
-  Just val -> (Nothing, Just val)
+adder = \s -> \i -> case s of
+    Just val -> (Nothing, Just val)
+    _        -> case i of
+      Just ab -> case ab of
+       (a, b) -> (Just (a + b), Nothing)
+      Nothing -> (Nothing, Nothing)
+
+-- | Here, we're only applying output projection id
+{-# ANN before_sproj (UC 'id) #-}
+before_sproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
+before_sproj = \s -> \i -> case s of
+  Just _ -> (Nothing, Just ())
   _ -> case i of
     Just ab -> case ab of
       (a, b) -> (Just $ a + b, Nothing)
