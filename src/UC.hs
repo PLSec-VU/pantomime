@@ -18,7 +18,7 @@ import GHC.MonadCore
 import qualified Data.Map as Map
 import Data.Map (Map)
 import Data.List (foldl', nubBy)
-import Data.Maybe (fromJust, catMaybes)
+import Data.Maybe (fromMaybe, fromJust, catMaybes)
 
 import Data.Data
 import Generics.SYB hiding (empty)
@@ -54,8 +54,10 @@ install _ todo = return $ checkPasses <> cmpPasses <> inferPasses <> todo
       , CoreDoPluginPass "ProjectOutput" projectOutput
       , inlineAllPass proxy
       , dedupCasesPass proxy
-      , printAndLintPass proxy
+      -- , printAndLintPass proxy
       -- , CoreDoPluginPass "SplitExprs" splitExprs
+      -- , CoreDoPluginPass "splitExpr" $ splitExprs proxy
+      , printAndLintPass proxy
       -- , CoreDoPluginPass "PrintUCGenerated" printUCGenerated
       -- , CoreLiberateCase
       -- , CoreDoPluginPass "PrintUCGenerated" printUCGenerated
@@ -193,13 +195,13 @@ doCheck' prog uc bind = do
 
   let normalize = inlineAll >=> dedupCases
 
-  let cmp msg lhs rhs = do
+  let cmp errmsg lhs rhs = do
         lhs'@(Bind' lvar lexp) <- normalize lhs
         rhs'@(Bind' rvar rexp) <- normalize rhs
         unless (lexp `eqCoreExpr` rexp) $ do
           dbg lhs'
           dbg rhs'
-          fail $ msg <> ": " <> show' lvar <> " =/= " <> show' rvar
+          fail $ errmsg <> ": " <> show' lvar <> " =/= " <> show' rvar
 
   oprojected <- app' oproj [obs, impl]
   sprojected <- app' sproj [ignfun, oprojected]
@@ -237,6 +239,7 @@ inlineAll (Bind' x e) = do
         , foldCase
         , redundantCase
         , extractLambda
+        , undefaultCase
         ]
 
   e' <- occurAnalyseExpr <$> fix fused e
@@ -251,7 +254,7 @@ dedupCases (Bind' x e) = do
 -- | Project the output of all generated UC binders, according to the
 -- observation function in the annotation.
 projectOutput :: MonadFail m => MonadCore m => Pass m ModGuts
-projectOutput guts = flip annBindsPass guts $ \uc (Bind' var expr) -> do
+projectOutput guts = flip annBindsPass guts $ \(UCGenerated uc) (Bind' var expr) -> do
   let prog = mg_binds guts
 
   Bind' _ oproj <- resolveTH prog 'Projection.oproj
@@ -396,6 +399,9 @@ foldCase = \case
       let args' = trimConArgs con args
       return (con, args')
 
+-- | Extracts functions out of case statements. That is, for any case statement
+-- that has a function type, we apply a fresh argument which we introduce with a
+-- lambda.
 extractLambda :: (Alternative m, MonadCore m) => Pass m CoreExpr
 extractLambda  = \case
   Case scrut bind ty alts | Just (_, _, argTy, resTy) <- splitFunTy_maybe ty -> do
@@ -404,14 +410,6 @@ extractLambda  = \case
     let alts' = appAlt <$> alts
     let expr = Lam var $ Case scrut bind resTy alts'
     return expr
-    -- let expr = Lam var $ App cas (Var var)
-    -- dbg' "=========================="
-    -- dbg cas
-    -- dbg' "--------------------------"
-    -- dbg expr
-    -- dbg ty
-    -- return expr
-    -- empty
 
   _ -> empty
 
@@ -464,6 +462,44 @@ caseDistribute = \case
         return $ substExpr subst expr
 
       _ -> empty
+
+undefaultCase :: (Alternative m, MonadCore m) => Pass m CoreExpr
+undefaultCase = \case
+  Case scrut bind ty alts -> do
+    -- Get the dataconstructors for this scrutinee. Note that we only remove
+    -- default cases for dataconstructors. That is, we cannot really do this
+    -- in the same way for types with infinite constructors such as literals.
+    let scrutTy = exprType scrut
+    (tycon, _) <- maybeM $ tcSplitTyConApp_maybe scrutTy
+    datacons <- maybeM $ tyConDataCons_maybe tycon
+
+    -- Get the default value and remaining alts. We return if there doesn't
+    -- exist a default branch.
+    let (alts', def) = findDefault alts
+    def' <- maybeM def
+
+    -- Transforms the given dataconstructor into an 'excplicit' alternative.
+    -- That is, the alt is never a default pattern.
+    let toExplicit con = do
+          let con' = DataAlt con
+          let alt = findAlt con' alts'
+          let explicitDefault = Alt con' [] def'
+          fromMaybe explicitDefault alt
+
+    -- Make all alts explicit, such that no default branch exists in this case
+    -- expression.
+    let alts'' = toExplicit <$> datacons
+
+    return $ Case scrut bind ty alts''
+
+  _ -> empty
+
+-- reorderCases :: (Alternative m, MonadCore m) => Pass m CoreExpr
+-- reorderCases = \case
+--   Case scrut bind ty alts -> do
+--     empty
+
+--   _ -> empty
 
 -- -- | Factor out applications in a case statement. This is roughly the inverse
 -- -- operation of distributing a case.
@@ -534,9 +570,9 @@ caseFactor = \case
 
     -- Get the first application in the alts. If there exists none, then we
     -- simply return empty as we cannot distribute this case expression.
-    let getApp (Alt _ _ e@(App fun arg))
+    let getApp (Alt _ _ rhs@(App fun arg))
           | not $ isTypeArg arg
-          , not $ e `eqCoreExpr` impossible = return (fun, arg)
+          , not $ rhs `eqCoreExpr` impossible = return (fun, arg)
         getApp _ = empty
     (fun, arg) <- asum $ getApp <$> alts
 
@@ -579,7 +615,7 @@ caseFactor = \case
 
     dbg' "----------------"
     dbg expr
-    return expr
+    empty
   _ -> empty
 
 -- | Removes obselete cases. That is, cases whose result will not change
