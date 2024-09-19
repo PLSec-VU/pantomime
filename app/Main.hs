@@ -1,12 +1,59 @@
 module Main
-  ( main
-  , adder
-  , before_sproj
+  ( main,
+  addr2,
+  addr_obs2,
+  leak_sim2
   -- , test
   ) where
 
 import UC
--- import Types (UCCheck (..))
+import Types (UCCheck (..))
+
+--- Encoding the simulation proof for 3-adder
+
+ignore :: Maybe Int -> Maybe ()
+ignore (Just v) = Just ()
+ignore _ = Nothing
+
+-- We only leak timing
+leak2 :: (Maybe Int, Maybe Int) -> (Maybe (), Maybe ())
+leak2 (a, b) = (ignore a, ignore b)
+
+-- our two input adder
+--{-# ANN addr2 (UC 'ignore) #-}
+addr2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe Int)
+addr2 _ (Just a, Just b) = ((), Just (a + b))
+addr2 _ _ = ((), Nothing)
+
+{-# ANN addr_obs2 (UC 'id) #-}
+addr_obs2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe ())
+addr_obs2 s i = let (s1, o) = addr2 s i in (s1, ignore o)
+    
+sim2 :: () -> (Maybe (), Maybe ()) -> ((), Maybe ())
+sim2 _ (Just _, Just _) = ((), Just ())
+sim2 _ _ = ((), Nothing)
+
+--{-# ANN leak_sim2 (UCCompare 'addr_obs2)#-}
+{-# ANN leak_sim2 (UC 'id) #-}
+leak_sim2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe ())
+leak_sim2 s i = sim2 s (leak2 i)
+
+-- observation funciton
+obs :: Maybe Int -> Maybe ()
+obs = ignore
+
+
+-- part 2: three adder proof
+
+-- three input adder: composes two two-adders
+-- addr3 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe Int)
+-- addr3 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
+--   where
+--     (s1', ab) = addr2 s1 (a,b)
+--     (s2', abc) = addr2 s2 (ab, c)
+
+
+{-------------------  Old stuff ---------------------}
 
 -- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
 -- adder = \s -> \i -> case s of
@@ -41,29 +88,25 @@ import UC
 -- ignore (Just v) = Just (v == 0)
 -- ignore _ = Nothing
 
-ignore :: Maybe Int -> Maybe Bool
-ignore (Just v) = Just (v == 0)
-ignore _ = Nothing
-
--- | the annotation (UC 'ignore) means we'll apply ignore as the output projection
-{-# ANN adder (UC 'ignore) #-}
-adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
-adder = \s -> \i -> case s of
-    Just val -> (Nothing, Just val)
-    _        -> case i of
-      Just ab -> case ab of
-       (a, b) -> (Just (a + b), Nothing)
-      Nothing -> (Nothing, Nothing)
+-- -- | the annotation (UC 'ignore) means we'll apply ignore as the output projection
+-- {-# ANN adder (UC 'ignore) #-}
+-- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
+-- adder = \s -> \i -> case s of
+--     Just val -> (Nothing, Just val)
+--     _        -> case i of
+--       Just ab -> case ab of
+--        (a, b) -> (Just (a + b), Nothing)
+--       Nothing -> (Nothing, Nothing)
 
 -- | Here, we're only applying output projection id
-{-# ANN before_sproj (UC 'id) #-}
-before_sproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
-before_sproj = \s -> \i -> case s of
-  Just _ -> (Nothing, Just ())
-  _ -> case i of
-    Just ab -> case ab of
-      (a, b) -> (Just $ a + b, Nothing)
-    _ -> (Nothing, Nothing)
+-- {-# ANN before_sproj (UC 'id) #-}
+-- before_sproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
+-- before_sproj = \s -> \i -> case s of
+--   Just _ -> (Nothing, Just ())
+--   _ -> case i of
+--     Just ab -> case ab of
+--       (a, b) -> (Just $ a + b, Nothing)
+--     _ -> (Nothing, Nothing)
 
 -- ignsim :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
 -- ignsim s i = case s of
