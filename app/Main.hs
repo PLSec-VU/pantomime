@@ -1,8 +1,12 @@
 module Main
   ( main,
-  addr2,
   addr_obs2,
-  leak_sim2
+  leak_sim2,
+  addr_obs3,
+  leak_sim3,
+  rw2,
+  rw4,
+  rw5
   -- , test
   ) where
 
@@ -10,149 +14,101 @@ import UC
 import Types (UCCheck (..))
 
 --- Encoding the simulation proof for 3-adder
+-- Part 1: 2-adder is correct wrt description leak2
 
-ignore :: Maybe Int -> Maybe ()
-ignore (Just v) = Just ()
-ignore _ = Nothing
-
--- We only leak timing
-leak2 :: (Maybe Int, Maybe Int) -> (Maybe (), Maybe ())
-leak2 (a, b) = (ignore a, ignore b)
-
--- our two input adder
---{-# ANN addr2 (UC 'ignore) #-}
-addr2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe Int)
-addr2 _ (Just a, Just b) = ((), Just (a + b))
-addr2 _ _ = ((), Nothing)
-
-{-# ANN addr_obs2 (UC 'id) #-}
+--{-# ANN addr_obs2 (UC 'id) #-}
 addr_obs2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe ())
-addr_obs2 s i = let (s1, o) = addr2 s i in (s1, ignore o)
+addr_obs2 s i = (s1, ignore o)
+    where
+  (s1, o) = addr2 s i
+  ignore (Just v) = Just ()
+  ignore _ = Nothing
+  addr2 _ (Just a, Just b) = ((), Just (a + b)) 
+  addr2 _ _ = ((), Nothing)
     
-sim2 :: () -> (Maybe (), Maybe ()) -> ((), Maybe ())
-sim2 _ (Just _, Just _) = ((), Just ())
-sim2 _ _ = ((), Nothing)
-
---{-# ANN leak_sim2 (UCCompare 'addr_obs2)#-}
-{-# ANN leak_sim2 (UC 'id) #-}
+-- check if leak_sim2 and addr_obs2 are equal
+{-# ANN leak_sim2 (UCCompare 'addr_obs2)#-}
 leak_sim2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe ())
 leak_sim2 s i = sim2 s (leak2 i)
+  where
+    -- leakage description
+    leak2 (Just a, Just b) =  (Just (), Just ())
+    leak2 _ = (Nothing, Nothing)
+    sim2 _ (Just _, Just _) = ((), Just ()) 
+    sim2 _ _ = ((), Nothing)
 
--- observation funciton
-obs :: Maybe Int -> Maybe ()
-obs = ignore
+-- Part 2: Three adder proof
 
+-- Three input adder: composes two two-adders
+--{-# ANN addr_obs3 (UC 'id) #-}
+addr_obs3 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
+addr_obs3 (s1, s2) ((a, b), c) = ((s1', s2'), ignore abc)
+   where
+    (s1', ab) = addr2 s1 (a, b)
+    (s2', abc) = addr2 s2 (ab, c)
+    addr2 _ (Just a, Just b) = ((), Just (a + b)) 
+    addr2 _ _ = ((), Nothing)
+    ignore (Just v) = Just ()
+    ignore _ = Nothing
 
--- part 2: three adder proof
+-- check if leak_sim3 and addr_obs3 are equal 
+-- non-compositional proof 
+{-# ANN leak_sim3 (UCCompare 'addr_obs3)#-}
+leak_sim3 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
+leak_sim3 (s1, s2) (ab, c) = ((s1', s2'), abc)
+  where
+    (s1', ab') = sim2 s1 (leak2 ab)
+    (s2', abc) = sim2 s2 (leak2 (ab', c))
+    sim2 _ (Just _, Just _) = ((), Just ()) 
+    sim2 _ _ = ((), Nothing)
+    leak2 (Just a, Just b) =  (Just (), Just ())
+    leak2 _ = (Nothing, Nothing)
+  
 
--- three input adder: composes two two-adders
--- addr3 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe Int)
--- addr3 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
---   where
---     (s1', ab) = addr2 s1 (a,b)
---     (s2', abc) = addr2 s2 (ab, c)
+-- Rewrite steps!
+-- check if that's the same as addr_obs3
+{-# ANN rw2 (UCCompare 'addr_obs3)#-}
+rw2 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
+rw2 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
+   where
+    (s1', ab) = addr2 s1 (a, b)
+    (s2', abc) = leak_sim2 s2 (ab, c)
+    addr2 _ (Just a, Just b) = ((), Just (a + b)) 
+    addr2 _ _ = ((), Nothing)
+    leak2 (Just a, Just b) =  (Just (), Just ())
+    leak2 _ = (Nothing, Nothing)
+    sim2 _ (Just _, Just _) = ((), Just ()) 
+    sim2 _ _ = ((), Nothing)
+    leak_sim2 s i = sim2 s (leak2 i)
 
+{-# ANN rw4 (UCCompare 'rw2)#-}
+rw4 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
+rw4 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
+   where
+    (s1', ab) = addr2 s1 (a, b)
+    ab' = ignore ab
+    (s2', abc) = sim2 s2 (ab', c)
+    addr2 _ (Just a, Just b) = ((), Just (a + b)) 
+    addr2 _ _ = ((), Nothing)
+    sim2 _ (Just _, Just _) = ((), Just ()) 
+    sim2 _ _ = ((), Nothing)
+    ignore (Just v) = Just ()
+    ignore _ = Nothing
 
-{-------------------  Old stuff ---------------------}
-
--- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
--- adder = \s -> \i -> case s of
---   Just val -> (Nothing, Just val)
---   _ -> case i of
---     Just ab -> case ab of
---       (a, b) -> (Just (a + b), Nothing)
---     Nothing -> (Nothing, Nothing)
-
--- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
--- adder s i = case s of
---   Just val -> (Nothing, Just val)
---   _ -> case i of
---     Just ab -> case ab of
---       (a, b) -> (Just (a + b), Nothing)
---     Nothing -> (Nothing, Nothing)
-
--- {-# ANN adder' UC #-}
--- adder' :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
--- adder' = oproj ignore circuit
---   where
---     oproj obs impl s i = let (s', o) = impl s i in (s', obs o)
-
---     ignore (Just v) = Just (v == 0)
---     ignore Nothing = Nothing
-
---     circuit (Just val) _ = (Nothing, Just val)
---     circuit _ (Just (a, b)) = (Just (a + b), Nothing)
---     circuit _ _ = (Nothing, Nothing)
-
--- ignore :: Eq a => Num a => Maybe a -> Maybe Bool
--- ignore (Just v) = Just (v == 0)
--- ignore _ = Nothing
-
--- -- | the annotation (UC 'ignore) means we'll apply ignore as the output projection
--- {-# ANN adder (UC 'ignore) #-}
--- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
--- adder = \s -> \i -> case s of
---     Just val -> (Nothing, Just val)
---     _        -> case i of
---       Just ab -> case ab of
---        (a, b) -> (Just (a + b), Nothing)
---       Nothing -> (Nothing, Nothing)
-
--- | Here, we're only applying output projection id
--- {-# ANN before_sproj (UC 'id) #-}
--- before_sproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
--- before_sproj = \s -> \i -> case s of
---   Just _ -> (Nothing, Just ())
---   _ -> case i of
---     Just ab -> case ab of
---       (a, b) -> (Just $ a + b, Nothing)
---     _ -> (Nothing, Nothing)
-
--- ignsim :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
--- ignsim s i = case s of
---   Just val -> (Nothing, Just val)
---   _ -> case i of
---     Just ab -> case ab of
---       (a, b) -> (Just $ a + b == 0, Nothing)
---     _ -> (Nothing, Nothing)
-
--- leak :: Maybe (Int, Int) -> Maybe Bool
--- leak (Just (a, b)) = Just $ a + b == 0
--- leak _ = Nothing
-
--- sim :: Maybe Bool -> Maybe Bool -> (Maybe Bool, Maybe Bool)
--- sim s i = case s of
---   Just val -> (Nothing, Just val)
---   _ -> case i of
---     Just eq -> (Just eq, Nothing)
---     _ -> (Nothing, Nothing)
-
--- {-# ANN test UCCheck
---   { ch_obs = 'ignore
---   , ch_impl = 'adder
---   , ch_ignfun = 'ignore
---   , ch_ignsim = 'ignsim
---   , ch_leak = 'leak
---   , ch_sim = 'sim
---   } #-}
--- test :: ()
--- test = ()
-
--- void :: Maybe a -> Maybe ()
--- void (Just _) = Just ()
--- void _ = Nothing
-
--- adder2 :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
--- adder2 = Projection.oproj void adder
-
--- {-# ANN test (UCCompare 'adder2)#-}
--- test :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
--- test s i = case s of
---   Just _ -> (Nothing, Just ())
---   _ -> case i of
---     Just ab -> case ab of
---       (a, b) -> (Just $ a + b, Nothing)
---     Nothing -> (Nothing, Nothing)
+{-# ANN rw5 (UCCompare 'rw4)#-}
+{-# ANN rw5 (UCCompare 'leak_sim3)#-}
+rw5 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
+rw5 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
+   where
+    (s1', ab) = leak_sim2 s1 (a, b)
+    (s2', abc) = sim2 s2 (ab, c)
+    addr2 _ (Just a, Just b) = ((), Just (a + b)) 
+    addr2 _ _ = ((), Nothing)
+    sim2 _ (Just _, Just _) = ((), Just ()) 
+    sim2 _ _ = ((), Nothing)
+    leak2 (Just a, Just b) =  (Just (), Just ())
+    leak2 _ = (Nothing, Nothing)
+    leak_sim2 s i = sim2 s (leak2 i)
 
 main :: IO ()
 main = return ()
