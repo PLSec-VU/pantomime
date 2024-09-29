@@ -33,6 +33,7 @@ import Data.Maybe (fromMaybe, fromJust)
 import Data.Map (Map)
 import qualified Data.Map as Map
 
+import Control.Monad.Trans.Maybe
 import Control.Monad (guard, forM)
 
 import Types
@@ -58,8 +59,10 @@ normalize e = do
         , undefaultCase
         ]
 
-  e' <- occurAnalyseExpr <$> fix fused e
-  occurAnalyseExpr <$> dedupCases e'
+  e0 <- occurAnalyseExpr <$> fix fused e
+  e1 <- occurAnalyseExpr <$> iterativeReorder [] e0
+  e2 <- occurAnalyseExpr <$> dedupCases e1
+  return e2
 
 -- | Beta reduction
 betaReduce :: (Alternative m, Monad m) => Pass m CoreExpr
@@ -91,7 +94,9 @@ inlineUnfolding = \case
 -- | Inline definitions that are local to the current module.
 inlineLocal :: Alternative m => MonadMod m => Pass m CoreExpr
 inlineLocal = \case
-  Var x -> findLocal x
+  Var x -> do
+    Bind' _ e <- findLocal' (== x)
+    return e
   _ -> empty
 
 -- | Reduces a case expression if the spine of the scrutinee is a constructor.
@@ -434,10 +439,18 @@ compareScrut def lhs rhs = do
     (False, False) -> cmp lhs rhs
     (l, r) -> compare l r
 
--- iterativeReorder :: MonadCore m => [Var] -> Pass m CoreExpr
--- iterativeReorder vars = \case
---   Case _ _ _ _ -> empty
---   e -> return e
+iterativeReorder :: MonadCore m => [Var] -> Pass m CoreExpr
+iterativeReorder vars = \case
+  -- FIXME: This doesn't do iterative reordering within cases!
+  expr@(Case _ _ _ _) -> do
+    let reorder = reorderCase $ \lhs rhs -> guard (EQ > compareScrut vars lhs rhs)
+    maybeExpr <- runMaybeT $ reorder expr
+    case maybeExpr of
+      Just expr' -> return expr'
+      Nothing -> return expr
+
+  Lam bind expr -> Lam bind <$> iterativeReorder (bind:vars) expr
+  e -> gmapM (mkM $ iterativeReorder vars) e
 
 -- -- | Factor out applications in a case statement. This is roughly the inverse
 -- -- operation of distributing a case.

@@ -8,16 +8,10 @@
 module Main
   ( main
   , adder
-  , beforeSproj
-  , baseOproj
-  , weirdSproj
-  , withExtracted
   , leak
-  -- , test
   ) where
 
 import UC
-import Projection
 
 -- adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
 -- adder = \s -> \i -> case s of
@@ -52,57 +46,94 @@ import Projection
 -- ignore (Just v) = Just (v == 0)
 -- ignore _ = Nothing
 
-ignore :: Num a => Eq a => Maybe a -> Maybe Bool
-ignore (Just v) = Just (v == 0)
-ignore _ = Nothing
+obs :: Maybe Int -> Maybe ()
+obs (Just _) = Just ()
+obs _ = Nothing
 
--- ignore :: Maybe Int -> Maybe ()
--- ignore (Just _) = Just ()
--- ignore _ = Nothing
+leak :: Maybe (Int, Int) -> Maybe ()
+leak (Just _) = Just ()
+leak _ = Nothing
 
-hello :: a -> Maybe a
-hello = Just
+-- sim :: () -> Maybe () -> ((), Maybe ())
+-- sim _ i = ((), i)
 
--- | the annotation (UC 'ignore) means we'll apply ignore as the output projection
-{-# ANN adder (UC 'ignore) #-}
+-- {-# ANN adder UCTactic 
+--   { observation = 'obs
+--   , leakage = 'leak
+--   , simulator = 'sim
+--   , projections = []
+--   } #-}
+-- adder :: () -> Maybe (Int, Int) -> ((), Maybe Int)
+-- adder _ (Just (a, b)) = ((), Just $ a + b)
+-- adder _ _ = ((), Nothing)
+
+sim :: Maybe () -> Maybe () -> (Maybe (), Maybe ())
+sim s i = (i, s)
+
+circ :: Maybe () -> Maybe (Int, Int) -> (Maybe (), Maybe ())
+circ s i = case i of
+  Just _ -> (Just (), s)
+  Nothing -> (Nothing, s)
+
+{-# ANN adder (UCTactic 
+  { observation = 'obs
+  , leakage = 'leak
+  , simulator = 'sim
+  , projections =
+    [ Projection
+      { ignore = 'obs
+      , circuit = 'circ
+      }
+    ]
+  }) #-}
 adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
-adder = \s -> \i -> case s of
-  Just val -> (Nothing, hello val)
-  _        -> case i of
-    Just ab -> case ab of
-     (a, b) -> (Just (a + b), Nothing)
-    Nothing -> (Nothing, Nothing)
+adder s i = case i of
+  Just (a, b) -> (Just $ a + b, s)
+  Nothing -> (Nothing, s)
+
+-- \s -> \i -> case s of
+--   Just val -> (Nothing, Just val)
+--   _        -> case i of
+--     Just ab -> case ab of
+--      (a, b) -> (Just (a + b), Nothing)
+--     Nothing -> (Nothing, Nothing)
+-- adder = \s -> \i -> case s of
+--   Just val -> (Nothing, Just val)
+--   _        -> case i of
+--     Just ab -> case ab of
+--      (a, b) -> (Just (a + b), Nothing)
+--     Nothing -> (Nothing, Nothing)
 
 -- | Here, we're only applying output projection id
 -- {-# ANN before_sproj (UC 'id) #-}
-beforeSproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
-beforeSproj = \s -> \i -> case s of
-  Just _ -> (Nothing, Just ())
-  _ -> case i of
-    Just ab -> case ab of
-      (a, b) -> (Just $ a + b, Nothing)
-    _ -> (Nothing, Nothing)
+-- beforeSproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe ())
+-- beforeSproj = \s -> \i -> case s of
+--   Just _ -> (Nothing, Just ())
+--   _ -> case i of
+--     Just ab -> case ab of
+--       (a, b) -> (Just $ a + b, Nothing)
+--     _ -> (Nothing, Nothing)
 
--- {-# ANN baseOproj UCNorm #-}
-baseOproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
-baseOproj = \s -> \i -> case s of
-  Just val -> (Nothing, Just $ val == 0)
-  _ -> case i of
-    Just ab -> case ab of
-      (a, b) -> (Just $ a + b, Nothing)
-    _ -> (Nothing, Nothing)
+-- -- {-# ANN baseOproj UCNorm #-}
+-- baseOproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
+-- baseOproj = \s -> \i -> case s of
+--   Just val -> (Nothing, Just $ val == 0)
+--   _ -> case i of
+--     Just ab -> case ab of
+--       (a, b) -> (Just $ a + b, Nothing)
+--     _ -> (Nothing, Nothing)
 
--- {-# ANN weirdSproj UCNorm #-}
-weirdSproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
-weirdSproj = 
-  sproj
-  id
-  (\s -> \i -> case s of
-    Just val -> (Nothing, Just $ val == 0)
-    _ -> case i of
-      Just ab -> case ab of
-        (a, b) -> (Just $ a + b, Nothing)
-      _ -> (Nothing, Nothing))
+-- -- {-# ANN weirdSproj UCNorm #-}
+-- weirdSproj :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Bool)
+-- weirdSproj = 
+--   sproj
+--   id
+--   (\s -> \i -> case s of
+--     Just val -> (Nothing, Just $ val == 0)
+--     _ -> case i of
+--       Just ab -> case ab of
+--         (a, b) -> (Just $ a + b, Nothing)
+--       _ -> (Nothing, Nothing))
 
 -- So this is one of the inner statements that still contains a reference to
 -- an input (that is, both a and b are derivates of the input).
@@ -187,15 +218,15 @@ weirdSproj =
 
 -- Full leakage?
 -- {-# ANN leak UCNorm #-}
-leak :: Maybe Int -> ((Maybe Int, Maybe Bool), forall a. Num a => a -> a -> (Maybe a, Maybe Bool))
-leak s =
-  (,)
-  (case s of
-    Nothing -> (,) Nothing Nothing
-    Just val -> (,) Nothing (Just $ val == 0))
-  (\a' -> \b' -> case s of
-    Nothing -> (,) (Just $ a' + b') Nothing
-    Just val -> (,) Nothing (Just $ val == 0))
+-- leak :: Maybe Int -> ((Maybe Int, Maybe Bool), forall a. Num a => a -> a -> (Maybe a, Maybe Bool))
+-- leak s =
+--   (,)
+--   (case s of
+--     Nothing -> (,) Nothing Nothing
+--     Just val -> (,) Nothing (Just $ val == 0))
+--   (\a' -> \b' -> case s of
+--     Nothing -> (,) (Just $ a' + b') Nothing
+--     Just val -> (,) Nothing (Just $ val == 0))
 
 -- I guess we should normalize the leakage?
 -- leak' :: Maybe Int -> ((Maybe Int, Maybe Bool), forall a. Num a => a -> a -> (Maybe a, Maybe Bool))
@@ -220,34 +251,34 @@ leak s =
 --       (Just $ val == 0)) :: forall a. a -> a -> (Maybe a, Maybe Bool))
 
 -- {-# ANN withExtracted UCNorm #-}
-withExtracted :: Maybe Int -> Maybe (Int, Int) -> (((Maybe Int, Maybe Bool), forall a. Num a => a -> a -> (Maybe a, Maybe Bool)), Maybe Bool)
-withExtracted = 
-  sproj
-  (\s -> case s of
-    Nothing ->
-      (,)
-      ( (,)
-        Nothing
-        Nothing)
-      ((\a' -> \b' ->
-        (,)
-        (Just $ a' + b')
-        Nothing) :: forall a. Num a => a -> a -> (Maybe a, Maybe Bool))
-    Just val ->
-      (,)
-      ( (,)
-        Nothing
-        (Just $ val == 0))
-      ((\_ -> \_ ->
-        (,)
-        Nothing
-        (Just $ val == 0)) :: forall a. a -> a -> (Maybe a, Maybe Bool)))
-  (\s -> \i -> case s of
-    Just val -> (Nothing, Just $ val == 0)
-    _ -> case i of
-      Just ab -> case ab of
-        (a, b) -> (Just $ a + b, Nothing)
-      _ -> (Nothing, Nothing))
+-- withExtracted :: Maybe Int -> Maybe (Int, Int) -> (((Maybe Int, Maybe Bool), forall a. Num a => a -> a -> (Maybe a, Maybe Bool)), Maybe Bool)
+-- withExtracted = 
+--   sproj
+--   (\s -> case s of
+--     Nothing ->
+--       (,)
+--       ( (,)
+--         Nothing
+--         Nothing)
+--       ((\a' -> \b' ->
+--         (,)
+--         (Just $ a' + b')
+--         Nothing) :: forall a. Num a => a -> a -> (Maybe a, Maybe Bool))
+--     Just val ->
+--       (,)
+--       ( (,)
+--         Nothing
+--         (Just $ val == 0))
+--       ((\_ -> \_ ->
+--         (,)
+--         Nothing
+--         (Just $ val == 0)) :: forall a. a -> a -> (Maybe a, Maybe Bool)))
+--   (\s -> \i -> case s of
+--     Just val -> (Nothing, Just $ val == 0)
+--     _ -> case i of
+--       Just ab -> case ab of
+--         (a, b) -> (Just $ a + b, Nothing)
+--       _ -> (Nothing, Nothing))
 
 -- So there is nothing inherently wrong with this leakage function. It is
 -- indeed cutting removing parts of the state, and definitely there exists some

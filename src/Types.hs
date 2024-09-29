@@ -6,7 +6,7 @@ module Types
   , ucGenAnn
 
   , UCCompare (..)
-  , UCCheck (..)
+  -- , UCCheck (..)
   -- , mkCheck
 
   , UCTactic (..)
@@ -22,38 +22,38 @@ module Types
 import Data.Data
 import GHC.Plugins
 
-data UCCheck a = UCCheck
-  { ch_obs :: a
-  -- ^ Observation function
-  --
-  -- o -> o'
+-- data UCCheck a = UCCheck
+--   { ch_obs :: a
+--   -- ^ Observation function
+--   --
+--   -- o -> o'
 
-  , ch_impl :: a
-  -- ^ Implementation
-  --
-  -- Circuit s i o
+--   , ch_impl :: a
+--   -- ^ Implementation
+--   --
+--   -- Circuit s i o
 
-  , ch_ignfun :: a
-  -- ^ Ignore state
-  --
-  -- s -> s'
+--   , ch_ignfun :: a
+--   -- ^ Ignore state
+--   --
+--   -- s -> s'
 
-  , ch_ignsim :: a
-  -- ^ Simulator that uses sub-state
-  --
-  -- Circuit s' i o'
+--   , ch_ignsim :: a
+--   -- ^ Simulator that uses sub-state
+--   --
+--   -- Circuit s' i o'
 
-  , ch_leak :: a
-  -- ^ Leakage function
-  --
-  -- i -> i'
+--   , ch_leak :: a
+--   -- ^ Leakage function
+--   --
+--   -- i -> i'
 
-  , ch_sim :: a
-  -- ^ Simulator
-  --
-  -- Circuit s' i' o'
-  }
-  deriving (Data, Typeable, Functor, Traversable, Foldable)
+--   , ch_sim :: a
+--   -- ^ Simulator
+--   --
+--   -- Circuit s' i' o'
+--   }
+--   deriving (Data, Typeable, Functor, Traversable, Foldable)
 
 -- | Tactic based UC check.
 data UCTactic a = UCTactic
@@ -66,6 +66,7 @@ data UCTactic a = UCTactic
   , projections :: [Projection a]
   -- ^ State projections.
   }
+  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
 
 -- | State projection.
 --
@@ -77,18 +78,19 @@ data Projection a = Projection
   , circuit :: a
   -- ^ Simulator for state projection: s' -> i -> (s', o)
   }
+  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
 
 newtype UCCompare a = UCCompare a
   deriving (Data, Typeable, Functor, Traversable, Foldable)
 
 data UCNorm = UCNorm
-  deriving (Data, Typeable)
+  deriving (Show, Data, Typeable)
 
 -- | The main annotation for this plugin.
 newtype UC a = UC
   { observable :: a
   }
-  deriving (Data, Typeable, Functor, Traversable, Foldable)
+  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
 
 instance Outputable a => Outputable (UC a) where
   ppr (UC obs) = text "UC" <+> ppr obs
@@ -98,7 +100,7 @@ instance Outputable a => Outputable (UC a) where
 -- for codegen. Hence, we create new binders so we can perform rewrites without
 -- affecting the eventual program synthesis.
 newtype UCGenerated a = UCGenerated a
-  deriving (Data, Typeable)
+  deriving (Show, Data, Typeable)
 
 -- | Create an annotation to mark that the given binder was generated.
 ucGenAnn :: Data a => a -> CoreBind' -> Annotation
