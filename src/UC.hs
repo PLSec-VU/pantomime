@@ -40,9 +40,8 @@ plugin = defaultPlugin
 -- parameter.
 install :: MonadCore m => [CommandLineOption] -> Pass m [CoreToDo]
 install _ todo = return $ mconcat
-  -- [ checkPasses
   [ normalizePasses
-  -- , cmpPasses
+  , comparePasses
   , tacticPasses
   , todo
   ]
@@ -57,6 +56,14 @@ install _ todo = return $ mconcat
       [ createUCBindsPass
       , normalizePass
       , printAndLintPass
+      , removeUCBindsPass
+      ]
+
+    comparePasses = withProxy (Proxy @(UCGenerated (UCCompare TH.Name)))
+      [ createUCBindsPass
+      , normalizePass
+      , ucComparePass
+      -- , printAndLintPass
       , removeUCBindsPass
       ]
 
@@ -194,108 +201,11 @@ checkIProjPass _ = CoreDoPluginPass name pass
     name = TH.nameBase 'checkIProjPass
     pass = annBindsPassWithGuts checkIProj
 
--- inlineAllPass
---   :: forall a proxy. Data a
---   => proxy a
---   -> CoreToDo
--- inlineAllPass _ = CoreDoPluginPass name pass
---   where
---     name = TH.nameBase 'inlineAllPass
---     pass = annBindsPass $ \(_ :: a) -> inlineAll
-
--- dedupCasesPass
---   :: forall a proxy. Data a
---   => proxy a
---   -> CoreToDo
--- dedupCasesPass _ = CoreDoPluginPass name pass
---   where
---     name = TH.nameBase 'dedupCasesPass
---     pass = annBindsPass $ \(_ :: a) -> dedupCases
-
--- reorderCasesPass
---   :: forall a proxy. Data a
---   => proxy a
---   -> CoreToDo
--- reorderCasesPass _ = CoreDoPluginPass name pass
---   where
---     name = TH.nameBase 'reorderCasesPass
---     pass = annBindsPass $ \(_ :: a) -> reorderCases
-
--- encloseStatePass
---   :: forall a proxy. Data a
---   => proxy a
---   -> CoreToDo
--- encloseStatePass _ = CoreDoPluginPass name pass
---   where
---     name = TH.nameBase 'encloseStatePass
---     pass = annBindsPass $ \(_ :: a) -> encloseState
-
--- doCheck :: CoreToDo
--- doCheck = CoreDoPluginPass name pass
---   where
---     name = TH.nameBase 'doCheck
---     pass guts = annBindsPass (doCheck' $ mg_binds guts) guts
-
--- doCheck' :: (MonadCore m, MonadFail m) => CoreProgram -> UCCheck TH.Name -> Pass m CoreBind'
--- doCheck' prog uc bind = do
---   let resolve = resolveTH' prog
-
---   -- Fetch projection functions
---   sproj <- resolve 'Projection.sproj
---   sproj' <- resolve 'Projection.sproj'
---   iproj <- resolve 'Projection.iproj
---   oproj <- resolve 'Projection.oproj
-
---   obs <- resolve $ ch_obs uc
---   impl <- resolve $ ch_impl uc
-
---   leak <- resolve $ ch_leak uc
---   sim <- resolve $ ch_sim uc
-
---   ignfun <- resolve $ ch_ignfun uc
---   ignsim <- resolve $ ch_ignsim uc
-
---   let show' :: Outputable o => o -> String
---       show' = showSDocUnsafe . ppr
-
---   let app (Bind' lvar lexpr) (Bind' rvar rexpr) = do
---         let showvar var = show' var <> " :: " <> show' (varType var)
---         expr <- polyApp lexpr rexpr
---           ??= "Incompatible application:\n  " <> showvar lvar <> "\n  " <> showvar rvar
---         var <- freshLocalVar "fresh" $ exprType expr
---         return $ Bind' var expr
-
---   let app' fun args = do
---         Bind' var expr <- foldM app fun args
---         return $ Bind' var (occurAnalyseExpr expr)
-
---   let normalize' = bindPass normalize
-
---   let cmp errmsg lhs rhs = do
---         lhs'@(Bind' lvar lexp) <- normalize' lhs
---         rhs'@(Bind' rvar rexp) <- normalize' rhs
---         unless (lexp `eqCoreExpr` rexp) $ do
---           dbg lhs'
---           dbg rhs'
---           fail $ errmsg <> ": " <> show' lvar <> " =/= " <> show' rvar
-
---   oprojected <- app' oproj [obs, impl]
---   sprojected <- app' sproj [ignfun, oprojected]
---   sprojected' <- app' sproj' [ignfun, ignsim]
-
---   cmp "State projection not equal" sprojected sprojected'
-
---   iprojected <- app' iproj [leak, sim]
-
---   cmp "Input projection not equal" sprojected' iprojected
-
---   return bind
-
--- projectOutputPass :: CoreToDo
--- projectOutputPass = CoreDoPluginPass name pass
---   where
---     name = TH.nameBase 'projectOutputPass
---     pass = ucBindsPass projectOutput
+ucComparePass :: proxy -> CoreToDo
+ucComparePass _ = CoreDoPluginPass name pass
+  where
+    name = TH.nameBase 'ucComparePass
+    pass = annBindsPassWithGuts ucCompare
 
 printAndLint :: MonadCore m => MonadMod m => Pass m CoreBind'
 printAndLint bind = do
@@ -380,6 +290,22 @@ checkIProj (UCGenerated uc) (Bind' var expr) = do
     dbg expr'
     dbg leakSim'
     fail "Expression does not equal leakage/simulator pair."
+  
+  return $ Bind' var expr
+
+ucCompare :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCCompare TH.Name) -> Pass m CoreBind'
+ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
+  Bind' _ other' <- resolveTH' other
+
+  expr' <- occurAnalyseExpr <$> normalize expr
+  other'' <- occurAnalyseExpr <$> normalize other'
+
+  -- Check whether they are equal
+  -- TODO: Unify expressions before checking equivalence!
+  unless (expr' `eqCoreExpr` other'') $ do
+    dbg expr'
+    dbg other''
+    fail "Expressions were not equal"
   
   return $ Bind' var expr
 

@@ -22,39 +22,6 @@ module Types
 import Data.Data
 import GHC.Plugins
 
--- data UCCheck a = UCCheck
---   { ch_obs :: a
---   -- ^ Observation function
---   --
---   -- o -> o'
-
---   , ch_impl :: a
---   -- ^ Implementation
---   --
---   -- Circuit s i o
-
---   , ch_ignfun :: a
---   -- ^ Ignore state
---   --
---   -- s -> s'
-
---   , ch_ignsim :: a
---   -- ^ Simulator that uses sub-state
---   --
---   -- Circuit s' i o'
-
---   , ch_leak :: a
---   -- ^ Leakage function
---   --
---   -- i -> i'
-
---   , ch_sim :: a
---   -- ^ Simulator
---   --
---   -- Circuit s' i' o'
---   }
---   deriving (Data, Typeable, Functor, Traversable, Foldable)
-
 -- | Tactic based UC check.
 data UCTactic a = UCTactic
   { observation :: a
