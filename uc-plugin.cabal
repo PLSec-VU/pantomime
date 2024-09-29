@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.36.0.
+-- This file has been generated from package.yaml by hpack version 0.37.0.
 --
 -- see: https://github.com/sol/hpack
 
@@ -27,6 +27,7 @@ library
   exposed-modules:
       GHC.MonadCore
       Projection
+      Transform
       Types
       UC
       Util
@@ -37,8 +38,10 @@ library
   hs-source-dirs:
       src
   default-extensions:
+      ConstraintKinds
       DeriveDataTypeable
       DeriveTraversable
+      FlexibleContexts
       LambdaCase
       TemplateHaskell
       TypeApplications
@@ -47,6 +50,7 @@ library
       base >=4.7 && <5
     , containers
     , ghc >=9.6.4
+    , mtl
     , syb >=0.7.2.4
     , template-haskell
     , transformers
@@ -62,8 +66,10 @@ executable uc-plugin-exe
   hs-source-dirs:
       app
   default-extensions:
+      ConstraintKinds
       DeriveDataTypeable
       DeriveTraversable
+      FlexibleContexts
       LambdaCase
       TemplateHaskell
       TypeApplications
@@ -72,6 +78,7 @@ executable uc-plugin-exe
       base >=4.7 && <5
     , containers
     , ghc >=9.6.4
+    , mtl
     , syb >=0.7.2.4
     , template-haskell
     , transformers
@@ -88,8 +95,10 @@ test-suite uc-plugin-test
   hs-source-dirs:
       test
   default-extensions:
+      ConstraintKinds
       DeriveDataTypeable
       DeriveTraversable
+      FlexibleContexts
       LambdaCase
       TemplateHaskell
       TypeApplications
@@ -98,6 +107,7 @@ test-suite uc-plugin-test
       base >=4.7 && <5
     , containers
     , ghc >=9.6.4
+    , mtl
     , syb >=0.7.2.4
     , template-haskell
     , transformers

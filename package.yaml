@@ -20,8 +20,10 @@ extra-source-files:
 description:         Please see the README on GitHub at <https://github.com/githubuser/uc-plugin#readme>
 
 default-extensions:
+- ConstraintKinds
 - DeriveDataTypeable
 - DeriveTraversable
+- FlexibleContexts
 - LambdaCase
 - TemplateHaskell
 - TypeApplications
@@ -33,6 +35,7 @@ dependencies:
 - containers
 - transformers
 - template-haskell
+- mtl
 
 ghc-options:
 - -Wall

@@ -1,15 +1,16 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 module GHC.MonadCore
   ( MonadCore (..)
+  , MonadMod
   , dbg
   , dbg'
   ) where
 
-import GHC.Plugins (CoreM, Outputable, putMsg, putMsgS, ppr)
+import GHC.Plugins (ModGuts, CoreM, Outputable, putMsg, putMsgS, ppr)
 
 import Control.Monad.Trans.Maybe (MaybeT)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Reader (ReaderT)
+import Control.Monad.Reader (ReaderT, MonadReader)
 import Control.Monad.Trans.Writer (WriterT)
 import Control.Monad.Trans.State (StateT)
 import Control.Monad.IO.Class (liftIO)
@@ -36,6 +37,8 @@ instance MonadCore m => MonadCore (StateT s m) where
 -- not so nice...
 instance MonadFail CoreM where
   fail msg = liftIO $ ioError (userError msg)
+
+type MonadMod m = MonadReader ModGuts m
 
 -- | Debug print GHC structures in a CoreM monad stack.
 dbg :: (MonadCore m, Outputable o) => o -> m ()

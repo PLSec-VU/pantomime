@@ -2,11 +2,15 @@
 module Types
   ( UC (..)
   , UCGenerated (..)
+  , UCNorm (..)
   , ucGenAnn
 
   , UCCompare (..)
   , UCCheck (..)
   -- , mkCheck
+
+  , UCTactic (..)
+  , Projection (..)
 
   , Bind' (..)
   , CoreBind'
@@ -51,8 +55,34 @@ data UCCheck a = UCCheck
   }
   deriving (Data, Typeable, Functor, Traversable, Foldable)
 
+-- | Tactic based UC check.
+data UCTactic a = UCTactic
+  { observation :: a
+  -- ^ Observation function: o -> o'
+  , leakage :: a
+  -- ^ Leakage function: i -> i'
+  , simulator :: a
+  -- ^ Simulator: s' -> i' -> (s', o)
+  , projections :: [Projection a]
+  -- ^ State projections.
+  }
+
+-- | State projection.
+--
+-- Transform a circuit: s -> i -> (s, o) 
+-- To a circuit: s' -> i -> (s', o)
+data Projection a = Projection
+  { ignore :: a
+  -- ^ State ignore function: s -> s'
+  , circuit :: a
+  -- ^ Simulator for state projection: s' -> i -> (s', o)
+  }
+
 newtype UCCompare a = UCCompare a
   deriving (Data, Typeable, Functor, Traversable, Foldable)
+
+data UCNorm = UCNorm
+  deriving (Data, Typeable)
 
 -- | The main annotation for this plugin.
 newtype UC a = UC
