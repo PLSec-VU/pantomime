@@ -63,7 +63,7 @@ install _ todo = return $ mconcat
       [ createUCBindsPass
       , normalizePass
       , ucComparePass
-      -- , printAndLintPass
+      , printAndLintPass
       , removeUCBindsPass
       ]
 
@@ -291,7 +291,7 @@ checkIProj (UCGenerated uc) (Bind' var expr) = do
     dbg leakSim'
     fail "Expression does not equal leakage/simulator pair."
   
-  return $ Bind' var expr
+  return $ Bind' var expr'
 
 ucCompare :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCCompare TH.Name) -> Pass m CoreBind'
 ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do

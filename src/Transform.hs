@@ -1,6 +1,7 @@
 module Transform
   -- Fusable transformations
   ( betaReduce
+  , etaReduce
   , inlineUnfolding
   , inlineLocal
   , foldCase
@@ -12,12 +13,11 @@ module Transform
   -- Stand-alone transformations
   , normalize
   , dedupCases
-  , reorderCase
   , caseFactor
-  , encloseState
-  , encloseInput
+  , normalizeCaseOrder
 
   -- Helper function
+  , reorderCase
   , bindPass
   , compareScrut
   ) where
@@ -28,6 +28,7 @@ import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
 import GHC.Tc.Utils.TcType (eqType)
 import GHC.MonadCore
 
+import Data.Function ((&))
 import Data.List (nubBy, elemIndex)
 import Data.Maybe (fromMaybe, fromJust)
 import Data.Map (Map)
@@ -57,12 +58,13 @@ normalize e = do
         , redundantCase
         , extractLambda
         , undefaultCase
+        , etaReduce
         ]
 
   e0 <- occurAnalyseExpr <$> fix fused e
-  e1 <- occurAnalyseExpr <$> iterativeReorder [] e0
-  e2 <- occurAnalyseExpr <$> dedupCases e1
-  return e2
+  e1 <- occurAnalyseExpr <$> normalizeCaseOrder e0
+  e2 <- occurAnalyseExpr <$> fix redundantCase e1
+  occurAnalyseExpr <$> dedupCases e2
 
 -- | Beta reduction
 betaReduce :: (Alternative m, Monad m) => Pass m CoreExpr
@@ -82,6 +84,17 @@ betaReduce = \case
       let subst = extendSubst (mkEmptySubst inScope) bind expr
       let body' = substExpr subst body
       return body'
+
+-- | Eta reduction
+etaReduce :: Alternative m => Monad m => Pass m CoreExpr
+etaReduce = \case
+  Lam bind (App fun (Var arg)) -> do
+    guard $ bind == arg
+    let free = exprFreeVars fun
+    guard . not $ bind `elemVarSet` free
+    return fun
+
+  _ -> empty
 
 -- | Inlines all non-typeclass functions.
 inlineUnfolding :: (Alternative m, Monad m) => Pass m CoreExpr
@@ -269,63 +282,116 @@ redundantCase = \case
 
   _ -> empty
 
+-- TODO: There's bound to be a better way to do this...
+newtype CExpr = CExpr CoreExpr
+  deriving (Typeable, Data)
+
+instance Eq CExpr where
+  (==) = geq'
+    where
+      -- Modification of the normal geq in SYB, with a special case for
+      -- variables.
+      geq' :: (Data a, Data b) => a -> b -> Bool
+      geq' x y
+        | toConstr x == toConstr y = case (cast x, cast y) of
+            (Just (v :: Var), Just (v' :: Var)) -> v == v'
+            _ -> and (gzipWithQ geq' x y)
+        | otherwise = False
+
+instance Ord CExpr where
+  compare = gcompare'
+    where
+      -- Modification of the normal gcompare in SYB, with a special case for
+      -- variables.
+      gcompare' :: (Data a, Data b) => a -> b -> Ordering
+      gcompare' x y = case (cast x, cast y) of
+        (Just (v :: Var), Just (v' :: Var)) -> compare v v'
+        _ -> case (repX, repY) of
+          (AlgConstr nX,   AlgConstr nY)   ->
+            nX `compare` nY `mappend` mconcat (gzipWithQ gcompare' x y)
+          (IntConstr iX,   IntConstr iY)   -> iX `compare` iY
+          (FloatConstr rX, FloatConstr rY) -> rX `compare` rY
+          (CharConstr cX,  CharConstr cY)  -> cX `compare` cY
+          _ -> error "type incompatibility in gcompare"
+        where
+          x' = toConstr x
+          y' = toConstr y
+          repX = constrRep x'
+          repY = constrRep y'
+
+instance Outputable CExpr where
+  ppr (CExpr x) = ppr x
+
+-- | Deduplicate case expressions.
+--
+-- Remove case expressions that scrutinize over the same expression.
 -- FIXME: I think there is an issue with the fold given a default branch:
 -- we cannot always fold a branch in this case I think. Maybe we could do
 -- something like include it in the outer case?
---
--- FIXME: The below statement doesn't always seem to be true.
--- Occurence check already makes sure that we use the binder in a case instead
--- of another copy of the scrutinized expression. As such, the key in the Map
--- can actually be a variable instead of an expression.
-dedupCases :: Monad m => Pass m CoreExpr
+dedupCases :: MonadCore m => Pass m CoreExpr
 dedupCases = go mempty
   where
-    go :: Monad m => Map CoreBndr (AltCon, [CoreBndr]) -> Pass m CoreExpr
-    go scruts = \case
-      -- We have case split over this scrutinee if we enter this case. Thus, we can
-      -- remove the case split by selecting the branch that was taken previously.
-      -- We take care of the binders in the term to reference the outer case.
-      Case (Var scrut) bind _ alts | Just (c, bs) <- Map.lookup scrut scruts -> do
-        -- A matching alt should always be available.
-        let Alt _ bs' rhs = fromJust $ findAlt c alts
+    go :: MonadCore m => Map CExpr (AltCon, [CoreBndr]) -> Pass m CoreExpr
+    go scruts e = do
+      -- dbg scruts
+      e & \case
+        -- We have previously case split over this scrutinee if we enter this
+        -- case. Thus, we can remove the case split by selecting the branch
+        -- that was taken previously. We take care of the binders in the term to
+        -- reference the outer case.
+        Case scrut bind _ alts | Just (c, bs) <- Map.lookup (CExpr scrut) scruts -> do
+          -- dbg' "removing scrut:"
+          -- dbg scrut
+          -- dbg scruts
+          -- A matching alt should always be available.
+          let Alt _ bs' rhs = fromJust $ findAlt c alts
 
-        -- Map all the binders of the case to the expressions along the spine.
-        -- Additionally, the binder should be substituted by the scrutinee.
-        let mapping = (bind, Var scrut) : zip bs' (Var <$> bs)
+          -- Map all the binders of the case to the expressions along the spine.
+          -- Additionally, the binder should be substituted by the scrutinee.
+          let mapping = (bind, scrut) : zip bs' (Var <$> bs)
 
-        -- Get the inscope variables.
-        let inscope = mkInScopeSet $ exprFreeVars rhs
+          -- Get the inscope variables.
+          let inscope = mkInScopeSet $ exprFreeVars rhs
 
-        -- Make the substition using the mapping and perform the substitution.
-        let subst = extendSubstList (mkEmptySubst inscope) mapping
+          -- Make the substition using the mapping and perform the substitution.
+          let subst = extendSubstList (mkEmptySubst inscope) mapping
 
-        -- Substitute the alts in the expression.
-        let expr = substExpr subst rhs
+          -- Substitute the alts in the expression.
+          let expr = substExpr subst rhs
 
-        -- Attempt to fold more cases in the new expression.
-        go scruts expr
+          -- Attempt to fold more cases in the new expression.
+          go scruts expr
 
-      -- We have not case split over this scrutinee before, thus we add it to the
-      -- map and continue. We do not have to traverse the scrutinee itself for the
-      -- fold in this scenario, as the case distribute pass makes sure that no
-      -- scrutinee can contain a case.
-      Case scrut bind ty alts -> do
-        let withAlt (Alt c bs rhs) = do
-              -- We remove the occurence info (may occur many times), as it may do
-              -- so after deduplicating a case. The occurence analysis doesn't catch
-              -- this, so we do it manually.
-              let bs' = flip setIdOccInfo noOccInfo <$> bs
-              let scruts' = Map.insert bind (c, bs') scruts
-              rhs' <- go scruts' rhs
-              return $ Alt c bs rhs'
+        -- We have not case split over this scrutinee before, thus we add it to
+        -- the map and continue. We do not have to traverse the scrutinee itself
+        -- for the fold in this scenario, as the case distribute pass makes sure
+        -- that no scrutinee can contain a case.
+        Case scrut bind ty alts -> do
+          -- dbg' "first time scrut:"
+          -- dbg scrut
+          -- dbg scruts
+          let withAlt (Alt c bs rhs) = do
+                -- We remove the occurence info (may occur many times), as it may do
+                -- so after deduplicating a case. The occurence analysis doesn't catch
+                -- this, so we do it manually.
+                let bs' = flip setIdOccInfo noOccInfo <$> bs
+                -- We track the same branch info for both the scrutinee itself
+                -- and the binder.
+                let subs =
+                      [ (CExpr scrut, (c, bs'))
+                      , (CExpr $ Var bind, (c, bs'))
+                      ]
+                let scruts' = insertList subs scruts
+                rhs' <- go scruts' rhs
+                return $ Alt c bs rhs'
 
-        Case scrut bind ty <$> mapM withAlt alts
+          Case scrut bind ty <$> forM alts withAlt
 
-      e -> gmapM (mkM $ go scruts) e
+        expr -> gmapM (mkM $ go scruts) expr
 
 -- | Reorders adjacent cases given a total ordering function.
 reorderCase
-  :: (Alternative m, MonadCore m) 
+  :: (Alternative m, MonadCore m)
   => (CoreExpr -> CoreExpr -> m ())
   -- ^ Comparison function of scrutinees.
   --
@@ -431,6 +497,10 @@ compareScrut def lhs rhs = do
         (_, Lit _) -> LT
         (App f a, App f' a') -> cmp f a <> cmp f' a'
         _ -> EQ
+  -- FIXME: I think this ordering doesn't really work for normalisation. It
+  -- might be better to consider what is the 'lowest' variable in an expression,
+  -- if this is equal, 'second lowest' etc. If all of this is equalt, then we
+  -- should consider their order of appearance in the expression.
 
   -- If both scrutinees don't have variables that are not in the id list, they
   -- should occur on the current 'layer' of cases. In this case, we reorder them
@@ -439,18 +509,27 @@ compareScrut def lhs rhs = do
     (False, False) -> cmp lhs rhs
     (l, r) -> compare l r
 
-iterativeReorder :: MonadCore m => [Var] -> Pass m CoreExpr
-iterativeReorder vars = \case
-  -- FIXME: This doesn't do iterative reordering within cases!
-  expr@(Case _ _ _ _) -> do
-    let reorder = reorderCase $ \lhs rhs -> guard (EQ > compareScrut vars lhs rhs)
-    maybeExpr <- runMaybeT $ reorder expr
-    case maybeExpr of
-      Just expr' -> return expr'
-      Nothing -> return expr
+-- | Canonicalizes the ordering of cases.
+normalizeCaseOrder :: MonadCore m => Pass m CoreExpr
+normalizeCaseOrder = go mempty
+  where
+    go :: MonadCore m => [Var] -> Pass m CoreExpr
+    go vars = \case
+      expr@(Case scrut bind ty alts) -> do
+        let cmp lhs rhs = guard $ GT == compareScrut vars lhs rhs
+        let reorder = runMaybeT . reorderCase cmp
 
-  Lam bind expr -> Lam bind <$> iterativeReorder (bind:vars) expr
-  e -> gmapM (mkM $ iterativeReorder vars) e
+        let goAlt (Alt c bs e) = do
+              let vars' = bs <> (bind:vars)
+              e' <- go vars' e
+              return $ Alt c bs e'
+
+        maybeExpr <- reorder expr
+        case maybeExpr of
+          Just expr' -> go vars expr'
+          Nothing -> Case scrut bind ty <$> mapM goAlt alts
+      Lam bind expr -> Lam bind <$> go (bind:vars) expr
+      expr -> gmapM (mkM $ go vars) expr
 
 -- -- | Factor out applications in a case statement. This is roughly the inverse
 -- -- operation of distributing a case.
@@ -571,30 +650,3 @@ caseFactor = \case
     empty
   _ -> empty
 
-encloseState :: MonadFail m => MonadCore m => Pass m CoreExpr
-encloseState e@(Lam s _) = encloseVar s e
-encloseState _ = fail "Attemted to enclose on non-circuit function."
-
-encloseInput :: MonadFail m => MonadCore m => Pass m CoreExpr
-encloseInput e@(Lam _ (Lam i _)) = encloseVar i e
-encloseInput _ = fail "Attemted to enclose on non-circuit function."
-
--- | FIXME: I think the intention for this function was to allow for
--- normalisation in case ordering. Not entirely sure though...
-encloseVar :: MonadCore m => Var -> Pass m CoreExpr
-encloseVar v e = do
-  let cmp lhs rhs = do
-        let containsVar expr = elemVarSet v $ exprFreeVars expr
-        guard $ containsVar lhs > containsVar rhs
-  let fused = reorderCase cmp
-
-  occurAnalyseExpr <$> fix fused e
-
--- reorderCases :: MonadCore m => Pass m CoreExpr
--- reorderCases e@(Lam y _) = do
---   let f (Var a) _ = guard $ a == y
---       f _ _ = empty
---   let fused = reorderCase f
-
---   occurAnalyseExpr <$> fix fused e
--- reorderCases e = return e

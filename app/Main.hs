@@ -14,16 +14,27 @@ module Main
   , rw4
   , rw5
   , rw2
+  -- , test
   ) where
 
 import UC
+-- import qualified Projection
+
+-- obs :: Maybe Int -> Maybe ()
+-- obs (Just _) = Just ()
+-- obs _ = Nothing
+
+-- obs' :: Num a => Eq a => Maybe a -> Maybe Bool
+obs' :: Maybe Int -> Maybe Bool
+obs' (Just x) = Just $ x == 0
+obs' _ = Nothing
 
 obs :: Maybe Int -> Maybe ()
 obs (Just _) = Just ()
 obs _ = Nothing
 
-leak :: Maybe (Int, Int) -> Maybe ()
-leak (Just _) = Just ()
+leak :: Maybe (Int, Int) -> Maybe Bool
+leak (Just (a, b)) = Just $ a + b == 0
 leak _ = Nothing
 
 -- sim :: () -> Maybe () -> ((), Maybe ())
@@ -39,25 +50,33 @@ leak _ = Nothing
 -- adder _ (Just (a, b)) = ((), Just $ a + b)
 -- adder _ _ = ((), Nothing)
 
-sim :: Maybe () -> Maybe () -> (Maybe (), Maybe ())
+sim :: Maybe Bool -> Maybe Bool -> (Maybe Bool, Maybe Bool)
 sim s i = (i, s)
 
-circ :: Maybe () -> Maybe (Int, Int) -> (Maybe (), Maybe ())
+circ :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
 circ s i = case i of
-  Just _ -> (Just (), s)
+  Just (a, b) -> (Just $ a + b == 0, s)
   Nothing -> (Nothing, s)
 
-{-# ANN adder (UCTactic 
-  { observation = 'obs
+-- {-# ANN test UCNorm #-}
+-- test :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+-- test = Projection.sproj' obs' circ
+
+-- {-# ANN test UCNorm #-}
+-- test :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+-- test = Projection.sproj' obs' circ
+
+{-# ANN adder UCTactic 
+  { observation = 'obs'
   , leakage = 'leak
   , simulator = 'sim
   , projections =
     [ Projection
-      { ignore = 'obs
+      { ignore = 'obs'
       , circuit = 'circ
       }
     ]
-  }) #-}
+  } #-}
 adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
 adder s i = case i of
   Just (a, b) -> (Just $ a + b, s)
@@ -85,7 +104,7 @@ sim2 _ (Just _, Just _) = ((), Just ())
 sim2 _ _ = ((), Nothing)
 
 -- check if leak_sim2 and addr_obs2 are equal
-{-# ANN leak_sim2 (UCCompare 'addr_obs2)#-}
+-- {-# ANN leak_sim2 (UCCompare 'addr_obs2)#-}
 leak_sim2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe ())
 leak_sim2 s i = sim2 s (leak2 i)
 
@@ -101,7 +120,7 @@ addr_obs3 (s1, s2) ((a, b), c) = ((s1', s2'), obs abc)
 
 -- check if leak_sim3 and addr_obs3 are equal 
 -- non-compositional proof 
-{-# ANN leak_sim3 (UCCompare 'addr_obs3)#-}
+-- {-# ANN leak_sim3 (UCCompare 'addr_obs3)#-}
 leak_sim3 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
 leak_sim3 (s1, s2) (ab, c) = ((s1', s2'), abc)
   where
@@ -111,7 +130,7 @@ leak_sim3 (s1, s2) (ab, c) = ((s1', s2'), abc)
 
 -- Rewrite steps!
 -- check if that's the same as addr_obs3
-{-# ANN rw2 (UCCompare 'addr_obs3)#-}
+-- {-# ANN rw2 (UCCompare 'addr_obs3)#-}
 rw2 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
 rw2 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
    where
@@ -438,7 +457,7 @@ rw2 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
 --       (a, b) -> (Just $ a + b, Nothing)
 --     Nothing -> (Nothing, Nothing)
 
-{-# ANN rw4 (UCCompare 'rw2)#-}
+-- {-# ANN rw4 (UCCompare 'rw2)#-}
 rw4 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
 rw4 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
    where
@@ -446,8 +465,8 @@ rw4 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
     ab' = obs ab
     (s2', abc) = sim2 s2 (ab', c)
 
-{-# ANN rw5 (UCCompare 'rw4)#-}
-{-# ANN rw5 (UCCompare 'leak_sim3)#-}
+-- {-# ANN rw5 (UCCompare 'rw4)#-}
+-- {-# ANN rw5 (UCCompare 'leak_sim3)#-}
 rw5 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
 rw5 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
    where

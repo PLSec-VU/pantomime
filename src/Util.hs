@@ -19,6 +19,7 @@ module Util
   , thNameToGhcName'
 
   , polyApp
+  , resolveClasses
   ) where
 
 import Control.Applicative
@@ -30,6 +31,7 @@ import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Types.TyThing (lookupId)
 import GHC.Core.Unify (tcUnifyTy)
+-- import GHC.Core.InstEnv (lookupUniqueInstEnv)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy)
 
 import Data.Maybe (mapMaybe, listToMaybe)
@@ -206,10 +208,31 @@ polyApp fExpr aExpr = do
   let expr' = foldr Lam expr $ dVarSetElems tyVarsAndPiArgs
   return expr'
 
--- TODO: Make a function that removes dictionaries if an instance exists.
+-- | Resolve dictionary instances.
+--
+-- TODO: Implement this function that removes dictionaries if an instance
+-- exists.
 -- - We can use mg_inst_env to get the instance environment from the module guts.
 -- - Since typeclasses are encoded as type constructors, we can first get the
 --   typeclass itself via splitTyConApp_maybe.
 -- - We can use tyConClass_maybe to get a Class if the type constructor is
 --   one.
 -- - Use lookupUniqueInstEnv to find a single instance to use.
+-- FIXME: We can get the local instance environment from the module. To get the
+-- global one, which includes **a lot** more instances, we would need to be in
+-- the TcPluginM it seems...
+resolveClasses :: MonadCore m => MonadMod m => CoreExpr -> m CoreExpr
+resolveClasses expr = do
+  -- let (fTyVars, thetaTys, _) = tcSplitSigmaTy $ exprType expr
+  instEnv <- reader mg_inst_env
+  dbg' "===================================="
+  dbg instEnv
+  -- let resolveClass theta = do
+  --       (tyCon, tyArgs) <- maybeM $ splitTyConApp_maybe theta
+  --       tyClass <- maybeM $ tyConClass_maybe tyCon
+  --       let x = lookupUniqueInstEnv instEnv tyClass tyArgs
+  --       return undefined
+  -- x <- forM thetaTys (maybeM . splitTyConApp_maybe)
+  return expr
+  -- let splitTy = tcSplitSigmaTy . exprType
+
