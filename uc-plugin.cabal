@@ -61,6 +61,10 @@ library
 executable uc-plugin-exe
   main-is: Main.hs
   other-modules:
+      ClassInline
+      Mono
+      NoState
+      Poly
       RW
       ThreeAdder
       Paths_uc_plugin

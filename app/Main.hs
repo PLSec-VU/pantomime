@@ -1,75 +1,9 @@
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
-{-# HLINT ignore "Collapse lambdas" #-}
-{-# HLINT ignore "Redundant lambda" #-}
-{-# HLINT ignore "Use const" #-}
-{-# HLINT ignore "Eta reduce" #-}
-{-# LANGUAGE ImpredicativeTypes #-}
-{-# HLINT ignore "Use lambda-case" #-}
 module Main
   ( main
-  , adder
   ) where
 
-import UC
--- import Control.Monad (void)
--- import qualified Projection
-
--- obs :: Maybe Int -> Maybe ()
--- obs (Just _) = Just ()
--- obs _ = Nothing
-
--- obs' :: Num a => Eq a => Maybe a -> Maybe Bool
-obs :: Eq c => Num c => Maybe c -> Maybe Bool
-obs (Just x) = Just $ x == 0
-obs _ = Nothing
-
--- obs :: Functor f => f a -> f ()
--- obs = void
-
--- obs :: Maybe a -> Maybe ()
--- obs (Just _) = Just ()
--- obs _ = Nothing
-
--- leak :: Maybe a -> Maybe ()
--- leak (Just _) = Just ()
--- leak _ = Nothing
-
--- leak :: Maybe (Int, Int) -> Maybe Bool
--- leak (Just (a, b)) = Just $ a + b == 0
--- leak _ = Nothing
-
-leak :: Num a => Eq a => Maybe (a, a) -> Maybe Bool
-leak (Just (a, b)) = Just $ a + b == 0
-leak _ = Nothing
-
--- sim :: () -> Maybe () -> ((), Maybe ())
--- sim _ i = ((), i)
-
--- {-# ANN adder UCTactic 
---   { observation = 'obs
---   , leakage = 'leak
---   , simulator = 'sim
---   , projections = []
---   } #-}
--- adder :: () -> Maybe (Int, Int) -> ((), Maybe Int)
--- adder _ (Just (a, b)) = ((), Just $ a + b)
--- adder _ _ = ((), Nothing)
-
--- sim :: Maybe () -> Maybe () -> (Maybe (), Maybe ())
--- sim s i = (i, s)
-
--- circ :: Maybe () -> Maybe (b, b) -> (Maybe (), Maybe ())
--- circ s i = case i of
---   Just _ -> (Just (), s)
---   Nothing -> (Nothing, s)
-
-sim :: Maybe Bool -> Maybe Bool -> (Maybe Bool, Maybe Bool)
-sim s i = (i, s)
-
-circ :: Eq b => Num b => Maybe Bool -> Maybe (b, b) -> (Maybe Bool, Maybe Bool)
-circ s i = case i of
-  Just (a, b) -> (Just $ a + b == 0, s)
-  Nothing -> (Nothing, s)
+main :: IO ()
+main = return ()
 
 -- {-# ANN test UCNorm #-}
 -- test :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
@@ -78,22 +12,6 @@ circ s i = case i of
 -- {-# ANN test UCNorm #-}
 -- test :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
 -- test = Projection.sproj' obs' circ
-
-{-# ANN adder UCTactic 
-  { observation = 'obs
-  , leakage = 'leak
-  , simulator = 'sim
-  , projections =
-    [ Projection
-      { ignore = 'obs
-      , circuit = 'circ
-      }
-    ]
-  } #-}
-adder :: Num a => Maybe a -> Maybe (a, a) -> (Maybe a, Maybe a)
-adder s i = case i of
-  Just (a, b) -> (Just $ a + b, s)
-  Nothing -> (Nothing, s)
 
 -- | Here, we're only applying output projection id
 -- {-# ANN before_sproj (UC 'id) #-}
@@ -414,5 +332,3 @@ adder s i = case i of
 --       (a, b) -> (Just $ a + b, Nothing)
 --     Nothing -> (Nothing, Nothing)
 
-main :: IO ()
-main = return ()
