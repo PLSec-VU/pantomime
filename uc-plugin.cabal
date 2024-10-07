@@ -30,6 +30,7 @@ library
       Transform
       Types
       UC
+      Unification
       Util
   other-modules:
       Paths_uc_plugin
@@ -61,6 +62,7 @@ executable uc-plugin-exe
   main-is: Main.hs
   other-modules:
       RW
+      ThreeAdder
       Paths_uc_plugin
   autogen-modules:
       Paths_uc_plugin

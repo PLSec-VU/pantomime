@@ -8,7 +8,6 @@ module Projection
 
 type Circuit s i o = (s -> i -> (s, o))
 
--- oproj :: (o -> o') -> (s -> i -> (s', o)) -> (s -> i -> (s', o')) 
 oproj :: (o -> o') -> Circuit s i o -> Circuit s i o'
 oproj obs impl s i = let (s', o) = impl s i in (s', obs o)
 

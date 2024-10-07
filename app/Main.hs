@@ -8,16 +8,10 @@
 module Main
   ( main
   , adder
-  , leak
-  , leak_sim2
-  , leak_sim3
-  , rw4
-  , rw5
-  , rw2
-  -- , test
   ) where
 
 import UC
+-- import Control.Monad (void)
 -- import qualified Projection
 
 -- obs :: Maybe Int -> Maybe ()
@@ -25,15 +19,26 @@ import UC
 -- obs _ = Nothing
 
 -- obs' :: Num a => Eq a => Maybe a -> Maybe Bool
-obs' :: Maybe Int -> Maybe Bool
-obs' (Just x) = Just $ x == 0
-obs' _ = Nothing
-
-obs :: Maybe Int -> Maybe ()
-obs (Just _) = Just ()
+obs :: Eq c => Num c => Maybe c -> Maybe Bool
+obs (Just x) = Just $ x == 0
 obs _ = Nothing
 
-leak :: Maybe (Int, Int) -> Maybe Bool
+-- obs :: Functor f => f a -> f ()
+-- obs = void
+
+-- obs :: Maybe a -> Maybe ()
+-- obs (Just _) = Just ()
+-- obs _ = Nothing
+
+-- leak :: Maybe a -> Maybe ()
+-- leak (Just _) = Just ()
+-- leak _ = Nothing
+
+-- leak :: Maybe (Int, Int) -> Maybe Bool
+-- leak (Just (a, b)) = Just $ a + b == 0
+-- leak _ = Nothing
+
+leak :: Num a => Eq a => Maybe (a, a) -> Maybe Bool
 leak (Just (a, b)) = Just $ a + b == 0
 leak _ = Nothing
 
@@ -50,10 +55,18 @@ leak _ = Nothing
 -- adder _ (Just (a, b)) = ((), Just $ a + b)
 -- adder _ _ = ((), Nothing)
 
+-- sim :: Maybe () -> Maybe () -> (Maybe (), Maybe ())
+-- sim s i = (i, s)
+
+-- circ :: Maybe () -> Maybe (b, b) -> (Maybe (), Maybe ())
+-- circ s i = case i of
+--   Just _ -> (Just (), s)
+--   Nothing -> (Nothing, s)
+
 sim :: Maybe Bool -> Maybe Bool -> (Maybe Bool, Maybe Bool)
 sim s i = (i, s)
 
-circ :: Maybe Bool -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+circ :: Eq b => Num b => Maybe Bool -> Maybe (b, b) -> (Maybe Bool, Maybe Bool)
 circ s i = case i of
   Just (a, b) -> (Just $ a + b == 0, s)
   Nothing -> (Nothing, s)
@@ -67,76 +80,20 @@ circ s i = case i of
 -- test = Projection.sproj' obs' circ
 
 {-# ANN adder UCTactic 
-  { observation = 'obs'
+  { observation = 'obs
   , leakage = 'leak
   , simulator = 'sim
   , projections =
     [ Projection
-      { ignore = 'obs'
+      { ignore = 'obs
       , circuit = 'circ
       }
     ]
   } #-}
-adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
+adder :: Num a => Maybe a -> Maybe (a, a) -> (Maybe a, Maybe a)
 adder s i = case i of
   Just (a, b) -> (Just $ a + b, s)
   Nothing -> (Nothing, s)
-
---- Encoding the simulation proof for 3-adder
--- Part 1: 2-adder is correct wrt description leak2
-
---{-# ANN addr_obs2 (UC 'id) #-}
-addr_obs2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe ())
-addr_obs2 s i = (s1, obs o)
-  where
-    (s1, o) = addr2 s i
-
-addr2 :: Num a => p -> (Maybe a, Maybe a) -> ((), Maybe a)
-addr2 _ (Just a, Just b) = ((), Just (a + b)) 
-addr2 _ _ = ((), Nothing)
-
-leak2 :: (Maybe a1, Maybe a2) -> (Maybe (), Maybe ())
-leak2 (Just _, Just _) =  (Just (), Just ())
-leak2 _ = (Nothing, Nothing)
-
-sim2 :: p -> (Maybe a1, Maybe a2) -> ((), Maybe ())
-sim2 _ (Just _, Just _) = ((), Just ()) 
-sim2 _ _ = ((), Nothing)
-
--- check if leak_sim2 and addr_obs2 are equal
--- {-# ANN leak_sim2 (UCCompare 'addr_obs2)#-}
-leak_sim2 :: () -> (Maybe Int, Maybe Int) -> ((), Maybe ())
-leak_sim2 s i = sim2 s (leak2 i)
-
--- Part 2: Three adder proof
-
--- Three input adder: composes two two-adders
---{-# ANN addr_obs3 (UC 'id) #-}
-addr_obs3 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
-addr_obs3 (s1, s2) ((a, b), c) = ((s1', s2'), obs abc)
-   where
-    (s1', ab) = addr2 s1 (a, b)
-    (s2', abc) = addr2 s2 (ab, c)
-
--- check if leak_sim3 and addr_obs3 are equal 
--- non-compositional proof 
--- {-# ANN leak_sim3 (UCCompare 'addr_obs3)#-}
-leak_sim3 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
-leak_sim3 (s1, s2) (ab, c) = ((s1', s2'), abc)
-  where
-    (s1', ab') = sim2 s1 (leak2 ab)
-    (s2', abc) = sim2 s2 (leak2 (ab', c))
- 
-
--- Rewrite steps!
--- check if that's the same as addr_obs3
--- {-# ANN rw2 (UCCompare 'addr_obs3)#-}
-rw2 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
-rw2 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
-   where
-    (s1', ab) = addr2 s1 (a, b)
-    (s2', abc) = leak_sim2 s2 (ab, c)
-
 
 -- | Here, we're only applying output projection id
 -- {-# ANN before_sproj (UC 'id) #-}
@@ -456,22 +413,6 @@ rw2 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
 --     Just ab -> case ab of
 --       (a, b) -> (Just $ a + b, Nothing)
 --     Nothing -> (Nothing, Nothing)
-
--- {-# ANN rw4 (UCCompare 'rw2)#-}
-rw4 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
-rw4 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
-   where
-    (s1', ab) = addr2 s1 (a, b)
-    ab' = obs ab
-    (s2', abc) = sim2 s2 (ab', c)
-
--- {-# ANN rw5 (UCCompare 'rw4)#-}
--- {-# ANN rw5 (UCCompare 'leak_sim3)#-}
-rw5 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe ())
-rw5 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
-   where
-    (s1', ab) = leak_sim2 s1 (a, b)
-    (s2', abc) = sim2 s2 (ab, c)
 
 main :: IO ()
 main = return ()

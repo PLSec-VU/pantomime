@@ -17,9 +17,9 @@ module Util
   , findLocal'
   , nameToCoreBind
   , thNameToGhcName'
+  , getInstEnvs'
 
-  , polyApp
-  , resolveClasses
+  , resolveInstance
   ) where
 
 import Control.Applicative
@@ -30,9 +30,9 @@ import Control.Monad.Reader (reader)
 import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Types.TyThing (lookupId)
-import GHC.Core.Unify (tcUnifyTy)
--- import GHC.Core.InstEnv (lookupUniqueInstEnv)
-import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy)
+import GHC.Core.InstEnv (InstEnvs (..), lookupUniqueInstEnv, instanceDFunId)
+import GHC.Unit.External (eps_inst_env)
+import GHC.Data.Maybe (rightToMaybe)
 
 import Data.Maybe (mapMaybe, listToMaybe)
 import Data.List (foldl')
@@ -140,99 +140,38 @@ getUnfolding name = do
     CoreUnfolding { uf_tmpl = expr } -> return $ Bind' id' expr
     _ -> empty
 
--- | Apply the given expressions, handling both type abstractions and 
--- constraint abstractions that may exist before either of the expressions.
+-- | Fetch the instance environments.
 --
--- This will fail if the first argument was not a function, or if we could not
--- unify the actual argument type with the required type.
-polyApp :: (Alternative m, MonadCore m) => CoreExpr -> CoreExpr -> m CoreExpr
-polyApp fExpr aExpr = do
-  -- Split the quantifiers and typeclass constraints from the type
-  let splitTy = tcSplitSigmaTy . exprType
-  let (fTyVars, fPiTys, funTy) = splitTy fExpr
-  let (aTyVars, aPiTys, argTy) = splitTy aExpr
+-- Get the instance environments from a CoreM pass instead of the typechecker
+-- pass.
+getInstEnvs' :: MonadCore m => MonadMod m => m InstEnvs
+getInstEnvs' = do
+  -- Get the global definitions
+  hscEnv <- liftCore getHscEnv
+  eps <- liftCore . liftIO $ hscEPS hscEnv
+  let global = eps_inst_env eps
 
-  -- Get the required argument type, that is, the given argument needs to be of
-  -- this type.
-  (_, _, argTyRequired, _) <- maybeM $ splitFunTy_maybe funTy
+  -- Get the local definitions
+  local <- reader mg_inst_env
 
-  -- Try to unify the required argument with the actual argument type.
-  subst@(Subst _ _ tvSubst _) <- maybeM $ tcUnifyTy argTyRequired argTy
-  -- TODO: Really I want to give some Result type here as return. For error
-  -- reporting, it would be really nice if it tells us why unification failed
-  -- (or with the check above that the first argument was not actually a
-  -- function).
+  -- Return the instance environments
+  return $ InstEnvs
+    { ie_global = global
+    , ie_local = local
+    -- TODO: Get actual visible orphan modules
+    , ie_visible = mkModuleSet []
+    }
 
-  -- Converts a type variable into its corresponding type application. The
-  -- only thing this does is use the unified version of said type variable if
-  -- it exists. Otherwise, we just return the original type variable as is.
-  let toTyArg :: TyVar -> CoreExpr
-      toTyArg tyVar = Type $ case lookupVarEnv tvSubst tyVar of
-        Just ty -> ty
-        _ -> mkTyVarTy tyVar
-
-  -- Converts a predicate type to an argument, using the unification
-  -- substitution map to get the correct type of this argument.
-  let toPiArg :: MonadCore m => PredType -> m CoreExpr
-      toPiArg pty = do
-        let pty' = substTy subst pty
-        var <- freshLocalVar "constraint" pty'
-        return $ Var var
-
-  -- Applies both type variables and typeclass constraints to the given
-  -- expression. These applied arguments occur free in the expression after
-  -- running this function.
-  let apply :: MonadCore m => [TyVar] -> [PredType] -> CoreExpr -> m CoreExpr
-      apply tyVars piTys expr = do
-        let tyArgs = toTyArg <$> tyVars
-        piArgs <- toPiArg `mapM` piTys
-        let expr' = foldl App expr $ tyArgs <> piArgs
-        return expr'
-
-  -- Perform the necessary type and typeclass applications to the function
-  -- and argument expression. We use the resulting expressions to form an
-  -- application. Note that the types and typeclass we applied are still free
-  -- in the expression.
-  fExpr' <- apply fTyVars fPiTys fExpr
-  aExpr' <- apply aTyVars aPiTys aExpr
-  let expr = App fExpr' aExpr'
-
-  -- Get the new type variables and dictionaries from the expression.
-  -- TODO: Does this always adhere correct ordering (i.e. forall first, then
-  -- dictionaries?) Otherwise, we need to do something smarter!
-  let globals = unionDVarSets $ fmap exprFreeVarsDSet [fExpr, aExpr]
-  let tyVarsAndPiArgs = exprFreeVarsDSet expr `minusDVarSet` globals
-
-  -- We introduce abstractions for all the new variables, making the expression
-  -- well-formed.
-  let expr' = foldr Lam expr $ dVarSetElems tyVarsAndPiArgs
-  return expr'
-
--- | Resolve dictionary instances.
+-- | Fetch a class instance.
 --
--- TODO: Implement this function that removes dictionaries if an instance
--- exists.
--- - We can use mg_inst_env to get the instance environment from the module guts.
--- - Since typeclasses are encoded as type constructors, we can first get the
---   typeclass itself via splitTyConApp_maybe.
--- - We can use tyConClass_maybe to get a Class if the type constructor is
---   one.
--- - Use lookupUniqueInstEnv to find a single instance to use.
--- FIXME: We can get the local instance environment from the module. To get the
--- global one, which includes **a lot** more instances, we would need to be in
--- the TcPluginM it seems...
-resolveClasses :: MonadCore m => MonadMod m => CoreExpr -> m CoreExpr
-resolveClasses expr = do
-  -- let (fTyVars, thetaTys, _) = tcSplitSigmaTy $ exprType expr
-  instEnv <- reader mg_inst_env
-  dbg' "===================================="
-  dbg instEnv
-  -- let resolveClass theta = do
-  --       (tyCon, tyArgs) <- maybeM $ splitTyConApp_maybe theta
-  --       tyClass <- maybeM $ tyConClass_maybe tyCon
-  --       let x = lookupUniqueInstEnv instEnv tyClass tyArgs
-  --       return undefined
-  -- x <- forM thetaTys (maybeM . splitTyConApp_maybe)
-  return expr
-  -- let splitTy = tcSplitSigmaTy . exprType
-
+-- Lookup an instance of the predicate type. We return the dictionary variable
+-- that corresponds to the instance.
+resolveInstance :: Alternative m => MonadCore m => MonadMod m => PredType -> m Var
+resolveInstance predTy = do
+  instEnvs <- getInstEnvs'
+  (tyCon, tyArgs) <- maybeM $ splitTyConApp_maybe predTy
+  tyClass <- maybeM $ tyConClass_maybe tyCon
+  let eitherInst = lookupUniqueInstEnv instEnvs tyClass tyArgs
+  (clsInst, _) <- maybeM $ rightToMaybe eitherInst
+  let dictVar = instanceDFunId clsInst
+  return dictVar

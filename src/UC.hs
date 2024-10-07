@@ -1,5 +1,3 @@
-{-# LANGUAGE ScopedTypeVariables #-}
-
 module UC
   ( plugin
   , UC (..)
@@ -29,6 +27,7 @@ import qualified Projection
 import Types
 import Util
 import Transform
+import Unification
 
 plugin :: Plugin
 plugin = defaultPlugin
@@ -245,22 +244,25 @@ checkSProj projection (Bind' var expr) = do
   ignCirc <- occurAnalyseExpr <$> foldM polyApp sproj' [ign, circ]
     ??= "Incompatible types on ignore/circuit pair"
 
-  -- Normalize ignore/circuit
-  ignCirc' <- occurAnalyseExpr <$> normalize ignCirc
-
+  -- Compose current with ignore
   Bind' _ sproj <- resolveTH' 'Projection.sproj
   exprIgn <- occurAnalyseExpr <$> foldM polyApp sproj [ign, expr]
     ??= "Incompatible types on current/ignore pair"
 
-  exprIgn' <- occurAnalyseExpr <$> normalize exprIgn
+  -- Unify their types so we can compare the circuits.
+  (ignCirc', exprIgn') <- unifyExpr ignCirc exprIgn
+    ??= "Unable to unify ignore/circuit pair with current/ignore pair"
+
+  -- Normalize circuits
+  ignCirc'' <- occurAnalyseExpr <$> normalize ignCirc'
+  exprIgn'' <- occurAnalyseExpr <$> normalize exprIgn'
 
   -- Check whether they are equal
-  -- TODO: Unify expressions before checking equivalence!
-  unless (exprIgn' `eqCoreExpr` ignCirc') $ do
+  unless (exprIgn'' `eqCoreExpr` ignCirc'') $ do
     dbg' "current/ignore:"
-    dbg exprIgn'
+    dbg exprIgn''
     dbg' "ignore/circuit:"
-    dbg ignCirc'
+    dbg ignCirc''
     fail "Expression does not equal ignore/circuit pair."
 
   let var' = setVarType var $ exprType circ
@@ -280,18 +282,26 @@ checkIProj (UCGenerated uc) (Bind' var expr) = do
   leakSim <- occurAnalyseExpr <$> foldM polyApp iproj [leak, sim]
     ??= "Incompatible types on leak/sim pair"
 
+  -- Unify their types so we can compare the circuits.
+  (leakSim', expr') <- unifyExpr leakSim  expr
+    ??= "Unable to unify ignore/circuit pair with current/ignore pair"
+
   -- Normalize leakage/simulator and current expression
-  leakSim' <- occurAnalyseExpr <$> normalize leakSim
-  expr' <- occurAnalyseExpr <$> normalize expr
+  leakSim'' <- occurAnalyseExpr <$> normalize leakSim'
+  expr'' <- occurAnalyseExpr <$> normalize expr'
 
   -- Check whether they are equal
   -- TODO: Unify expressions before checking equivalence!
-  unless (expr' `eqCoreExpr` leakSim') $ do
-    dbg expr'
-    dbg leakSim'
+  unless (expr'' `eqCoreExpr` leakSim'') $ do
+    dbg' "current:"
+    dbg expr''
+    dbg' "leakage/simulator:"
+    dbg leakSim''
     fail "Expression does not equal leakage/simulator pair."
   
-  return $ Bind' var expr'
+  -- We need to adjust the variable type, since we unified the expressions.
+  let var' = setVarType var $ exprType expr''
+  return $ Bind' var' expr''
 
 ucCompare :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCCompare TH.Name) -> Pass m CoreBind'
 ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
