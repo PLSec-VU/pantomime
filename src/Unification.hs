@@ -1,6 +1,6 @@
 module Unification
   ( polyApp
-  , unifyExpr
+  , unifyExprs
   ) where
 
 import Control.Applicative
@@ -68,14 +68,14 @@ polyApp fun arg = do
 --
 -- This can be used to compare two expressions that are quantified different,
 -- but are otherwise comparable.
-unifyExpr
+unifyExprs
   :: Alternative m
   => MonadCore m
   => MonadMod m
   => CoreExpr
   -> CoreExpr
   -> m (CoreExpr, CoreExpr)
-unifyExpr lhs rhs = do
+unifyExprs lhs rhs = do
   -- Split the quantifiers and typeclass constraints from the type
   let lhsTy = unifiableType lhs
   let rhsTy = unifiableType rhs

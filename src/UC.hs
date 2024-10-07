@@ -249,20 +249,14 @@ checkSProj projection (Bind' var expr) = do
   exprIgn <- occurAnalyseExpr <$> foldM polyApp sproj [ign, expr]
     ??= "Incompatible types on current/ignore pair"
 
-  -- Unify their types so we can compare the circuits.
-  (ignCirc', exprIgn') <- unifyExpr ignCirc exprIgn
-    ??= "Unable to unify ignore/circuit pair with current/ignore pair"
-
-  -- Normalize circuits
-  ignCirc'' <- occurAnalyseExpr <$> normalize ignCirc'
-  exprIgn'' <- occurAnalyseExpr <$> normalize exprIgn'
+  (ignCirc', exprIgn') <- unifyAndNorm ignCirc exprIgn
 
   -- Check whether they are equal
-  unless (exprIgn'' `eqCoreExpr` ignCirc'') $ do
+  unless (exprIgn' `eqCoreExpr` ignCirc') $ do
     dbg' "current/ignore:"
-    dbg exprIgn''
+    dbg exprIgn'
     dbg' "ignore/circuit:"
-    dbg ignCirc''
+    dbg ignCirc'
     fail "Expression does not equal ignore/circuit pair."
 
   let var' = setVarType var $ exprType circ
@@ -283,41 +277,50 @@ checkIProj (UCGenerated uc) (Bind' var expr) = do
     ??= "Incompatible types on leak/sim pair"
 
   -- Unify their types so we can compare the circuits.
-  (leakSim', expr') <- unifyExpr leakSim  expr
-    ??= "Unable to unify ignore/circuit pair with current/ignore pair"
-
-  -- Normalize leakage/simulator and current expression
-  leakSim'' <- occurAnalyseExpr <$> normalize leakSim'
-  expr'' <- occurAnalyseExpr <$> normalize expr'
+  (leakSim', expr') <- unifyAndNorm leakSim  expr
 
   -- Check whether they are equal
-  -- TODO: Unify expressions before checking equivalence!
-  unless (expr'' `eqCoreExpr` leakSim'') $ do
+  unless (expr' `eqCoreExpr` leakSim') $ do
     dbg' "current:"
-    dbg expr''
+    dbg expr'
     dbg' "leakage/simulator:"
-    dbg leakSim''
+    dbg leakSim'
     fail "Expression does not equal leakage/simulator pair."
   
   -- We need to adjust the variable type, since we unified the expressions.
-  let var' = setVarType var $ exprType expr''
-  return $ Bind' var' expr''
+  let var' = setVarType var $ exprType expr'
+  return $ Bind' var' expr'
 
 ucCompare :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCCompare TH.Name) -> Pass m CoreBind'
 ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
   Bind' _ other' <- resolveTH' other
 
-  expr' <- occurAnalyseExpr <$> normalize expr
-  other'' <- occurAnalyseExpr <$> normalize other'
+  (expr', other'') <- unifyAndNorm expr other'
 
   -- Check whether they are equal
-  -- TODO: Unify expressions before checking equivalence!
   unless (expr' `eqCoreExpr` other'') $ do
     dbg expr'
     dbg other''
     fail "Expressions were not equal"
   
   return $ Bind' var expr
+
+unifyAndNorm
+  :: MonadFail m
+  => MonadCore m
+  => MonadMod m 
+  => CoreExpr 
+  -> CoreExpr 
+  -> m (CoreExpr, CoreExpr)
+unifyAndNorm this other = do
+  (this', other') <- unifyExprs this other
+    ??= "Unable to unify ignore/circuit pair with current/ignore pair"
+
+  -- Normalize circuits
+  this'' <- occurAnalyseExpr <$> normalize this'
+  other'' <- occurAnalyseExpr <$> normalize other'
+
+  return (this'', other'')
 
 -- compareNormalforms :: MonadFail m => MonadCore m => Pass m ModGuts
 -- compareNormalforms guts = flip annBindsPass guts $ \(UCCompare other) bind -> do
