@@ -13,9 +13,7 @@ module Util
 
   , resolveTH
   , resolveTH'
-  , findLocal
-  , findLocal'
-  , nameToCoreBind
+  , lookupLocal
   , thNameToGhcName'
   , getInstEnvs'
 
@@ -100,30 +98,29 @@ freshGlobalVar name ty = do
   let var = mkGlobalVar VanillaId name' ty vanillaIdInfo
   return var
 
--- | Resolves a template haskell name to a non-recursive core binder.
-resolveTH :: Alternative m => MonadCore m => MonadMod m => TH.Name -> m CoreBind'
-resolveTH = thNameToGhcName' >=> nameToCoreBind
+-- | Resolves a template haskell name to a non-recursive variable.
+resolveTH :: Alternative m => MonadCore m => MonadMod m => TH.Name -> m Var
+resolveTH thName = do
+  name <- thNameToGhcName' thName 
+  -- test <- reader mg_binds
+  -- dbg test
 
--- | Same as `resolveTH`, but emits an error on failure.
-resolveTH' :: MonadFail m => MonadCore m => MonadMod m => TH.Name -> m CoreBind'
+  let lookupLocal' = do
+        Bind' x _ <- lookupLocal $ \v -> varName v == name
+        pure x
+
+  let lookupId' = liftCore $ lookupId name
+
+  lookupLocal' <|> lookupId'
+
+-- | Same as `lookupTH`, but emits an error on failure.
+resolveTH' :: MonadFail m => MonadCore m => MonadMod m => TH.Name -> m Var
 resolveTH' name = resolveTH name
   ??= "Could not resolve function: " <> TH.nameBase name
 
--- | Fetches the (non-recursive) core binder corresponding to the name.
-nameToCoreBind :: (Alternative m, MonadCore m, MonadMod m) => Name -> m CoreBind'
-nameToCoreBind name = findLocal name <|> getUnfolding name
-
--- | Attempts to convert a template haskell name into a Core name. Wrapper of
--- `thNameToGhcName`, but made polymorphic on the monad.
-thNameToGhcName' :: (Alternative m, MonadCore m) => TH.Name -> m Name
-thNameToGhcName' = liftCore . thNameToGhcName >=> maybeM
-
--- | Get a local variable.
-findLocal :: Alternative m => MonadMod m => Name -> m CoreBind'
-findLocal name = findLocal' $ (== name) . varName
-
-findLocal' :: Alternative m => MonadMod m => (Id -> Bool) -> m CoreBind'
-findLocal' cmp = do
+-- | Lookup a local non-recursive binder.
+lookupLocal :: Alternative m => MonadMod m => (Var -> Bool) -> m CoreBind'
+lookupLocal cmp = do
   prog <- reader mg_binds
   let firstJust f = maybeM . listToMaybe . mapMaybe f
   let cmp' = \case
@@ -131,14 +128,10 @@ findLocal' cmp = do
         _ -> Nothing
   firstJust cmp' prog
 
--- | Fetches the unfolding of a name as a corebind.
-getUnfolding :: (Alternative m, MonadCore m) => Name -> m CoreBind'
-getUnfolding name = do
-  id' <- liftCore $ lookupId name
-  let unfolding = idUnfolding id'
-  case unfolding of
-    CoreUnfolding { uf_tmpl = expr } -> return $ Bind' id' expr
-    _ -> empty
+-- | Attempts to convert a template haskell name into a Core name. Wrapper of
+-- `thNameToGhcName`, but made polymorphic on the monad.
+thNameToGhcName' :: Alternative m => MonadCore m => TH.Name -> m Name
+thNameToGhcName' = liftCore . thNameToGhcName >=> maybeM
 
 -- | Fetch the instance environments.
 --

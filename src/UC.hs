@@ -45,10 +45,6 @@ install _ todo = return $ mconcat
   , todo
   ]
   where
-    -- cmpPasses = [CoreDoPluginPass "compareNormalforms" compareNormalforms]
-
-    -- checkPasses = [doCheck]
-
     withProxy proxy ls = (\f -> f proxy) <$> ls
 
     normalizePasses = withProxy (Proxy @(UCGenerated UCNorm))
@@ -75,23 +71,6 @@ install _ todo = return $ mconcat
       , printAndLintPass
       , removeUCBindsPass
       ]
-    -- inferPasses =
-    --   [ CoreDoPluginPass "CreateInferenceBinds" createInferenceBinds
-    --   , CoreDoPluginPass "ProjectOutput" projectOutput
-    --   -- , inlineAllPass proxy
-    --   -- , dedupCasesPass proxy
-    --   -- , printAndLintPass proxy
-    --   -- , CoreDoPluginPass "SplitExprs" splitExprs
-    --   -- , CoreDoPluginPass "splitExpr" $ splitExprs proxy
-    --   , normalizePass proxy'
-    --   , printAndLintPass proxy
-    --   -- , reorderCasesPass proxy
-    --   -- , printAndLintPass proxy
-    --   -- , CoreDoPluginPass "PrintUCGenerated" printUCGenerated
-    --   -- , CoreLiberateCase
-    --   -- , CoreDoPluginPass "PrintUCGenerated" printUCGenerated
-    --   , CoreDoPluginPass "RemoveUCBinds" removeUCBinds
-    --   ]
 
 createUCBinds
   :: forall m a b. (Data a, Data b, MonadFail m, MonadCore m)
@@ -220,9 +199,10 @@ printAndLint bind = do
 -- observation function in the annotation.
 projectOutput :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCTactic TH.Name) -> Pass m CoreBind'
 projectOutput (UCGenerated uc) (Bind' var expr) = do
-  Bind' _ oproj <- resolveTH' 'Projection.oproj
+  let resolve name = Var <$> resolveTH' name
 
-  Bind' _ obs <- resolveTH' $ observation uc
+  oproj <- resolve 'Projection.oproj
+  obs <- resolve $ observation uc
 
   expr' <- occurAnalyseExpr <$> foldM polyApp oproj [obs, expr]
     ??= "Incompatible types on observation/implementation pair"
@@ -235,17 +215,19 @@ checkSProjections (UCGenerated uc) bind = foldM (flip checkSProj) bind $ project
 
 checkSProj :: MonadFail m => MonadCore m => MonadMod m => Projection TH.Name -> Pass m CoreBind'
 checkSProj projection (Bind' var expr) = do
+  let resolve name = Var <$> resolveTH' name
+
   -- Fetch input projection, leakage and simulator functions
-  Bind' _ sproj' <- resolveTH' 'Projection.sproj'
-  Bind' _ ign <- resolveTH' $ ignore projection
-  Bind' _ circ <- resolveTH' $ circuit projection
+  sproj' <- resolve 'Projection.sproj'
+  ign <- resolve $ ignore projection
+  circ <- resolve $ circuit projection
 
   -- Compose ignore with circuit
   ignCirc <- occurAnalyseExpr <$> foldM polyApp sproj' [ign, circ]
     ??= "Incompatible types on ignore/circuit pair"
 
   -- Compose current with ignore
-  Bind' _ sproj <- resolveTH' 'Projection.sproj
+  sproj <- resolve 'Projection.sproj
   exprIgn <- occurAnalyseExpr <$> foldM polyApp sproj [ign, expr]
     ??= "Incompatible types on current/ignore pair"
 
@@ -267,10 +249,12 @@ checkSProj projection (Bind' var expr) = do
 
 checkIProj :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCTactic TH.Name) -> Pass m CoreBind'
 checkIProj (UCGenerated uc) (Bind' var expr) = do
+  let resolve name = Var <$> resolveTH' name
+
   -- Fetch input projection, leakage and simulator functions
-  Bind' _ iproj <- resolveTH' 'Projection.iproj
-  Bind' _ leak <- resolveTH' $ leakage uc
-  Bind' _ sim <- resolveTH' $ simulator uc
+  iproj <- resolve 'Projection.iproj
+  leak <- resolve $ leakage uc
+  sim <- resolve $ simulator uc
 
   -- Compose leakage with simulator
   leakSim <- occurAnalyseExpr <$> foldM polyApp iproj [leak, sim]
@@ -293,7 +277,8 @@ checkIProj (UCGenerated uc) (Bind' var expr) = do
 
 ucCompare :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCCompare TH.Name) -> Pass m CoreBind'
 ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
-  Bind' _ other' <- resolveTH' other
+  let resolve name = Var <$> resolveTH' name
+  other' <- resolve other
 
   (expr', other'') <- unifyAndNorm expr other'
 
@@ -321,39 +306,6 @@ unifyAndNorm this other = do
   other'' <- occurAnalyseExpr <$> normalize other'
 
   return (this'', other'')
-
--- compareNormalforms :: MonadFail m => MonadCore m => Pass m ModGuts
--- compareNormalforms guts = flip annBindsPass guts $ \(UCCompare other) bind -> do
---   let prog = mg_binds guts
-
---   let normalize' = bindPass normalize
-
---   other' <- resolveTH' prog other
-
---   lhs <- normalize' other'
---   rhs <- normalize' bind
---   let cmp (Bind' _ l) (Bind' _ r) = eqCoreExpr l r
---   unless (lhs `cmp` rhs) $ do
---     dbg other'
---     dbg lhs
---     dbg bind
---     dbg rhs
---     fail "Expressions were non-equal"
---   return bind
-
--- splitExprs
---   :: forall a m proxy. Data a
---   => MonadCore m
---   => proxy a
---   -> Pass m ModGuts
--- splitExprs _ = annBindsPass $ \(_ :: a) (Bind' x e) -> do
---   let fused = fuse
---         [ redundantCase
---         , caseFactor
---         ]
-
---   e' <- occurAnalyseExpr <$> fix fused e
---   return $ Bind' x e'
 
 -- TODO: Implement this!
 removeUCBinds :: MonadCore m => Pass m ModGuts

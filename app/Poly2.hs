@@ -1,9 +1,9 @@
-module Poly
-  ( adder
+module Poly2
+  ( sim
+  , circ
+  , adder
   , obs
   , leak
-  , sim
-  , circ
   ) where
 
 import UC
@@ -24,18 +24,19 @@ adder s i = case i of
   Just (a, b) -> (Just $ a + b, s)
   Nothing -> (Nothing, s)
 
-obs :: Num a => Eq a => Maybe a -> Maybe Bool
-obs (Just x) = Just $ x == 0
+obs :: Num a => Ord a => Maybe a -> Maybe Ordering
+obs (Just x) = Just $ compare x 0
 obs _ = Nothing
 
-leak :: Num a => Eq a => Maybe (a, a) -> Maybe Bool
-leak (Just (a, b)) = Just $ a + b == 0
+leak :: Ord a => Num a => Maybe (a, a) -> Maybe Ordering
+leak (Just (x, y)) = Just $ compare (x + y) 0
 leak _ = Nothing
 
-sim :: Maybe Bool -> Maybe Bool -> (Maybe Bool, Maybe Bool)
+sim :: Maybe Ordering -> Maybe Ordering -> (Maybe Ordering, Maybe Ordering)
 sim s i = (i, s)
 
-circ :: Num a => Eq a => Maybe Bool -> Maybe (a, a) -> (Maybe Bool, Maybe Bool)
+circ :: Num b => Ord b => Maybe Ordering -> Maybe (b, b) -> (Maybe Ordering, Maybe Ordering)
 circ s i = case i of
-  Just (a, b) -> (Just $ a + b == 0, s)
+  Just (a, b) -> (Just $ compare (a + b) 0, s)
   Nothing -> (Nothing, s)
+

@@ -44,6 +44,7 @@ library
       DeriveTraversable
       FlexibleContexts
       LambdaCase
+      NamedFieldPuns
       ScopedTypeVariables
       TemplateHaskell
       TypeApplications
@@ -62,9 +63,11 @@ executable uc-plugin-exe
   main-is: Main.hs
   other-modules:
       ClassInline
+      LocalClass
       Mono
       NoState
       Poly
+      Poly2
       RW
       ThreeAdder
       Paths_uc_plugin
@@ -78,6 +81,7 @@ executable uc-plugin-exe
       DeriveTraversable
       FlexibleContexts
       LambdaCase
+      NamedFieldPuns
       ScopedTypeVariables
       TemplateHaskell
       TypeApplications
@@ -108,6 +112,7 @@ test-suite uc-plugin-test
       DeriveTraversable
       FlexibleContexts
       LambdaCase
+      NamedFieldPuns
       ScopedTypeVariables
       TemplateHaskell
       TypeApplications

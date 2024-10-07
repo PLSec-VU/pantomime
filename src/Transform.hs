@@ -94,19 +94,24 @@ etaReduce = \case
   _ -> empty
 
 -- | Inlines all non-typeclass functions.
-inlineUnfolding :: (Alternative m, Monad m) => Pass m CoreExpr
+inlineUnfolding :: Alternative m => Pass m CoreExpr
 inlineUnfolding = \case
-  Var x
-    | not $ isClassOpId x
-    , CoreUnfolding { uf_tmpl = expr } <- idUnfolding x -> return expr
+  Var x -> case idUnfolding x of
+    CoreUnfolding { uf_tmpl } -> pure uf_tmpl
+    DFunUnfolding { df_bndrs, df_con, df_args } -> do
+      let con = Var $ dataConWorkId df_con
+      let inner = foldl App con df_args
+      let quantified = foldr Lam inner df_bndrs
+      pure quantified
+    _ -> empty
   _ -> empty
 
 -- | Inline definitions that are local to the current module.
 inlineLocal :: Alternative m => MonadMod m => Pass m CoreExpr
 inlineLocal = \case
   Var x -> do
-    Bind' _ e <- findLocal' (== x)
-    return e
+    Bind' _ e <- lookupLocal (== x)
+    pure e
   _ -> empty
 
 -- | Reduces a case expression if the spine of the scrutinee is a constructor.

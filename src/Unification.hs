@@ -11,6 +11,7 @@ import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Unify (tcUnifyTy)
 import GHC.Core.Map.Type (TypeMap)
+import GHC.Core.Predicate (isDictId)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy)
 import GHC.Data.TrieMap (lookupTM, insertTM, emptyTM)
 
@@ -61,8 +62,9 @@ polyApp fun arg = do
 
   -- We introduce abstractions for all the new variables, making the expression
   -- well-formed.
-  let tyVarsAndPredArgs = sortQuantVars $ exprFreeVarsList expr
-  return $ foldr Lam expr tyVarsAndPredArgs
+  let tyVarsAndPredArgs = sortQuantDictVars $ exprFreeVarsList expr
+  let expr' = foldr Lam expr tyVarsAndPredArgs
+  return expr'
 
 -- | Unify two expressions.
 --
@@ -93,7 +95,7 @@ unifyExprs lhs rhs = do
   -- for both expressions as one list. If we do not do this, we may miss some
   -- dictionaries that are used in only one of the expressions. This would make
   -- the unification incorrect!
-  let sort = sortQuantVars . nonDetStrictFoldVarSet (:) []
+  let sort = sortQuantDictVars . nonDetStrictFoldVarSet (:) []
   let quantifiers = sort $ exprFreeVars lhs' <> exprFreeVars rhs'
 
   -- We introduce abstractions for all the new variables, making the expression
@@ -162,4 +164,11 @@ applyUnification subst@(Subst _ _ tvSubst _) expr = do
   predArgs <- mapM toPredArg predTys
   let expr' = foldl App expr $ tyArgs <> predArgs
   return expr'
+
+-- | Sort quantifiers and dictionaries.
+--
+-- First filters non-quantifier or dictionary variables. Then sorts them to
+-- ensure correct order of definitions.
+sortQuantDictVars :: [Var] -> [Var]
+sortQuantDictVars = sortQuantVars . filter (\v -> isDictId v || isTyVar v)
 
