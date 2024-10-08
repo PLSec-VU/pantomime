@@ -4,20 +4,20 @@ module ClassInline
   , adder
   ) where
 
-import UC
-import Control.Monad (void)
+-- import UC
+-- import Control.Monad (void)
 
-{-# ANN adder UCTactic 
-  { observation = 'void
-  , leakage = 'void
-  , simulator = 'sim
-  , projections =
-    [ Projection
-      { ignore = 'void
-      , circuit = 'circ
-      }
-    ]
-  } #-}
+-- {-# ANN adder UCTactic 
+--   { observation = 'void
+--   , leakage = 'void
+--   , simulator = 'sim
+--   , projections =
+--     [ Projection
+--       { ignore = 'void
+--       , circuit = 'circ
+--       }
+--     ]
+--   } #-}
 adder :: Num a => Maybe a -> Maybe (a, a) -> (Maybe a, Maybe a)
 adder s i = case i of
   Just (a, b) -> (Just $ a + b, s)

@@ -11,14 +11,14 @@ module ThreeAdder
   , rw5
   ) where
 
-import UC
+-- import UC
 
-{-# ANN addr3 UCTactic
-  { observation = 'void
-  , leakage = 'leak3
-  , simulator = 'sim3
-  , projections = []
-  } #-}
+-- {-# ANN addr3 UCTactic
+--   { observation = 'void
+--   , leakage = 'leak3
+--   , simulator = 'sim3
+--   , projections = []
+--   } #-}
 addr3 :: ((), ()) -> ((Maybe Int, Maybe Int), Maybe Int) -> (((),()), Maybe Int)
 addr3 (s1, s2) ((a, b), c) = ((s1', s2'), abc)
    where
