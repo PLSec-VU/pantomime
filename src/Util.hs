@@ -17,9 +17,6 @@ module Util
   , thNameToGhcName'
   , getInstEnvs'
 
-  , simplifyExpr'
-  , noOpSimplifyExprOpts
-
   , resolveInstance
   ) where
 
@@ -34,16 +31,6 @@ import GHC.Types.TyThing (lookupId)
 import GHC.Core.InstEnv (InstEnvs (..), lookupUniqueInstEnv, instanceDFunId)
 import GHC.Unit.External (eps_inst_env)
 import GHC.Data.Maybe (rightToMaybe)
-import GHC.Utils.Logger (getLogger)
-import GHC.Unit.Env (ue_eps)
-
-import GHC.Core.Opt.Simplify (SimplifyExprOpts (..), simplifyExpr)
-import GHC.Core.Opt.Simplify.Env (SimplMode (..), FloatEnable (FloatDisabled))
-import GHC.Core.Opt.Simplify.Monad
-import GHC.Core.Unfold (defaultUnfoldingOpts)
-import GHC.Core.Opt.Arity (ArityOpts(..))
-import GHC.Core.Rules.Config (RuleOpts(..))
-import GHC.Core.Coercion.Opt (OptCoercionOpts(..))
 
 import Data.Maybe (mapMaybe, listToMaybe)
 import Data.List (foldl')
@@ -57,7 +44,7 @@ import Types
 
 -- | Run the given pass until a fixed point is reached. That is, the given pass
 -- does not produce a new result.
-fix :: (MonadCore m, Data a) => Pass (MaybeT m) a -> Pass m a
+fix :: MonadCore m => Data a => Pass (MaybeT m) a -> Pass m a
 fix f = everywhereM $ mkM go
   where
     go e = runMaybeT (f e) >>= \case
@@ -182,47 +169,4 @@ resolveInstance predTy = do
   let dictVar = instanceDFunId clsInst
   return dictVar
 
--- | Simplifies an expression in the Core Monad.
-simplifyExpr' :: MonadCore m => SimplifyExprOpts -> Pass m CoreExpr
-simplifyExpr' opts expr = liftCore $ do
-  logger <- getLogger
-  hscEnv <- getHscEnv
-  let euc = ue_eps $ hsc_unit_env hscEnv
-  liftIO $ simplifyExpr logger euc opts expr
 
-noOpSimplifyExprOpts :: MonadCore m => CompilerPhase -> [String] -> m SimplifyExprOpts
-noOpSimplifyExprOpts phase names = do
-  dflags <- liftCore getDynFlags
-  return SimplifyExprOpts
-    { se_fam_inst = []
-    , se_mode = SimplMode
-      { sm_phase = phase
-      , sm_names = names
-      , sm_rules = False
-      , sm_inline = False
-      , sm_eta_expand = False
-      , sm_cast_swizzle = False
-      , sm_uf_opts = defaultUnfoldingOpts
-      , sm_case_case = False
-      , sm_pre_inline = False
-      , sm_float_enable = FloatDisabled
-      , sm_do_eta_reduction = False
-      , sm_arity_opts = ArityOpts
-        { ao_ped_bot = False
-        , ao_dicts_cheap = False
-        }
-      , sm_rule_opts = RuleOpts
-        { roPlatform = targetPlatform dflags
-        , roNumConstantFolding = False
-        , roExcessRationalPrecision = False
-        , roBignumRules = False
-        }
-      , sm_case_folding = False
-      , sm_case_merge = False
-      , sm_co_opt_opts = OptCoercionOpts False
-      }
-    , se_top_env_cfg = TopEnvConfig
-      { te_history_size = 20
-      , te_tick_factor = 100
-      }
-    }

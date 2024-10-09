@@ -27,6 +27,7 @@ library
   exposed-modules:
       GHC.MonadCore
       Projection
+      Simplify
       Transform
       Types
       UC

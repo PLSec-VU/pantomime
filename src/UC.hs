@@ -9,13 +9,12 @@ module UC
 
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Lint
-import GHC.Driver.Config.Core.Lint (initLintConfig)
 import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
 import GHC.Core.Map.Expr (eqCoreExpr)
-
+import GHC.Driver.Config.Core.Lint (initLintConfig)
 import GHC.MonadCore
-import Data.Maybe (catMaybes)
 
+import Data.Maybe (catMaybes)
 import Data.Data
 
 import Control.Monad.Reader (ReaderT (..), reader)
@@ -195,6 +194,15 @@ printAndLint bind = do
   dbg res
   return bind
 
+lintExpr' :: MonadCore m => CoreExpr -> m ()
+lintExpr' expr = do
+  dflags <- liftCore getDynFlags
+  let cfg = initLintConfig dflags []
+  let res = lintExpr cfg expr
+  case res of
+    Just err -> dbg err
+    Nothing -> dbg' "Lint: OK"
+
 -- | Project the output of all generated UC binders, according to the
 -- observation function in the annotation.
 projectOutput :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCTactic TH.Name) -> Pass m CoreBind'
@@ -217,21 +225,22 @@ checkSProj :: MonadFail m => MonadCore m => MonadMod m => Projection TH.Name -> 
 checkSProj projection (Bind' var expr) = do
   let resolve name = Var <$> resolveTH' name
 
-  -- Fetch input projection, leakage and simulator functions
-  sproj' <- resolve 'Projection.sproj'
-  ign <- resolve $ ignore projection
-  circ <- resolve $ circuit projection
-
-  -- Compose ignore with circuit
-  ignCirc <- occurAnalyseExpr <$> foldM polyApp sproj' [ign, circ]
-    ??= "Incompatible types on ignore/circuit pair"
-
   -- Compose current with ignore
+  ign <- resolve $ ignore projection
   sproj <- resolve 'Projection.sproj
   exprIgn <- occurAnalyseExpr <$> foldM polyApp sproj [ign, expr]
     ??= "Incompatible types on current/ignore pair"
 
-  (ignCirc', exprIgn') <- unifyAndNorm ignCirc exprIgn
+  -- Compose ignore with circuit
+  sproj' <- resolve 'Projection.sproj'
+  circ <- resolve $ circuit projection
+  ignCirc <- occurAnalyseExpr <$> foldM polyApp sproj' [ign, circ]
+    ??= "Incompatible types on ignore/circuit pair"
+
+  (exprIgn', ignCirc') <- unifyAndNorm exprIgn ignCirc
+
+  lintExpr' exprIgn'
+  lintExpr' ignCirc'
 
   -- Check whether they are equal
   unless (exprIgn' `eqCoreExpr` ignCirc') $ do
@@ -270,7 +279,7 @@ checkIProj (UCGenerated uc) (Bind' var expr) = do
     dbg' "leakage/simulator:"
     dbg leakSim'
     fail "Expression does not equal leakage/simulator pair."
-  
+
   -- We need to adjust the variable type, since we unified the expressions.
   let var' = setVarType var $ exprType expr'
   return $ Bind' var' expr'
@@ -287,15 +296,15 @@ ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
     dbg expr'
     dbg other''
     fail "Expressions were not equal"
-  
+
   return $ Bind' var expr
 
 unifyAndNorm
   :: MonadFail m
   => MonadCore m
-  => MonadMod m 
-  => CoreExpr 
-  -> CoreExpr 
+  => MonadMod m
+  => CoreExpr
+  -> CoreExpr
   -> m (CoreExpr, CoreExpr)
 unifyAndNorm this other = do
   (this', other') <- unifyExprs this other
