@@ -1,11 +1,12 @@
 module Util
-  ( maybeM
-  , unwrap
-  , (??=)
-
+  ( bindPass
   , fix
   , fuse
   , (<|-|>)
+
+  , maybeM
+  , unwrap
+  , (??=)
 
   , freshTyVar
   , freshLocalVar
@@ -17,6 +18,7 @@ module Util
   , thNameToGhcName'
   , getInstEnvs'
 
+  , lintExpr'
   , resolveInstance
   ) where
 
@@ -31,16 +33,24 @@ import GHC.Types.TyThing (lookupId)
 import GHC.Core.InstEnv (InstEnvs (..), lookupUniqueInstEnv, instanceDFunId)
 import GHC.Unit.External (eps_inst_env)
 import GHC.Data.Maybe (rightToMaybe)
+import GHC.Data.Bag (Bag)
+
+import GHC.Driver.Config.Core.Lint (initLintConfig)
+import GHC.Core.Lint
 
 import Data.Maybe (mapMaybe, listToMaybe)
 import Data.List (foldl')
 
 import Data.Data
-import Generics.SYB hiding (empty)
+import Data.Generics hiding (empty)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
 import Types
+
+-- | Maps an expression pass over a binder.
+bindPass :: MonadCore m => Pass m (Expr a) -> Pass m (Bind' a)
+bindPass f (Bind' x e) = Bind' x <$> f e
 
 -- | Run the given pass until a fixed point is reached. That is, the given pass
 -- does not produce a new result.
@@ -102,15 +112,10 @@ freshGlobalVar name ty = do
 resolveTH :: Alternative m => MonadCore m => MonadMod m => TH.Name -> m Var
 resolveTH thName = do
   name <- thNameToGhcName' thName 
-  -- test <- reader mg_binds
-  -- dbg test
-
   let lookupLocal' = do
         Bind' x _ <- lookupLocal $ \v -> varName v == name
         pure x
-
   let lookupId' = liftCore $ lookupId name
-
   lookupLocal' <|> lookupId'
 
 -- | Same as `lookupTH`, but emits an error on failure.
@@ -169,4 +174,9 @@ resolveInstance predTy = do
   let dictVar = instanceDFunId clsInst
   return dictVar
 
-
+lintExpr' :: MonadCore m => CoreExpr -> m (Maybe (Bag SDoc))
+lintExpr' expr = do
+  dflags <- liftCore getDynFlags
+  let vars = exprFreeVarsList expr
+  let cfg = initLintConfig dflags vars
+  return $ lintExpr cfg expr

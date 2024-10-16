@@ -4,9 +4,12 @@ module Mono
   , leak
   , sim
   , circ
+  , curIgn
+  , ignCirc
   ) where
 
 import UC
+import Projection
 
 {-# ANN adder UCTactic 
   { observation = 'obs
@@ -23,6 +26,14 @@ adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
 adder s i = case i of
   Just (a, b) -> (Just $ a + b, s)
   Nothing -> (Nothing, s)
+
+-- {-# ANN curIgn UCNorm #-}
+curIgn :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+curIgn = sproj obs (oproj obs adder)
+
+-- {-# ANN ignCirc UCNorm #-}
+ignCirc :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
+ignCirc = sproj' obs circ
 
 obs :: Maybe Int -> Maybe Bool
 obs (Just x) = Just $ x == 0

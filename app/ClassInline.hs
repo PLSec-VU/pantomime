@@ -28,6 +28,6 @@ sim s i = (i, s)
 
 circ :: Maybe () -> Maybe (b, b) -> (Maybe (), Maybe ())
 circ s i = case i of
-  Just (a, b) -> (Just (), s)
+  Just _ -> (Just (), s)
   Nothing -> (Nothing, s)
 

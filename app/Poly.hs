@@ -4,25 +4,36 @@ module Poly
   , leak
   , sim
   , circ
+  , curIgn
+  , ignCirc
   ) where
 
 import UC
+import Projection
 
-{-# ANN adder UCTactic 
-  { observation = 'obs
-  , leakage = 'leak
-  , simulator = 'sim
-  , projections =
-    [ Projection
-      { ignore = 'obs
-      , circuit = 'circ
-      }
-    ]
-  } #-}
+-- {-# ANN adder UCTactic 
+--   { observation = 'obs
+--   , leakage = 'leak
+--   , simulator = 'sim
+--   , projections =
+--     [ Projection
+--       { ignore = 'obs
+--       , circuit = 'circ
+--       }
+--     ]
+--   } #-}
 adder :: Num a => Maybe a -> Maybe (a, a) -> (Maybe a, Maybe a)
 adder s i = case i of
   Just (a, b) -> (Just $ a + b, s)
   Nothing -> (Nothing, s)
+
+{-# ANN curIgn UCNorm #-}
+curIgn :: Num a => Eq a => Maybe a -> Maybe (a, a) -> (Maybe Bool, Maybe Bool)
+curIgn = sproj obs (oproj obs adder)
+
+-- {-# ANN ignCirc UCNorm #-}
+ignCirc :: Num a => Eq a => Maybe a -> Maybe (a, a) -> (Maybe Bool, Maybe Bool)
+ignCirc = sproj' obs circ
 
 obs :: Num a => Eq a => Maybe a -> Maybe Bool
 obs (Just x) = Just $ x == 0

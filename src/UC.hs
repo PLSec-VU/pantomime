@@ -194,15 +194,6 @@ printAndLint bind = do
   dbg res
   return bind
 
-lintExpr' :: MonadCore m => CoreExpr -> m ()
-lintExpr' expr = do
-  dflags <- liftCore getDynFlags
-  let cfg = initLintConfig dflags []
-  let res = lintExpr cfg expr
-  case res of
-    Just err -> dbg err
-    Nothing -> dbg' "Lint: OK"
-
 -- | Project the output of all generated UC binders, according to the
 -- observation function in the annotation.
 projectOutput :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCTactic TH.Name) -> Pass m CoreBind'
@@ -239,8 +230,8 @@ checkSProj projection (Bind' var expr) = do
 
   (exprIgn', ignCirc') <- unifyAndNorm exprIgn ignCirc
 
-  lintExpr' exprIgn'
-  lintExpr' ignCirc'
+  lintExpr' exprIgn' >>= dbg
+  lintExpr' ignCirc' >>= dbg
 
   -- Check whether they are equal
   unless (exprIgn' `eqCoreExpr` ignCirc') $ do
