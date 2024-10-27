@@ -6,19 +6,19 @@ module Poly2
   , leak
   ) where
 
--- import UC
+import UC
 
--- {-# ANN adder UCTactic 
---   { observation = 'obs
---   , leakage = 'leak
---   , simulator = 'sim
---   , projections =
---     [ Projection
---       { ignore = 'obs
---       , circuit = 'circ
---       }
---     ]
---   } #-}
+{-# ANN adder UCTactic 
+  { observation = 'obs
+  , leakage = 'leak
+  , simulator = 'sim
+  , projections =
+    [ Projection
+      { ignore = 'obs
+      , circuit = 'circ
+      }
+    ]
+  } #-}
 adder :: Num a => Maybe a -> Maybe (a, a) -> (Maybe a, Maybe a)
 adder s i = case i of
   Just (a, b) -> (Just $ a + b, s)

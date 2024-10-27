@@ -1,8 +1,8 @@
 module Util
   ( bindPass
-  , fix
-  , fuse
-  , (<|-|>)
+  -- , fix
+  -- , fuse
+  -- , (<|-|>)
 
   , maybeM
   , unwrap
@@ -11,6 +11,8 @@ module Util
   , freshTyVar
   , freshLocalVar
   , freshGlobalVar
+  , clearOccInfo
+  , substAlt
 
   , resolveTH
   , resolveTH'
@@ -25,7 +27,7 @@ module Util
 import Control.Applicative
 import Control.Monad.Trans.Maybe
 import Control.Monad ((>=>))
-import Control.Monad.Reader (reader)
+import Control.Monad.Reader (MonadReader, reader)
 
 import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
@@ -39,35 +41,35 @@ import GHC.Driver.Config.Core.Lint (initLintConfig)
 import GHC.Core.Lint
 
 import Data.Maybe (mapMaybe, listToMaybe)
-import Data.List (foldl')
+-- import Data.List (foldl')
 
-import Data.Data
-import Data.Generics hiding (empty)
+-- import Data.Data
+-- import Data.Generics hiding (empty)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
 import Types
 
 -- | Maps an expression pass over a binder.
-bindPass :: MonadCore m => Pass m (Expr a) -> Pass m (Bind' a)
+bindPass :: Functor m => Pass m (Expr a) -> Pass m (Bind' a)
 bindPass f (Bind' x e) = Bind' x <$> f e
 
--- | Run the given pass until a fixed point is reached. That is, the given pass
--- does not produce a new result.
-fix :: MonadCore m => Data a => Pass (MaybeT m) a -> Pass m a
-fix f = everywhereM $ mkM go
-  where
-    go e = runMaybeT (f e) >>= \case
-      Just e' -> fix f e'
-      Nothing -> return e
+-- -- | Run the given pass until a fixed point is reached. That is, the given pass
+-- -- does not produce a new result.
+-- fix :: Monad m => Data a => Pass (MaybeT m) a -> Pass m a
+-- fix f = everywhereM $ mkM go
+--   where
+--     go e = runMaybeT (f e) >>= \case
+--       Just e' -> fix f e'
+--       Nothing -> return e
 
--- | Fuse all the given passes; the first succesful pass wil return its result.
-fuse :: Alternative m => [Pass m a] -> Pass m a
-fuse = foldl' (<|-|>) $ const empty
+-- -- | Fuse all the given passes; the first succesful pass wil return its result.
+-- fuse :: Alternative m => [Pass m a] -> Pass m a
+-- fuse = foldl' (<|-|>) $ const empty
 
--- | Fuses two passes; the first succesful pass will return its result.
-(<|-|>) :: Alternative m => Pass m a -> Pass m a -> Pass m a
-(<|-|>) p p' e = p e <|> p' e
+-- -- | Fuses two passes; the first succesful pass will return its result.
+-- (<|-|>) :: Alternative m => Pass m a -> Pass m a -> Pass m a
+-- (<|-|>) p p' e = p e <|> p' e
 
 -- | Convert the given maybe into an alternative.
 maybeM :: Alternative m => Maybe a -> m a
@@ -93,11 +95,11 @@ freshTyVar name kind = do
   return var
 
 -- | Creates a fresh variable.
-freshLocalVar :: MonadCore m => String -> Type -> m Var
-freshLocalVar name ty = do
+freshLocalVar :: MonadCore m => String -> Mult -> Type -> m Var
+freshLocalVar name mult ty = do
   unique <- liftCore getUniqueM
   let name' = mkSystemName unique $ mkVarOcc name
-  let var = mkLocalVar VanillaId name' ManyTy ty vanillaIdInfo
+  let var = mkLocalVar VanillaId name' mult ty vanillaIdInfo
   return var
 
 -- | Creates a fresh variable.
@@ -108,8 +110,23 @@ freshGlobalVar name ty = do
   let var = mkGlobalVar VanillaId name' ty vanillaIdInfo
   return var
 
+-- | Substitute an alt.
+substAlt :: Subst -> CoreAlt -> CoreAlt
+substAlt subst (Alt con bndrs rhs) = do
+  let (subst', _) = substBndrs subst bndrs
+  Alt con bndrs $ substExpr subst' rhs
+
+clearOccInfo :: Id -> Id
+clearOccInfo = flip setIdOccInfo noOccInfo
+
 -- | Resolves a template haskell name to a non-recursive variable.
-resolveTH :: Alternative m => MonadCore m => MonadMod m => TH.Name -> m Var
+resolveTH
+  :: Alternative m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => TH.Name
+  -> m Var
 resolveTH thName = do
   name <- thNameToGhcName' thName 
   let lookupLocal' = do
@@ -119,14 +136,25 @@ resolveTH thName = do
   lookupLocal' <|> lookupId'
 
 -- | Same as `lookupTH`, but emits an error on failure.
-resolveTH' :: MonadFail m => MonadCore m => MonadMod m => TH.Name -> m Var
+resolveTH'
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => TH.Name
+  -> m Var
 resolveTH' name = resolveTH name
   ??= "Could not resolve function: " <> TH.nameBase name
 
 -- | Lookup a local non-recursive binder.
-lookupLocal :: Alternative m => MonadMod m => (Var -> Bool) -> m CoreBind'
+lookupLocal
+  :: Alternative m
+  => MonadReader r m
+  => HasModGuts r
+  => (Var -> Bool)
+  -> m CoreBind'
 lookupLocal cmp = do
-  prog <- reader mg_binds
+  prog <- reader $ mg_binds . modGuts
   let firstJust f = maybeM . listToMaybe . mapMaybe f
   let cmp' = \case
         NonRec x e | cmp x -> Just $ Bind' x e
@@ -142,7 +170,7 @@ thNameToGhcName' = liftCore . thNameToGhcName >=> maybeM
 --
 -- Get the instance environments from a CoreM pass instead of the typechecker
 -- pass.
-getInstEnvs' :: MonadCore m => MonadMod m => m InstEnvs
+getInstEnvs' :: MonadCore m => MonadReader r m => HasModGuts r => m InstEnvs
 getInstEnvs' = do
   -- Get the global definitions
   hscEnv <- liftCore getHscEnv
@@ -150,7 +178,7 @@ getInstEnvs' = do
   let global = eps_inst_env eps
 
   -- Get the local definitions
-  local <- reader mg_inst_env
+  local <- reader $ mg_inst_env . modGuts
 
   -- Return the instance environments
   return $ InstEnvs
@@ -164,7 +192,13 @@ getInstEnvs' = do
 --
 -- Lookup an instance of the predicate type. We return the dictionary variable
 -- that corresponds to the instance.
-resolveInstance :: Alternative m => MonadCore m => MonadMod m => PredType -> m DFunId
+resolveInstance
+  :: Alternative m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => PredType
+  -> m DFunId
 resolveInstance predTy = do
   instEnvs <- getInstEnvs'
   (tyCon, tyArgs) <- maybeM $ splitTyConApp_maybe predTy

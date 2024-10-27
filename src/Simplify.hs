@@ -22,7 +22,7 @@ import GHC.Platform (genericPlatform)
 
 import GHC.MonadCore
 
-import Control.Monad.Reader (ask)
+import Control.Monad.Reader (MonadReader, reader)
 
 import Types
 
@@ -40,12 +40,12 @@ simplifyExpr' opts expr = liftCore $ do
 -- | Run a simplifier in the Core Monad.
 --
 -- A more controlled way to use the GHC simplifier.
-runSimplifier :: MonadCore m => MonadMod m => SimplM a -> m a
+runSimplifier :: MonadCore m => MonadReader r m => HasModGuts r => SimplM a -> m a
 runSimplifier simpl = do
   dflags <- liftCore getDynFlags
   logger <- liftCore getLogger
   
-  ruleEnv <- ask >>= liftCore . initRuleEnv
+  ruleEnv <- reader modGuts >>= liftCore . initRuleEnv
   let ruleEnv' = return ruleEnv
   let cfg = TopEnvConfig
         { te_history_size = historySize dflags

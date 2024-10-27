@@ -24,7 +24,9 @@ default-extensions:
 - DeriveDataTypeable
 - DeriveTraversable
 - FlexibleContexts
+- FlexibleInstances
 - LambdaCase
+- MultiWayIf
 - NamedFieldPuns
 - ScopedTypeVariables
 - TemplateHaskell

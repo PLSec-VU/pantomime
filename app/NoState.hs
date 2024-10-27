@@ -5,14 +5,14 @@ module NoState
   , adder
   ) where
 
--- import UC
+import UC
 
--- {-# ANN adder UCTactic 
---   { observation = 'obs
---   , leakage = 'leak
---   , simulator = 'sim
---   , projections = []
---   } #-}
+{-# ANN adder UCTactic 
+  { observation = 'obs
+  , leakage = 'leak
+  , simulator = 'sim
+  , projections = []
+  } #-}
 adder :: () -> Maybe (Int, Int) -> ((), Maybe Int)
 adder _ (Just (a, b)) = ((), Just $ a + b)
 adder _ _ = ((), Nothing)

@@ -25,6 +25,7 @@ source-repository head
 
 library
   exposed-modules:
+      Fusion
       GHC.MonadCore
       Projection
       Simplify
@@ -44,7 +45,9 @@ library
       DeriveDataTypeable
       DeriveTraversable
       FlexibleContexts
+      FlexibleInstances
       LambdaCase
+      MultiWayIf
       NamedFieldPuns
       ScopedTypeVariables
       TemplateHaskell
@@ -81,7 +84,9 @@ executable uc-plugin-exe
       DeriveDataTypeable
       DeriveTraversable
       FlexibleContexts
+      FlexibleInstances
       LambdaCase
+      MultiWayIf
       NamedFieldPuns
       ScopedTypeVariables
       TemplateHaskell
@@ -112,7 +117,9 @@ test-suite uc-plugin-test
       DeriveDataTypeable
       DeriveTraversable
       FlexibleContexts
+      FlexibleInstances
       LambdaCase
+      MultiWayIf
       NamedFieldPuns
       ScopedTypeVariables
       TemplateHaskell

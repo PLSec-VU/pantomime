@@ -17,7 +17,7 @@ import GHC.MonadCore
 import Data.Maybe (catMaybes)
 import Data.Data
 
-import Control.Monad.Reader (ReaderT (..), reader)
+import Control.Monad.Reader (MonadReader, ReaderT (..), reader)
 import Control.Monad (forM, foldM, unless)
 
 import qualified Language.Haskell.TH.Syntax as TH
@@ -184,11 +184,15 @@ ucComparePass _ = CoreDoPluginPass name pass
     name = TH.nameBase 'ucComparePass
     pass = annBindsPassWithGuts ucCompare
 
-printAndLint :: MonadCore m => MonadMod m => Pass m CoreBind'
+printAndLint
+  :: MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => Pass m CoreBind'
 printAndLint bind = do
   dflags <- liftCore getDynFlags
   let cfg = initLintConfig dflags []
-  prog <- reader mg_binds
+  prog <- reader $ mg_binds . modGuts
   let res = lintCoreBindings' cfg prog
   dbg bind
   dbg res
@@ -196,7 +200,13 @@ printAndLint bind = do
 
 -- | Project the output of all generated UC binders, according to the
 -- observation function in the annotation.
-projectOutput :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCTactic TH.Name) -> Pass m CoreBind'
+projectOutput
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => UCGenerated (UCTactic TH.Name)
+  -> Pass m CoreBind'
 projectOutput (UCGenerated uc) (Bind' var expr) = do
   let resolve name = Var <$> resolveTH' name
 
@@ -209,10 +219,22 @@ projectOutput (UCGenerated uc) (Bind' var expr) = do
   let var' = setVarType var $ exprType expr'
   return $ Bind' var' expr'
 
-checkSProjections :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCTactic TH.Name) -> Pass m CoreBind'
+checkSProjections
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => UCGenerated (UCTactic TH.Name)
+  -> Pass m CoreBind'
 checkSProjections (UCGenerated uc) bind = foldM (flip checkSProj) bind $ projections uc
 
-checkSProj :: MonadFail m => MonadCore m => MonadMod m => Projection TH.Name -> Pass m CoreBind'
+checkSProj
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => Projection TH.Name
+  -> Pass m CoreBind'
 checkSProj projection (Bind' var expr) = do
   let resolve name = Var <$> resolveTH' name
 
@@ -247,7 +269,13 @@ checkSProj projection (Bind' var expr) = do
   dbg' $ "State projection passed: " <> show projection
   return bind
 
-checkIProj :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCTactic TH.Name) -> Pass m CoreBind'
+checkIProj
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => UCGenerated (UCTactic TH.Name)
+  -> Pass m CoreBind'
 checkIProj (UCGenerated uc) (Bind' var expr) = do
   let resolve name = Var <$> resolveTH' name
 
@@ -275,7 +303,13 @@ checkIProj (UCGenerated uc) (Bind' var expr) = do
   let var' = setVarType var $ exprType expr'
   return $ Bind' var' expr'
 
-ucCompare :: MonadFail m => MonadCore m => MonadMod m => UCGenerated (UCCompare TH.Name) -> Pass m CoreBind'
+ucCompare
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => UCGenerated (UCCompare TH.Name)
+  -> Pass m CoreBind'
 ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
   let resolve name = Var <$> resolveTH' name
   other' <- resolve other
@@ -293,7 +327,8 @@ ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
 unifyAndNorm
   :: MonadFail m
   => MonadCore m
-  => MonadMod m
+  => MonadReader r m
+  => HasModGuts r
   => CoreExpr
   -> CoreExpr
   -> m (CoreExpr, CoreExpr)

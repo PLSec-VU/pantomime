@@ -6,6 +6,7 @@ module Unification
 import Control.Applicative
 import Control.Monad.Trans.Maybe
 import Control.Monad.State (MonadState (..), modify, evalStateT)
+import Control.Monad.Reader (MonadReader)
 
 import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
@@ -28,7 +29,8 @@ import Util
 polyApp
   :: Alternative m
   => MonadCore m
-  => MonadMod m
+  => MonadReader r m
+  => HasModGuts r
   => CoreExpr
   -- ^ Function expression.
   -> CoreExpr
@@ -73,7 +75,8 @@ polyApp fun arg = do
 unifyExprs
   :: Alternative m
   => MonadCore m
-  => MonadMod m
+  => MonadReader r m
+  => HasModGuts r
   => CoreExpr
   -> CoreExpr
   -> m (CoreExpr, CoreExpr)
@@ -122,7 +125,8 @@ unifiableType expr = ty
 -- eventually close the expression by binding these free unification variables.
 applyUnification
   :: MonadCore m
-  => MonadMod m
+  => MonadReader r m
+  => HasModGuts r
   => MonadState (TypeMap Var) m
   -- ^ Store dictionary instances to avoid duplicates.
   => Subst
@@ -133,23 +137,21 @@ applyUnification subst@(Subst _ _ tvSubst _) expr = do
   -- Converts a type variable into its corresponding type application. The
   -- only thing this does is use the unified version of said type variable if
   -- it exists. Otherwise, we just return the original type variable as is.
-  let toTyArg :: TyVar -> CoreExpr
-      toTyArg tyVar = Type $ case lookupVarEnv tvSubst tyVar of
+  let toTyArg tyVar = Type $ case lookupVarEnv tvSubst tyVar of
         Just ty -> ty
         _ -> mkTyVarTy tyVar
 
   -- Get a dictionary variable for a predicate type. We instantiate fresh
   -- variables when we cannot resolve an instance. Note that we track these
   -- fresh variables in a map to avoid duplicates constraints.
-  let toPredArg :: MonadState (TypeMap Var) m => MonadCore m => MonadMod m => PredType -> m CoreExpr
-      toPredArg predTy = Var <$> do
+  let toPredArg predTy = Var <$> do
         let predTy' = substTy subst predTy
         dict <- runMaybeT $ resolveInstance predTy'
         predMap <- get
         case dict <|> lookupTM predTy' predMap of
           Just var -> return var
           Nothing -> do
-            var <- freshLocalVar "constraint" predTy'
+            var <- freshLocalVar "constraint" ManyTy predTy'
             modify $ insertTM predTy' var
             return var
 

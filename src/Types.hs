@@ -16,6 +16,11 @@ module Types
   , nonRec
 
   , Pass
+
+  , HasModGuts (..)
+  , HasInScopeSet (..)
+  , HasOrderedDecl (..)
+  , HasCaseBndrs (..)
   ) where
 
 import Data.Data
@@ -93,3 +98,24 @@ type CoreBind' = Bind' CoreBndr
 
 -- | A pass transforms some value of type a inside of monad m.
 type Pass m a = a -> m a
+
+class HasModGuts a where
+  modGuts :: a -> ModGuts
+
+instance HasModGuts ModGuts where
+  modGuts = id
+
+class HasInScopeSet a where
+  inScopeSet :: a -> InScopeSet
+
+instance HasInScopeSet InScopeSet where
+  inScopeSet = id
+
+class HasOrderedDecl a where
+  orderedDecl :: a -> [CoreBndr]
+
+instance HasOrderedDecl [CoreBndr] where
+  orderedDecl = id
+
+class HasCaseBndrs a where
+  caseBndrs :: a -> VarSet
