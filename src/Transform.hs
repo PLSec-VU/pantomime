@@ -474,56 +474,31 @@ reorderCase = \case
     -- Substitute the inner case binder.
     let (substSwap1, iBndr') = substBndr substSwap0 iBndr
 
-    -- TODO: Find out where the import for substTy normal comes from...
-    let iTy' = substTyUnchecked subst1 iTy
-
     -- Adjust every inner alternative to contain the outer alternative. Note
     -- that special care is taken whenever we encounter the "swap" alternative
     -- (i.e. the outer alternative that originally contained the inner case).
     iAlts' <- forM iAlts $ \(Alt iCon iBndrs iRhs) -> do
+      -- Substitute the inner binders
+      let (substSwap2, iBndrs') = substBndrs substSwap1 iBndrs
 
-      -- We return the outer alt as its inner version. This entail correctly
-      -- handling binder order for the alternative that do not contain the
-      -- inner case. The alternative that does contain the inner case should
-      -- instead use the rhs of the current inner alt we are considering.
-      maybeBndrsAndAlts <- forM oAlts $ \oAlt@(Alt oCon _ _) -> if
-
+      -- We return the outer alt as its inner version.
+      oAlts' <- forM oAlts $ \oAlt@(Alt oCon _ _) -> if
         -- This is the alternative where the inner case resides. Thus, this is
         -- where the outer case should perform the operation of the inner case.
-        -- This is the swap where we pass both cases essentially.
         | oCon == oConSwap -> do
-          -- We substitute the inner case alt binders. Then we attach the inner
-          -- rhs as the rhs expression of this alt.
-          let (substSwap2, iBndrs') = substBndrs substSwap1 iBndrs
           let iRhs' = substExpr substSwap2 iRhs
-          let oAltSwap = Alt oConSwap oBndrsSwap' iRhs'
+          pure $ Alt oConSwap oBndrsSwap' iRhs'
 
-          -- Note that we return the adjusted inner alt binders, as we adjusted
-          -- them in using substBndrs.
-          pure (Just iBndrs', oAltSwap)
-
-        -- This is a non swap-alternative, we only need to ensure 
-        | otherwise -> do
-          -- We only need to substitute the outer case binders. The inner ones
-          -- are not bound in the rhs.
-          let oAlt' = substAlt subst1 oAlt
-
-          -- Note how we did not modify the inner binders in this case, and thus
-          -- return nothing.
-          pure (Nothing, oAlt')
-
-      -- Get the new outer alternatives and adjusted inner binders. Note
-      -- that the inner binders are always substited exactly once if the case
-      -- alternatives are well formed.
-      let (maybeBndrs, oAlts') = unzip maybeBndrsAndAlts
-      iBndrs' <- maybeM $ asum maybeBndrs
+        -- This is a non swap-alternative, we only need to ensure binders are
+        -- correctly dealt with. The alt can remain as is.
+        | otherwise -> pure $ substAlt subst1 oAlt
 
       -- The new inner rhs contain the outer rhs. Use the inner binders as
       -- populated when building the substitution map for the swap case.
       let iRhs' = Case oScrut oBind' oTy oAlts'
       pure $ Alt iCon iBndrs' iRhs'
 
-    pure $ Case iScrut' iBndr' iTy' iAlts'
+    pure $ Case iScrut' iBndr' iTy iAlts'
 
   _ -> empty
 
