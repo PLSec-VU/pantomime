@@ -14,7 +14,7 @@ module Transform
   , redundantCase
   , caseDedup
   , caseMerge
-  , reorderCase
+  , caseSwap
 
   -- Stand-alone transformations
   , normalize
@@ -46,7 +46,7 @@ normalize
   => MonadReader r  m
   => HasModGuts r
   => Pass m CoreExpr
-normalize = fixWithEnv fused >=> return . occurAnalyseExpr
+normalize = fixWithEnv fused >=> pure . occurAnalyseExpr
   where
     fused = fuse
       [ caseReduce
@@ -59,7 +59,7 @@ normalize = fixWithEnv fused >=> return . occurAnalyseExpr
       , undefaultCase
       , caseDedup
       , caseMerge
-      , reorderCase
+      , caseSwap
       -- , etaReduce
       ]
 -- normalize expr = do
@@ -425,7 +425,7 @@ caseMerge = \case
 
   _ -> empty
 
-reorderCase
+caseSwap
   :: Alternative m
   => MonadCore m
   => MonadReader r m
@@ -433,7 +433,7 @@ reorderCase
   => HasOrderedDecl r
   => HasInScopeSet r
   => Pass m CoreExpr
-reorderCase = \case
+caseSwap = \case
   Case oScrut oBind oTy oAlts -> do
     -- TODO: I feel like there exists a library function that does this!
     let firstSucceeding f = asum . flip fmap f
