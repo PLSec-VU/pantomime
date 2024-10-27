@@ -9,13 +9,11 @@ module Fusion
 import GHC.Plugins hiding (empty, substExpr, (<>))
 import GHC.MonadCore
 import GHC.Driver.Config.Core.Lint (initLintConfig)
--- import GHC.Core.Map.Expr (eqCoreExpr)
 import GHC.Core.Lint (lintExpr)
 
 import Data.List (foldl')
 import Data.Generics hiding (empty)
 import Data.IORef
--- import Data.Maybe (fromMaybe)
 
 import Control.Monad (forM, guard)
 import Control.Monad.Trans.Maybe (MaybeT (..))
@@ -100,7 +98,6 @@ lintExpr'' env expr = do
       error "Stopping! Lint error in fix"
     Nothing -> pure ()
 
--- | Run the given pass until a fixpoint is reached.
 fix :: Monad m => Pass (MaybeT m) a -> Pass m a
 fix pass x = runMaybeT (pass x) >>= \case
   Just x' -> fix pass x'
