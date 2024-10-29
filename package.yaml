@@ -64,6 +64,7 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     - -fplugin UC
+    - -fexpose-all-unfoldings
     dependencies:
     - uc-plugin
 

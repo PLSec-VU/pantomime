@@ -15,6 +15,8 @@ module Transform
   , caseDedup
   , caseMerge
   , caseSwap
+  , dropTick
+  , nullifyCast
 
   -- Stand-alone transformations
   , normalize
@@ -26,12 +28,13 @@ module Transform
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Map.Expr (eqCoreExpr)
 import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
+import GHC.Core.TyCo.Rep (Coercion (..))
 import GHC.MonadCore
 
 import Data.List (nubBy, elemIndex)
 import Data.Maybe (fromMaybe, isJust)
 
-import Control.Monad (guard, forM, (>=>))
+import Control.Monad (guard, forM)
 import Control.Monad.Trans.Maybe (runMaybeT)
 import Control.Monad.Reader (MonadReader, reader)
 import Control.Applicative (Alternative (..), empty, asum)
@@ -46,45 +49,30 @@ normalize
   => MonadReader r  m
   => HasModGuts r
   => Pass m CoreExpr
-normalize = fixWithEnv fused >=> pure . occurAnalyseExpr
-  where
-    fused = fuse
-      [ caseReduce
-      , betaReduce
-      , inlineUnfolding
-      , inlineLocal
-      , caseDistribute
-      , redundantCase
-      , extractLambda
-      , undefaultCase
-      , caseDedup
-      , caseMerge
-      , caseSwap
-      -- , etaReduce
-      ]
--- normalize expr = do
---   let others = fuse
---         [ caseReduce
---         , betaReduce
---         , inlineUnfolding
---         , inlineLocal
---         , caseDistribute
---         , redundantCase
---         , extractLambda
---         , undefaultCase
---         , caseDedup
---         , caseMerge
---         ]
+normalize expr = do
+  let fused = fuse
+        [ caseReduce
+        , betaReduce
+        , inlineUnfolding
+        , inlineLocal
+        , nullifyCast
+        , dropTick
+        , caseDistribute
+        , redundantCase
+        , extractLambda
+        , undefaultCase
+        , caseDedup
+        , caseMerge
+        , caseSwap
+        ]
 
---   let test e = do
---         e' <- fix (singlePass others) e
---         -- dbg' "======================="
---         -- dbg e'
---         runMaybeT (singlePass reorderCase e') >>= \case
---           Just e'' -> test e''
---           Nothing -> pure e'
+  let fixable e = do
+        dbg' "============================="
+        dbg e
+        singlePass fused e
 
---   test expr
+  occurAnalyseExpr <$> fix fixable expr
+  -- occurAnalyseExpr <$> fixWithEnv fused expr
 
 -- | Beta reduction
 betaReduce
@@ -209,6 +197,25 @@ extractLambda  = \case
 
   _ -> empty
 
+-- | Remove ticks from the expression.
+dropTick :: Alternative m => Pass m CoreExpr
+dropTick = \case
+  Tick _ e -> pure e
+  _ -> empty
+
+-- | Remove symmetric casts.
+nullifyCast :: Alternative m => MonadCore m => Pass m CoreExpr
+nullifyCast = \case
+  Cast (Cast expr coerce') (SymCo coerce) -> do
+    guard $ coerce `eqCoercion` coerce'
+    pure expr
+
+  Cast (Cast expr (SymCo coerce')) coerce -> do
+    guard $ coerce `eqCoercion` coerce'
+    pure expr
+
+  _ -> empty
+
 -- | Distrubte expressions over a case.
 --
 -- This pushes case expressions towards the root of the expression.
@@ -228,6 +235,12 @@ caseDistribute = \case
 
   -- Inline function into case
   App fun arg@Case {} -> distribute fun arg
+
+  -- Inline cast into case
+  Cast expr@Case {} coercion -> do
+    temp <- tempVar $ exprType expr
+    let fun' = Lam temp (Cast (Var temp) coercion)
+    distribute fun' expr
 
   _ -> empty
   where
@@ -340,6 +353,8 @@ redundantCase = \case
 -- nested cases in a separate function. This pass only deduplicates directly
 -- adjacent case expressions and thus relies on case reordering to eliminate all
 -- duplicates.
+-- TODO: We should be merging occurence info in this pass! Both for the case
+-- binder as well as the binders of each alternative.
 caseDedup :: Alternative m => MonadCore m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
 caseDedup = \case
   Case oScrut oBndr oTy oAlts -> do
@@ -425,6 +440,10 @@ caseMerge = \case
 
   _ -> empty
 
+-- | Swap the order of nested cases.
+--
+-- This function will swap the order of two adjacent cases. It checks whether
+-- this is required by definition order of the variables in the scrutinee.
 caseSwap
   :: Alternative m
   => MonadCore m

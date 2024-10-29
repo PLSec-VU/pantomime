@@ -68,7 +68,9 @@ executable uc-plugin-exe
   other-modules:
       ClassInline
       LocalClass
+      Monad
       Mono
+      NewType
       NoState
       Poly
       Poly2
@@ -91,7 +93,7 @@ executable uc-plugin-exe
       ScopedTypeVariables
       TemplateHaskell
       TypeApplications
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -fplugin UC
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -fplugin UC -fexpose-all-unfoldings
   build-depends:
       base >=4.7 && <5
     , containers

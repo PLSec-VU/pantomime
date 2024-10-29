@@ -115,8 +115,10 @@ fixWithEnv
   -> Pass m CoreExpr
 fixWithEnv pass e = do
   let go env expr = do
-        -- Bottom up recursion, extending the environment with variables when
-        -- applicable.
+        -- TODO: I think we should evaluate bottom to top. It admits a lot
+        -- less rewrites for typeclasses and such. Of course, either evaluation
+        -- strategy will be suboptimal. From what I've seen, lazy just seems a
+        -- lot better!
         expr' <- case expr of
           Lam bndr body -> do
             let env' = extendEnv env bndr
@@ -217,7 +219,8 @@ singlePass pass e = do
               -- _ -> gmapMo (mkM $ go env) expr
 
         -- Run the pass, if it transforms the expression we again.
-        inner <|> runPass expr
+        runPass expr <|> inner
+        -- inner <|> runPass expr
 
   env <- initEnv
 
