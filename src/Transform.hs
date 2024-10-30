@@ -1,6 +1,3 @@
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
-{-# HLINT ignore "Redundant multi-way if" #-}
--- TODO: can we get this lint in the package.yaml somewhere?
 module Transform
   -- Fusable transformations
   ( betaReduce
@@ -8,7 +5,7 @@ module Transform
   , inlineUnfolding
   , inlineLocal
   , caseReduce
-  , extractLambda
+  , floatLambda
   , caseDistribute
   , undefaultCase
   , redundantCase
@@ -16,7 +13,10 @@ module Transform
   , caseMerge
   , caseSwap
   , dropTick
-  , nullifyCast
+  , dropReflCast
+  , joinCasts
+  , floatCast
+  -- , splitCast
 
   -- Stand-alone transformations
   , normalize
@@ -25,10 +25,12 @@ module Transform
   , compareScrut
   ) where
 
-import GHC.Plugins hiding (empty, (<>))
+import GHC.Plugins hiding (empty, (<>), split)
 import GHC.Core.Map.Expr (eqCoreExpr)
 import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
 import GHC.Core.TyCo.Rep (Coercion (..))
+import GHC.Core.Coercion.Opt
+-- import GHC.Data.Pair
 import GHC.MonadCore
 
 import Data.List (nubBy, elemIndex)
@@ -55,11 +57,14 @@ normalize expr = do
         , betaReduce
         , inlineUnfolding
         , inlineLocal
-        , nullifyCast
+        , dropReflCast
+        , joinCasts
+        , floatCast
+        -- , splitCast
         , dropTick
         , caseDistribute
         , redundantCase
-        , extractLambda
+        , floatLambda
         , undefaultCase
         , caseDedup
         , caseMerge
@@ -186,10 +191,12 @@ caseReduce = \case
 -- | Extracts functions out of case statements. That is, for any case statement
 -- that has a function type, we apply a fresh argument which we introduce with a
 -- lambda.
-extractLambda :: Alternative m => MonadCore m => Pass m CoreExpr
-extractLambda  = \case
+--
+-- TODO: I don't think I need the call to freshLocalVar here.
+floatLambda :: Alternative m => MonadCore m => Pass m CoreExpr
+floatLambda  = \case
   Case scrut bind ty alts | Just (_, mult, argTy, resTy) <- splitFunTy_maybe ty -> do
-    var <- freshLocalVar "extracted" mult argTy
+    var <- freshLocalVar "floated" mult argTy
     let appAlt (Alt c bs rhs) = Alt c bs $ App rhs (Var var)
     let alts' = appAlt <$> alts
     let expr = Lam var $ Case scrut bind resTy alts'
@@ -203,76 +210,94 @@ dropTick = \case
   Tick _ e -> pure e
   _ -> empty
 
--- | Remove symmetric casts.
-nullifyCast :: Alternative m => MonadCore m => Pass m CoreExpr
-nullifyCast = \case
-  Cast (Cast expr coerce') (SymCo coerce) -> do
-    guard $ coerce `eqCoercion` coerce'
-    pure expr
+-- | Remove reflexive casts.
+--
+-- Reflexive casts are essentially no-ops.
+dropReflCast :: Alternative m => Pass m CoreExpr
+dropReflCast = \case
+  Cast expr co | isReflexiveCo co -> pure expr
 
-  Cast (Cast expr (SymCo coerce')) coerce -> do
-    guard $ coerce `eqCoercion` coerce'
-    pure expr
+  _ -> empty
+
+-- | Join two consecutive casts.
+--
+-- Merging casts is good both for normalisation and potentially eliminating
+-- casts that become reflective by this operation.
+joinCasts :: Alternative m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
+joinCasts = \case
+  Cast (Cast expr co) co' -> do
+    inScope <- reader inScopeSet
+    let subst = mkEmptySubst inScope
+    let co'' = optCoercion (OptCoercionOpts True) subst (TransCo co co')
+    pure $ Cast expr co''
+
+  _ -> empty
+
+-- | Float casts over applications.
+--
+-- This allows more reductions to be able to take place.
+floatCast :: Alternative m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
+floatCast = \case
+  App (Cast fun FunCo { fco_arg, fco_res }) arg -> do
+    let arg' = Cast arg fco_arg
+    pure $ Cast (App fun arg') fco_res
+
+  App (Cast fun (ForAllCo bndr argCo resCo)) (Type arg) -> do
+    inScope <- reader inScopeSet
+    let subst0 = mkEmptySubst inScope
+    let subst1 = extendTvSubst subst0 bndr arg
+
+    let argCo' = substCo subst1 argCo
+    let resCo' = substCo subst1 resCo
+
+    let arg' = Type $ mkCastTy arg argCo'
+
+    pure $ Cast (App fun arg') resCo'
 
   _ -> empty
 
 -- | Distrubte expressions over a case.
 --
 -- This pushes case expressions towards the root of the expression.
-caseDistribute :: Alternative m => MonadCore m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
+caseDistribute :: Alternative m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
 caseDistribute = \case
   -- Nested case
-  Case scrut@Case {} bind ty alts -> do
-    temp <- tempVar $ exprType scrut
-    let fun = Lam temp (Case (Var temp) bind ty alts)
-    distribute fun scrut
+  Case scrut@Case {} bind ty alts ->
+    distribute (\rhs -> Case rhs bind ty alts) scrut
+--     let fun = Lam temp (Case (Var temp) bind ty alts)
 
   -- Inline argument into case
-  App fun@Case {} arg -> do
-    temp <- tempVar $ exprType fun
-    let fun' = Lam temp (App (Var temp) arg)
-    distribute fun' fun
+  App fun@Case {} arg -> distribute (flip App arg) fun
 
   -- Inline function into case
-  App fun arg@Case {} -> distribute fun arg
+  App fun arg@Case {} -> distribute (App fun) arg
 
   -- Inline cast into case
-  Cast expr@Case {} coercion -> do
-    temp <- tempVar $ exprType expr
-    let fun' = Lam temp (Cast (Var temp) coercion)
-    distribute fun' expr
+  Cast expr@Case {} coercion -> distribute (flip Cast coercion) expr
 
   _ -> empty
   where
-    -- TODO: Does this really always give a unusued unique? What about if
-    -- uniqAway was called inside of this expression? Make sure this doesn't
-    -- mess up!
-    tempVar = freshLocalVar "temp" ManyTy
-
-    distribute fun = \case
-      Case scrut bind _ alts -> do
-        -- Create a temporary unique variable. We will substitute this variable
-        -- for the given function using substExpr, which will make sure that all
-        -- the variable renaming is correctly handled.
-        temp <- tempVar $ exprType fun
-
-        -- Distribute the temporary variable as the function to every rhs.
-        let distribute' (Alt c bs rhs) = Alt c bs $ App (Var temp) rhs
-        let alts' = distribute' <$> alts
-
-        -- Get the type for the new case statement and create the new case.
-        let ty = coreAltsType alts'
-        let expr = Case scrut bind ty alts'
-
-        -- Get all variables that are in scope
+    distribute f = \case
+      Case scrut bndr _ alts -> do
+        -- Create initial substitution map and substitute the case binder.
         inScope <- reader inScopeSet
+        let subst0 = mkEmptySubst inScope
+        let (subst1, bndr') = substBndr subst0 bndr
 
-        -- Use the in-scope set to make a substitution from the temporary
-        -- argument to the given function.
-        let subst = extendSubst (mkEmptySubst inScope) temp fun
+        -- For every alternative, we substitute its binders and right-hand-side.
+        -- Since all binders are now non-clashing with previously defined ones,
+        -- we can call our helper function that actually distributes without
+        -- worrying about variable capturing.
+        let alts' = flip fmap alts $ \(Alt con bndrs rhs) -> do
+              let (subst2, bndrs') = substBndrs subst1 bndrs
+              let rhs' = substExpr subst2 rhs
+              Alt con bndrs' (f rhs')
 
-        -- Substitute the temporary variable for the given function.
-        pure $ substExpr subst expr
+        -- Get the type of the new alternatives
+        let ty' = coreAltsType alts'
+
+        -- Return the new case expression, with adjusted alts.
+        pure $ Case scrut bndr' ty' alts'
 
       _ -> empty
 
@@ -674,7 +699,8 @@ compareScrut' bndrs lhs rhs = do
         (Lit x, Lit y) -> compare x y
         (Lit _, _) -> GT
         (_, Lit _) -> LT
-        (App f a, App f' a') -> cmp f a <> cmp f' a'
+        (App f a, App f' a') -> cmp f f' <> cmp a a'
+        (Cast e _, Cast e' _) -> cmp e e'
         _ -> EQ
   -- FIXME: I think this ordering doesn't really work for normalisation. It
   -- might be better to consider what is the 'lowest' variable in an expression,

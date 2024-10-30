@@ -1,8 +1,5 @@
 module Util
   ( bindPass
-  -- , fix
-  -- , fuse
-  -- , (<|-|>)
 
   , maybeM
   , unwrap
@@ -41,10 +38,6 @@ import GHC.Driver.Config.Core.Lint (initLintConfig)
 import GHC.Core.Lint
 
 import Data.Maybe (mapMaybe, listToMaybe)
--- import Data.List (foldl')
-
--- import Data.Data
--- import Data.Generics hiding (empty)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
@@ -53,23 +46,6 @@ import Types
 -- | Maps an expression pass over a binder.
 bindPass :: Functor m => Pass m (Expr a) -> Pass m (Bind' a)
 bindPass f (Bind' x e) = Bind' x <$> f e
-
--- -- | Run the given pass until a fixed point is reached. That is, the given pass
--- -- does not produce a new result.
--- fix :: Monad m => Data a => Pass (MaybeT m) a -> Pass m a
--- fix f = everywhereM $ mkM go
---   where
---     go e = runMaybeT (f e) >>= \case
---       Just e' -> fix f e'
---       Nothing -> return e
-
--- -- | Fuse all the given passes; the first succesful pass wil return its result.
--- fuse :: Alternative m => [Pass m a] -> Pass m a
--- fuse = foldl' (<|-|>) $ const empty
-
--- -- | Fuses two passes; the first succesful pass will return its result.
--- (<|-|>) :: Alternative m => Pass m a -> Pass m a -> Pass m a
--- (<|-|>) p p' e = p e <|> p' e
 
 -- | Convert the given maybe into an alternative.
 maybeM :: Alternative m => Maybe a -> m a
