@@ -3,8 +3,7 @@ module UC
   , UC (..)
   , UCCompare (..)
   , UCNorm (..)
-  , UCTactic (..)
-  , Projection (..)
+  , Projection.Circuit
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
@@ -18,7 +17,7 @@ import Data.Maybe (catMaybes)
 import Data.Data
 
 import Control.Monad.Reader (MonadReader, ReaderT (..), reader)
-import Control.Monad (forM, foldM, unless)
+import Control.Monad (forM, unless)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
@@ -55,18 +54,14 @@ install _ todo = return $ mconcat
 
     comparePasses = withProxy (Proxy @(UCGenerated (UCCompare TH.Name)))
       [ createUCBindsPass
-      , normalizePass
       , ucComparePass
       , printAndLintPass
       , removeUCBindsPass
       ]
 
-    tacticPasses = withProxy (Proxy @(UCGenerated (UCTactic TH.Name)))
+    tacticPasses = withProxy (Proxy @(UCGenerated (UC TH.Name)))
       [ createUCBindsPass
-      , projectOutputPass
-      , normalizePass
-      , checkSProjPass
-      , checkIProjPass
+      , ucCheckPass
       , printAndLintPass
       , removeUCBindsPass
       ]
@@ -160,23 +155,11 @@ normalizePass _ = CoreDoPluginPass name pass
     name = TH.nameBase 'normalizePass
     pass = annBindsPassWithGuts $ \(_ :: a) -> bindPass normalize
 
-projectOutputPass :: proxy -> CoreToDo
-projectOutputPass _ = CoreDoPluginPass name pass
+ucCheckPass :: proxy -> CoreToDo
+ucCheckPass _ = CoreDoPluginPass name pass
   where
-    name = TH.nameBase 'projectOutputPass
-    pass = annBindsPassWithGuts projectOutput
-
-checkSProjPass :: proxy -> CoreToDo
-checkSProjPass _ = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'checkSProjPass
-    pass = annBindsPassWithGuts checkSProjections
-
-checkIProjPass :: proxy -> CoreToDo
-checkIProjPass _ = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'checkIProjPass
-    pass = annBindsPassWithGuts checkIProj
+    name = TH.nameBase 'ucCheckPass
+    pass = annBindsPassWithGuts ucCheck
 
 ucComparePass :: proxy -> CoreToDo
 ucComparePass _ = CoreDoPluginPass name pass
@@ -196,112 +179,83 @@ printAndLint bind = do
   let res = lintCoreBindings' cfg prog
   dbg bind
   dbg res
-  return bind
+  pure bind
 
--- | Project the output of all generated UC binders, according to the
--- observation function in the annotation.
-projectOutput
+composeImpl
   :: MonadFail m
   => MonadCore m
   => MonadReader r m
   => HasModGuts r
-  => UCGenerated (UCTactic TH.Name)
-  -> Pass m CoreBind'
-projectOutput (UCGenerated uc) (Bind' var expr) = do
+  => UC TH.Name
+  -> Pass m CoreExpr
+composeImpl uc expr = do
   let resolve name = Var <$> resolveTH' name
+  let polyApp3 x y z = polyApp x y >>= flip polyApp z
 
   oproj <- resolve 'Projection.oproj
   obs <- resolve $ observation uc
 
-  expr' <- occurAnalyseExpr <$> foldM polyApp oproj [obs, expr]
+  sproj <- resolve 'Projection.sproj
+  proj <- resolve $ projection uc
+
+  expr' <- polyApp3 oproj obs expr
     ??= "Incompatible types on observation/implementation pair"
 
-  let var' = setVarType var $ exprType expr'
-  return $ Bind' var' expr'
+  expr'' <- polyApp3 sproj proj expr'
+    ??= "Incompatible types on (implementation/observation)/projection pair"
 
-checkSProjections
+  pure $ occurAnalyseExpr expr''
+
+composeSim
   :: MonadFail m
   => MonadCore m
   => MonadReader r m
   => HasModGuts r
-  => UCGenerated (UCTactic TH.Name)
-  -> Pass m CoreBind'
-checkSProjections (UCGenerated uc) bind = foldM (flip checkSProj) bind $ projections uc
-
-checkSProj
-  :: MonadFail m
-  => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
-  => Projection TH.Name
-  -> Pass m CoreBind'
-checkSProj projection (Bind' var expr) = do
+  => UC TH.Name
+  -> m CoreExpr
+composeSim uc = do
   let resolve name = Var <$> resolveTH' name
+  let polyApp3 x y z = polyApp x y >>= flip polyApp z
 
-  -- Compose current with ignore
-  ign <- resolve $ ignore projection
-  sproj <- resolve 'Projection.sproj
-  exprIgn <- occurAnalyseExpr <$> foldM polyApp sproj [ign, expr]
-    ??= "Incompatible types on current/ignore pair"
-
-  -- Compose ignore with circuit
-  sproj' <- resolve 'Projection.sproj'
-  circ <- resolve $ circuit projection
-  ignCirc <- occurAnalyseExpr <$> foldM polyApp sproj' [ign, circ]
-    ??= "Incompatible types on ignore/circuit pair"
-
-  (exprIgn', ignCirc') <- unifyAndNorm exprIgn ignCirc
-
-  lintExpr' exprIgn' >>= dbg
-  lintExpr' ignCirc' >>= dbg
-
-  -- Check whether they are equal
-  unless (exprIgn' `eqCoreExpr` ignCirc') $ do
-    dbg' "current/ignore:"
-    dbg exprIgn'
-    dbg' "ignore/circuit:"
-    dbg ignCirc'
-    fail "Expression does not equal ignore/circuit pair."
-
-  let var' = setVarType var $ exprType circ
-  let bind = Bind' var' circ
-
-  dbg' $ "State projection passed: " <> show projection
-  return bind
-
-checkIProj
-  :: MonadFail m
-  => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
-  => UCGenerated (UCTactic TH.Name)
-  -> Pass m CoreBind'
-checkIProj (UCGenerated uc) (Bind' var expr) = do
-  let resolve name = Var <$> resolveTH' name
-
-  -- Fetch input projection, leakage and simulator functions
-  iproj <- resolve 'Projection.iproj
-  leak <- resolve $ leakage uc
   sim <- resolve $ simulator uc
 
-  -- Compose leakage with simulator
-  leakSim <- occurAnalyseExpr <$> foldM polyApp iproj [leak, sim]
-    ??= "Incompatible types on leak/sim pair"
+  iproj <- resolve 'Projection.iproj
+  leak <- resolve $ leakage uc
 
-  -- Unify their types so we can compare the circuits.
-  (leakSim', expr') <- unifyAndNorm leakSim  expr
+  sproj' <- resolve 'Projection.sproj'
+  proj <- resolve $ projection uc
+
+  expr' <- polyApp3 iproj leak sim
+    ??= "Incompatible types on leakage/simulator pair"
+
+  expr'' <- polyApp3 sproj' proj expr'
+    ??= "Incompatible types on projection/(leakage/simulator) pair"
+
+  pure $ occurAnalyseExpr expr''
+
+ucCheck
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => UCGenerated (UC TH.Name)
+  -> Pass m CoreBind'
+ucCheck (UCGenerated uc) (Bind' var expr) = do
+  expr' <- composeImpl uc expr
+  sim <- composeSim uc
+
+  (sim', expr'') <- unifyAndNorm sim expr'
 
   -- Check whether they are equal
-  unless (expr' `eqCoreExpr` leakSim') $ do
-    dbg' "current:"
-    dbg expr'
-    dbg' "leakage/simulator:"
-    dbg leakSim'
-    fail "Expression does not equal leakage/simulator pair."
+  unless (expr'' `eqCoreExpr` sim') $ do
+    dbg' "implementation:"
+    dbg expr''
+    dbg' "simulator"
+    dbg sim'
+    fail "Implementation does not equal simulator"
 
-  -- We need to adjust the variable type, since we unified the expressions.
-  let var' = setVarType var $ exprType expr'
-  return $ Bind' var' expr'
+  let var' = setVarType var $ exprType expr''
+  pure $ Bind' var' expr''
 
 ucCompare
   :: MonadFail m
@@ -322,7 +276,7 @@ ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
     dbg other''
     fail "Expressions were not equal"
 
-  return $ Bind' var expr
+  pure $ Bind' var expr
 
 unifyAndNorm
   :: MonadFail m
@@ -340,9 +294,9 @@ unifyAndNorm this other = do
   this'' <- occurAnalyseExpr <$> normalize this'
   other'' <- occurAnalyseExpr <$> normalize other'
 
-  return (this'', other'')
+  pure (this'', other'')
 
 -- TODO: Implement this!
 removeUCBinds :: MonadCore m => Pass m ModGuts
 removeUCBinds guts = do
-  return guts
+  pure guts
