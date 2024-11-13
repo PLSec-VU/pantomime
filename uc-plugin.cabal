@@ -67,6 +67,7 @@ executable uc-plugin-exe
   main-is: Main.hs
   other-modules:
       ClassInline
+      Cyclic
       LocalClass
       Monad
       Mono
@@ -76,6 +77,7 @@ executable uc-plugin-exe
       Poly2
       RW
       ThreeAdder
+      TwoAdders
       Paths_uc_plugin
   autogen-modules:
       Paths_uc_plugin

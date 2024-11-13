@@ -16,7 +16,6 @@ module Transform
   , dropReflCast
   , joinCasts
   , floatCast
-  -- , splitCast
 
   -- Stand-alone transformations
   , normalize
@@ -484,8 +483,8 @@ caseSwap = \case
 
     -- Get the unbound alt as an irrefutable pattern.
     (oConSwap, oBndrsSwap, (iScrut, iBndr, iTy, iAlts))
-      <- firstSucceeding oAlts $ \(Alt con bndrs rhs) -> case rhs of
-        Case iScrut iBndr iTy iAlts -> do
+      <- firstSucceeding oAlts $ \case
+        Alt con bndrs (Case iScrut iBndr iTy iAlts) -> do
           -- Checks whether the cases are swappable
           guard $ exprFreeVars iScrut `disjointVarSet` mkVarSet bndrs
 
@@ -526,16 +525,19 @@ caseSwap = \case
       let (substSwap2, iBndrs') = substBndrs substSwap1 iBndrs
 
       -- We return the outer alt as its inner version.
-      oAlts' <- forM oAlts $ \oAlt@(Alt oCon _ _) -> if
+      oAlts' <- forM oAlts $ \case
         -- This is the alternative where the inner case resides. Thus, this is
         -- where the outer case should perform the operation of the inner case.
-        | oCon == oConSwap -> do
+        Alt oCon _ _ | oCon == oConSwap -> do
           let iRhs' = substExpr substSwap2 iRhs
           pure $ Alt oConSwap oBndrsSwap' iRhs'
 
-        -- This is a non swap-alternative, we only need to ensure binders are
-        -- correctly dealt with. The alt can remain as is.
-        | otherwise -> pure $ substAlt subst1 oAlt
+        -- This is a non swap-alternative, we only need to ensure binders
+        -- are correctly dealt with. The alt can remain as is. We purposely
+        -- don't use a substitution with the inner case variables, as these
+        -- should have never occurred in this outer branch in the first place.
+        -- Substituting these binders would cause variable capturing.
+        oAlt -> pure $ substAlt subst1 oAlt
 
       -- The new inner rhs contain the outer rhs. Use the inner binders as
       -- populated when building the substitution map for the swap case.
@@ -632,6 +634,9 @@ caseSwap = \case
 -- local Id's in the given list. Otherwise, the list that doesn't fulfill this
 -- condition is the smaller one. If this is the case for both, they're
 -- considered equal.
+--
+-- TODO: We should order product types before sum types wherever possible.
+-- This will reduce the total expression size, while being easy to uphold.
 compareScrut :: [Id] -> CoreExpr -> CoreExpr -> Ordering
 compareScrut def lhs rhs = do
   -- Finds the index of an id, if it exists
