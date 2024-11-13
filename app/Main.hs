@@ -2,8 +2,10 @@ module Main
   ( main
   ) where
 
+import TwoAddersStall
+
 main :: IO ()
-main = return ()
+main = return ()--test
 
 -- {-# ANN test UCNorm #-}
 -- test :: Maybe Int -> Maybe (Int, Int) -> (Maybe Bool, Maybe Bool)
