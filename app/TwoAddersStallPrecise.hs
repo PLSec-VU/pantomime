@@ -35,8 +35,6 @@ add1 reg (stall, Just imm)
     | otherwise = (reg + imm, Just (reg + imm))
 add1 reg (_, Nothing) = (reg, Nothing) 
 
--- | we get as input whether the sum of all values is 0.
--- | this circuit only doesn't output the result on a stall.
 leak1 :: () -> (Bool, Maybe Bool) -> ((), (Bool, Maybe Bool))
 leak1 _ (stall, res) = ((), (stall, res))
 
@@ -107,6 +105,9 @@ add12 (s1, s2, stalled) (i1, i2) = ((s1', s2', stall), o2)
 obs12 :: Maybe Int -> Bool
 obs12 = isJust
 
+
+-- | leak12 needs to keep track of the accurate register state of add1 (to leak when it will be 0).
+-- | for that, it needs to know when the overall circuit will stall.
 leak12 :: (Int, Bool) -> (Maybe Int, Maybe Int) -> ((Int, Bool), (Maybe Bool, Bool))
 leak12 (reg, stall) (i1, i2) = case (stall, i1) of
     (True, _)         -> ((reg, False), (Nothing, isJust i2))
