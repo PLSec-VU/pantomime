@@ -1,4 +1,4 @@
-module TwoAddersStall
+module TwoAddersStallPrecise
   ( obs1
   , leak1
   , sim1
@@ -9,7 +9,7 @@ module TwoAddersStall
   , sim2
   , proj2
   , add2
-  --, test
+  , test
   , add12
   , obs12
   , sim12
@@ -35,22 +35,21 @@ add1 reg (stall, Just imm)
     | otherwise = (reg + imm, Just (reg + imm))
 add1 reg (_, Nothing) = (reg, Nothing) 
 
--- | we leak both inputs
-leak1 :: () -> (Bool, Maybe Int) -> ((), (Bool, Maybe Int))
-leak1 _ (stall, i) = ((), (stall, i))
+leak1 :: () -> (Bool, Maybe Bool) -> ((), (Bool, Maybe Bool))
+leak1 _ (stall, res) = ((), (stall, res))
 
 obs1 :: Maybe Int -> Maybe Bool
 obs1 (Just r) = Just (r==0)
 obs1 Nothing  = Nothing
 
-sim1 :: Int -> (Bool, Maybe Int) -> (Int, Maybe Bool)
-sim1 reg (stall, Just imm)
-    | stall     = (reg, Nothing)     
-    | otherwise = (reg + imm, Just (reg + imm == 0))
-sim1 reg (_, Nothing) = (reg, Nothing) 
+sim1 :: () -> (Bool, Maybe Bool) -> ((), Maybe Bool)
+sim1 _ (stall, Just res)
+    | stall     = ((), Nothing)     
+    | otherwise = ((), Just res)
+sim1 _ (_, Nothing) = ((), Nothing) 
 
-proj1 :: Int -> ((), Int)
-proj1 reg = ((), reg)
+proj1 :: Int -> ((), ())
+proj1 reg = ((), ())
 
 -- {-# ANN add2 UC
 --   { observation = 'obs2
@@ -75,9 +74,8 @@ obs2 :: (Maybe Int, Bool) -> (Bool, Bool)
 obs2 (Just _, stall) = (True, stall)
 obs2 (Nothing, stall) = (False, stall)
 
-leak2 :: () -> (Maybe Int , Maybe Int) -> ((), (Maybe Bool, Bool))
-leak2 _ (Just a, Just b) = ((), (Just (a == 0),  True))
-leak2 _ _ = ((), (Nothing, False))
+leak2 :: () -> (Maybe Bool , Bool) -> ((), (Maybe Bool, Bool))
+leak2 _ (l1, l2) = ((), (l1,  l2))
 
 sim2 :: Bool -> (Maybe Bool , Bool) -> (Bool , (Bool, Bool))
 sim2 _ (Just True, True) = (False, (True, False))
@@ -88,14 +86,14 @@ proj2 :: Maybe Int -> ((), Bool)
 proj2 (Just res) = ((), True)
 proj2 Nothing    = ((), False)
 
--- Proof of the composed circuit
+-- -- Proof of the composed circuit
 
-{-# ANN add12 UC
-  { observation = 'obs12
-  , leakage = 'leak12
-  , simulator = 'sim12
-  , projection = 'proj12
-  } #-}
+-- {-# ANN add12 UC
+--   { observation = 'obs12
+--   , leakage = 'leak12
+--   , simulator = 'sim12
+--   , projection = 'proj12
+--   } #-}
 
 add12 :: (Int, Maybe Int, Bool) -> (Maybe Int, Maybe Int) -> ((Int, Maybe Int, Bool), Maybe Int)
 add12 (s1, s2, stalled) (i1, i2) = ((s1', s2', stall), o2)
@@ -107,10 +105,26 @@ add12 (s1, s2, stalled) (i1, i2) = ((s1', s2', stall), o2)
 obs12 :: Maybe Int -> Bool
 obs12 = isJust
 
-leak12 :: () -> (Maybe Int, Maybe Int) -> ((), (Maybe Int, Bool))
-leak12 _ (i1, i2) = ((), (i1, isJust i2)) 
 
-sim12 :: (Int, Bool, Bool)  -> (Maybe Int, Bool) -> ((Int, Bool, Bool), Bool)
+-- | leak12 needs to keep track of the accurate register state of add1 (to leak when it will be 0).
+-- | for that, it needs to know when the overall circuit will stall.
+leak12 :: (Int, Bool) -> (Maybe Int, Maybe Int) -> ((Int, Bool), (Maybe Bool, Bool))
+leak12 (reg, stall) (i1, i2) = case (stall, i1) of
+    (True, _)         -> ((reg, False), (Nothing, isJust i2))
+    (False, Just imm) -> ((reg + imm, i2 /= Nothing && reg + imm/=0), (Just (reg + imm==0), isJust i2))
+    (False, Nothing)  -> ((reg, False), (Nothing, isJust i2))
+
+-- leak12 :: (Int, Bool) -> (Maybe Int, Maybe Int) -> ((Int, Bool), (Maybe Bool, Bool))
+-- leak12 (reg, stall) (Just imm, Just _) 
+--     | stall     = ((reg, False), (Nothing, True))     
+--     | otherwise = ((reg + imm, reg + imm/=0), (Just (reg + imm==0), True))
+-- leak12 (reg, _) (Nothing, i2) = ((reg, False), (Nothing, isJust i2)) 
+-- leak12 (reg, stall) (Just imm, Nothing) 
+--     | stall     = ((reg, False), (Nothing, False))     
+--     | otherwise = ((reg + imm, False), (Just (reg + imm==0), False))
+
+
+sim12 :: ((), Bool, Bool)  -> (Maybe Bool, Bool) -> (((), Bool, Bool), Bool)
 sim12 (s1, s2, stalled) (l1, l2) = ((s1', s2', stall), o2)     
     where
     (s1', o1) = sim1 s1 (stalled, l1)
@@ -122,7 +136,7 @@ proj12 (s1, s2, stalled) = ((), (s1, isJust s2, stalled))
 -- ----------------------------------------------------------------------
 -- | Test corner -- we can check our theorems using quick-check
 -------------------------------------------------------------------------
-{- mealy :: (s -> i -> (s, o)) -> s -> [i] -> [o]
+mealy :: (s -> i -> (s, o)) -> s -> [i] -> [o]
 mealy _ _ [] = []
 mealy f s (x:xs) =
     let (s', o) = f s x
@@ -136,18 +150,18 @@ seqc c1 c2 (s1,s2) i = ((s1',s2'), o2)
       (s2', o2) = c2 s2 o1 
 
 theorem :: [(Maybe Int, Maybe Int)] -> Bool
-theorem ins = mealy add12_obs (0, Nothing, False) ins == mealy leak12_sim ((0,False),False) ins
+theorem ins = mealy add12_obs (0, Nothing, False) ins == mealy leak12_sim ((0,False),((), False, False)) ins
     where 
         add12_obs s i =  let (s', o) = add12 s i in (s', obs12 o)
         leak12_sim = seqc leak12 sim12
 
 test = do
-    --quickCheckWith stdArgs { maxSuccess = 10000 } theorem
-    let ins = [(Just (-25),Nothing),(Just 30,Just 0),(Just 17,Nothing),(Just (-22),Just 0)]
-    putStrLn "Implementation"
-    putStrLn $ show $ mealy add12_obs (0, Nothing, False) ins
-    putStrLn "Simulator"
-    putStrLn $ show $ mealy leak12_sim ((0,False),False) ins
-  where 
-      add12_obs s i =  let (s', o) = add12 s i in (s', obs12 o)
-      leak12_sim = seqc leak12 sim12 -}
+    quickCheckWith stdArgs { maxSuccess = 1000000 } theorem
+--     let ins = [(Just 1,Nothing),(Just 0,Just 0),(Nothing,Nothing)]
+--     putStrLn "Implementation"
+--     putStrLn $ show $ mealy add12_obs (0, Nothing, False) ins
+--     putStrLn "Simulator"
+--     putStrLn $ show $ mealy leak12_sim ((0,False),((), False, False)) ins
+--   where 
+--       add12_obs s i =  let (s', o) = add12 s i in (s', obs12 o)
+--       leak12_sim = seqc leak12 sim12
