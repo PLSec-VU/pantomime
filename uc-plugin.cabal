@@ -6,10 +6,10 @@ cabal-version: 2.2
 
 name:           uc-plugin
 version:        0.1.0.0
-description:    Please see the README on GitHub at <https://github.com/githubuser/uc-plugin#readme>
-homepage:       https://github.com/githubuser/uc-plugin#readme
-bug-reports:    https://github.com/githubuser/uc-plugin/issues
-author:         Author name here
+description:    Please see the README on GitHub at <https://github.com/RobinWebbers/uc-plugin#readme>
+homepage:       https://github.com/RobinWebbers/uc-plugin#readme
+bug-reports:    https://github.com/RobinWebbers/uc-plugin/issues
+author:         Robin Webbers
 maintainer:     example@example.com
 copyright:      2024 Author name here
 license:        BSD-3-Clause
@@ -21,15 +21,15 @@ extra-source-files:
 
 source-repository head
   type: git
-  location: https://github.com/githubuser/uc-plugin
+  location: https://github.com/RobinWebbers/uc-plugin
 
 library
   exposed-modules:
-      Fusion
       GHC.MonadCore
       Projection
-      Simplify
+      Subst
       Transform
+      Transform2
       Types
       UC
       Unification
@@ -47,16 +47,21 @@ library
       FlexibleContexts
       FlexibleInstances
       LambdaCase
+      MultiParamTypeClasses
       MultiWayIf
       NamedFieldPuns
+      RankNTypes
       ScopedTypeVariables
       TemplateHaskell
+      TupleSections
       TypeApplications
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
+    , composition
     , containers
     , ghc >=9.6.4
+    , microlens
     , mtl
     , syb >=0.7.2.4
     , template-haskell
@@ -69,15 +74,10 @@ executable uc-plugin-exe
       ClassInline
       Cyclic
       LocalClass
-      Monad
-      Mono
-      NewType
-      NoState
-      Poly
-      Poly2
       RW
       ThreeAdder
       TwoAdders
+      TwoAddersStall
       Paths_uc_plugin
   autogen-modules:
       Paths_uc_plugin
@@ -90,16 +90,21 @@ executable uc-plugin-exe
       FlexibleContexts
       FlexibleInstances
       LambdaCase
+      MultiParamTypeClasses
       MultiWayIf
       NamedFieldPuns
+      RankNTypes
       ScopedTypeVariables
       TemplateHaskell
+      TupleSections
       TypeApplications
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -fplugin UC -fexpose-all-unfoldings
   build-depends:
       base >=4.7 && <5
+    , composition
     , containers
     , ghc >=9.6.4
+    , microlens
     , mtl
     , syb >=0.7.2.4
     , template-haskell
@@ -123,17 +128,27 @@ test-suite uc-plugin-test
       FlexibleContexts
       FlexibleInstances
       LambdaCase
+      MultiParamTypeClasses
       MultiWayIf
       NamedFieldPuns
+      RankNTypes
       ScopedTypeVariables
       TemplateHaskell
+      TupleSections
       TypeApplications
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      base >=4.7 && <5
+      HUnit
+    , base >=4.7 && <5
+    , composition
     , containers
+    , directory
     , ghc >=9.6.4
+    , ghc-paths
+    , hspec
+    , microlens
     , mtl
+    , silently
     , syb >=0.7.2.4
     , template-haskell
     , transformers

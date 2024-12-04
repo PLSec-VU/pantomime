@@ -5,11 +5,15 @@ module Util
   , unwrap
   , (??=)
 
-  , freshTyVar
+  , fuse
+  , (<|-|>)
+
+  , accumL
+  , (%~~)
+  , freshId
+  , freshIds
   , freshLocalVar
   , freshGlobalVar
-  , clearOccInfo
-  , substAlt
 
   , resolveTH
   , resolveTH'
@@ -25,11 +29,13 @@ import Control.Applicative
 import Control.Monad.Trans.Maybe
 import Control.Monad ((>=>))
 import Control.Monad.Reader (MonadReader, reader)
+import Control.Monad.State (state, runState)
 
 import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Types.TyThing (lookupId)
 import GHC.Core.InstEnv (InstEnvs (..), lookupUniqueInstEnv, instanceDFunId)
+import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Unit.External (eps_inst_env)
 import GHC.Data.Maybe (rightToMaybe)
 import GHC.Data.Bag (Bag)
@@ -37,9 +43,13 @@ import GHC.Data.Bag (Bag)
 import GHC.Driver.Config.Core.Lint (initLintConfig)
 import GHC.Core.Lint
 
+import qualified Language.Haskell.TH.Syntax as TH
+
+import Data.Foldable (foldl')
 import Data.Maybe (mapMaybe, listToMaybe)
 
-import qualified Language.Haskell.TH.Syntax as TH
+import Lens.Micro (Lens)
+
 
 import Types
 
@@ -63,13 +73,65 @@ infixl 0 ??=
 (??=) :: MonadFail m => MaybeT m a -> String -> m a
 (??=) = unwrap
 
-freshTyVar :: MonadCore m => String -> Kind -> m Var
-freshTyVar name kind = do
-  unique <- liftCore getUniqueM
-  let name' = mkSystemName unique $ mkVarOcc name
-  let var = mkTyVar name' kind
-  return var
+-- | Fuse all the given passes; the first succesful pass wil return its result.
+fuse :: Alternative m => [a -> m b] -> a -> m b
+fuse = foldl' (<|-|>) $ const empty
 
+-- | Fuses two passes; the first succesful pass will return its result.
+(<|-|>) :: Alternative m => (a -> m b) -> (a -> m b) -> (a -> m b)
+(<|-|>) p p' e = p e <|> p' e
+
+-- | Accumulate a stateful function over a traversable input.
+accumL :: Traversable f => (a -> s -> (b, s)) -> f a -> s -> (f b, s)
+accumL f = runState . traverse (state . f)
+
+-- | Update the outer record and get some inner value.
+--
+-- This function is intended to run some computation on an inner field, where
+-- the computation additionally returns a value.
+--
+-- This is just an alias for lens application, but it can be confusing to apply
+-- lenses directly. Especially since it would mean opaquely using a tuples as
+-- the running monad. Additionally, this has a nicer precedence when applied in
+-- the form:
+-- ```
+-- s & lens %~~ f
+-- ```
+(%~~) :: Lens s t a b -> (a -> (c, b)) -> s -> (c, t)
+(%~~) = ($)
+
+-- | Create a fresh variable.
+--
+-- Fetches a locally fresh unique from the in-scope set of the substitution.
+-- Created the new identifier as per the arguments and adds it to the in-scope
+-- set of the given substitution. In this way, one can create a new fresh id
+-- with this updated substitution.
+freshId
+  :: String
+  -> Scaled Type
+  -> InScopeSet
+  -> (Id, InScopeSet)
+freshId name (Scaled mult ty) scope = do
+  -- Get a new unique value.
+  let unique = unsafeGetFreshLocalUnique scope
+
+  -- Create the fresh identifier.
+  let name' = mkSystemName unique $ mkVarOcc name
+  let identifier = mkLocalId name' mult ty
+
+  -- Extend the scope and return it, together with the fresh identifier.
+  let scope' = extendInScopeSet scope identifier
+  (identifier, scope')
+
+-- | Get multiple fresh identifiers via `freshId`.
+freshIds
+  :: Traversable f
+  => f (String, Scaled Type)
+  -> InScopeSet
+  -> (f Id, InScopeSet)
+freshIds = accumL $ uncurry freshId
+
+-- TODO: I think we don't use this anymore. We should prune it!
 -- | Creates a fresh variable.
 freshLocalVar :: MonadCore m => String -> Mult -> Type -> m Var
 freshLocalVar name mult ty = do
@@ -78,6 +140,7 @@ freshLocalVar name mult ty = do
   let var = mkLocalVar VanillaId name' mult ty vanillaIdInfo
   return var
 
+-- TODO: I think we don't use this anymore. We should prune it!
 -- | Creates a fresh variable.
 freshGlobalVar :: MonadCore m => String -> Type -> m Var
 freshGlobalVar name ty = do
@@ -85,15 +148,6 @@ freshGlobalVar name ty = do
   let name' = mkSystemName unique $ mkVarOcc name
   let var = mkGlobalVar VanillaId name' ty vanillaIdInfo
   return var
-
--- | Substitute an alt.
-substAlt :: Subst -> CoreAlt -> CoreAlt
-substAlt subst (Alt con bndrs rhs) = do
-  let (subst', _) = substBndrs subst bndrs
-  Alt con bndrs $ substExpr subst' rhs
-
-clearOccInfo :: Id -> Id
-clearOccInfo = flip setIdOccInfo noOccInfo
 
 -- | Resolves a template haskell name to a non-recursive variable.
 resolveTH
@@ -184,6 +238,7 @@ resolveInstance predTy = do
   let dictVar = instanceDFunId clsInst
   return dictVar
 
+-- TODO: I think we don't use this anymore. We should prune it!
 lintExpr' :: MonadCore m => CoreExpr -> m (Maybe (Bag SDoc))
 lintExpr' expr = do
   dflags <- liftCore getDynFlags

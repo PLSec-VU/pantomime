@@ -1,8 +1,8 @@
 name:                uc-plugin
 version:             0.1.0.0
-github:              "githubuser/uc-plugin"
+github:              "RobinWebbers/uc-plugin"
 license:             BSD-3-Clause
-author:              "Author name here"
+author:              "Robin Webbers"
 maintainer:          "example@example.com"
 copyright:           "2024 Author name here"
 
@@ -17,7 +17,7 @@ extra-source-files:
 # To avoid duplicated efforts in documentation and dealing with the
 # complications of embedding Haddock markup inside cabal files, it is
 # common to point users to the README.md file.
-description:         Please see the README on GitHub at <https://github.com/githubuser/uc-plugin#readme>
+description:         Please see the README on GitHub at <https://github.com/RobinWebbers/uc-plugin#readme>
 
 default-extensions:
 - ConstraintKinds
@@ -26,20 +26,25 @@ default-extensions:
 - FlexibleContexts
 - FlexibleInstances
 - LambdaCase
+- MultiParamTypeClasses
 - MultiWayIf
 - NamedFieldPuns
+- RankNTypes
 - ScopedTypeVariables
 - TemplateHaskell
+- TupleSections
 - TypeApplications
 
 dependencies:
 - base >= 4.7 && < 5
 - ghc >= 9.6.4
 - syb >= 0.7.2.4
+- composition
 - containers
 - transformers
 - template-haskell
 - mtl
+- microlens
 
 ghc-options:
 - -Wall
@@ -78,3 +83,8 @@ tests:
     - -with-rtsopts=-N
     dependencies:
     - uc-plugin
+    - hspec
+    - HUnit
+    - ghc-paths
+    - directory
+    - silently

@@ -1,3 +1,5 @@
 .stack-work/
 dist-newstyle
 *~
+prog/*.hi
+prog/*.o

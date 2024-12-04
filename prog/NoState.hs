@@ -6,14 +6,14 @@ module NoState
   , proj
   ) where
 
--- import UC
+import UC
 
--- {-# ANN adder UC
---   { observation = 'obs
---   , leakage = 'leak
---   , simulator = 'sim
---   , projection = 'proj
---   } #-}
+{-# ANN adder UC
+  { observation = 'obs
+  , leakage = 'leak
+  , simulator = 'sim
+  , projection = 'proj
+  } #-}
 adder :: () -> Maybe (Int, Int) -> ((), Maybe Int)
 adder _ (Just (a, b)) = ((), Just $ a + b)
 adder _ _ = ((), Nothing)

@@ -14,14 +14,14 @@ module NewType
   ) where
 
 import Prelude hiding (Monad (..), Applicative (..))
--- import UC
+import UC
 
--- {-# ANN adder UC
---   { observation = 'obs
---   , leakage = 'leak
---   , simulator = 'sim
---   , projection = 'proj
---   } #-}
+{-# ANN adder UC
+  { observation = 'obs
+  , leakage = 'leak
+  , simulator = 'sim
+  , projection = 'proj
+  } #-}
 adder :: Num a => Maybe a -> Maybe (a, a) -> (Maybe a, Maybe a)
 adder s i = swap $ runState (adder' i) s
 

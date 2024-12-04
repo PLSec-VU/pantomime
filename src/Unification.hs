@@ -1,6 +1,8 @@
 module Unification
   ( polyApp
   , unifyExprs
+  , matchArgsApp
+  , matchExpr
   ) where
 
 import Control.Applicative
@@ -10,7 +12,7 @@ import Control.Monad.Reader (MonadReader)
 
 import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
-import GHC.Core.Unify (tcUnifyTy)
+import GHC.Core.Unify (tcUnifyTy, tcMatchTys, tcMatchTy)
 import GHC.Core.Map.Type (TypeMap)
 import GHC.Core.Predicate (isDictId)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy)
@@ -18,6 +20,95 @@ import GHC.Data.TrieMap (lookupTM, insertTM, emptyTM)
 
 import Types
 import Util
+import GHC.Core.TyCo.Rep (scaledThing)
+
+-- collectTyAndValBinders
+
+-- -- | Collect all binders.
+-- --
+-- -- This entails typevariables, dictionaries and identifiers, solely in this
+-- -- order.
+-- collectAllBinders :: CoreExpr -> ([TyVar], [DictId], [Id], CoreExpr)
+-- collectAllBinders expr = do
+--   let (tyVars, dictAndIds, expr') = collectTyAndValBinders expr
+--   let (dict, ids) = span isDictId dictAndIds
+--   (tyVars, dict, ids, expr')
+
+-- -- | Apply the given arguments.
+-- --
+-- -- This will apply type variables to the function first to match the types of
+-- -- the arguments, if they can be matched. This assumes the dictionary variables
+-- -- are also present in the arguments.
+-- matchArgsApp
+--   :: Alternative m
+--   => Monad m
+--   => CoreExpr
+--   -> [CoreArg]
+--   -> m CoreExpr
+-- matchArgsApp fun arg = do
+--   -- Split the quantifiers and typeclass constraints from the type
+--   let (tyVars, funTy) = tcSplitForAllTyVars $ exprType fun
+
+--   let (argTys, innerTy) = tcSplitFunTys funTy
+
+--   tcMatchTys argTys 
+  
+--   -- let (tyVars, _, funTy) = tcSplitSigmaTy $ exprType fun
+--   -- guard $ null dicts
+--   let argTy = unifiableType arg
+
+--   -- Get the required argument type, that is, the given argument needs to be of
+--   -- this type.
+--   (_, _, argTyRequired, _) <- maybeM $ splitFunTy_maybe funTy
+
+--   -- Try to match the required type for the function to the argument.
+--   Subst _ _ subst _ <- maybeM $ tcMatchTy argTyRequired argTy
+
+--   let toTyArg tyVar = Type $ case lookupVarEnv subst tyVar of
+--         Just ty -> ty
+--         _ -> mkTyVarTy tyVar
+--   undefined
+
+-- | Transforms the types in the function to match the argument, if possible.
+--
+-- Note that this thus expects both the function and argument to not contain
+-- any type variables and such. It should just be the case that these could be
+-- applied given that their types matched up.
+matchArgsApp
+  :: Alternative m
+  => Monad m
+  => InScopeSet
+  -> CoreExpr
+  -> [CoreExpr]
+  -> m CoreExpr
+matchArgsApp scope fun args = do
+  -- Split the quantifiers and typeclass constraints from the type
+  let funTy = exprType fun
+  let argTys = exprType <$> args
+
+  -- Get the required argument type, that is, the given argument needs to be of
+  -- this type.
+  let (argTysRequired, _) = splitFunTys funTy
+  let argTysRequired' = scaledThing <$> argTysRequired
+
+  -- Try to match the required type for the function to the argument.
+  subst <- maybeM $ tcMatchTys argTysRequired' argTys
+  let subst' = unionSubst subst $ mkEmptySubst scope
+
+  let fun' = substExpr subst' fun
+  pure $ mkApps fun' args
+
+matchExpr
+  :: Alternative m
+  => Monad m
+  => InScopeSet
+  -> CoreExpr
+  -> Type
+  -> m CoreExpr
+matchExpr scope expr ty = do
+  subst <- maybeM $ tcMatchTy (exprType expr) ty
+  let subst' = unionSubst subst $ mkEmptySubst scope
+  pure $ substExpr subst' expr
 
 -- | Application with possibly polymorphic functions.
 --
@@ -146,11 +237,17 @@ applyUnification subst@(Subst _ _ tvSubst _) expr = do
   -- fresh variables in a map to avoid duplicates constraints.
   let toPredArg predTy = Var <$> do
         let predTy' = substTy subst predTy
+        -- TODO: I want to split unification from resolving dictionary
+        -- instances. Could we not just apply dictionaries afterwards? This way
+        -- I can just reuse this bit of code when I don't want the whole modguts
+        -- stuff here.
         dict <- runMaybeT $ resolveInstance predTy'
         predMap <- get
         case dict <|> lookupTM predTy' predMap of
           Just var -> return var
           Nothing -> do
+            -- TODO: We should be able to generate free variables without the
+            -- access to CoreM. We should adjust this!
             var <- freshLocalVar "constraint" ManyTy predTy'
             modify $ insertTM predTy' var
             return var
@@ -166,6 +263,52 @@ applyUnification subst@(Subst _ _ tvSubst _) expr = do
   predArgs <- mapM toPredArg predTys
   let expr' = foldl App expr $ tyArgs <> predArgs
   return expr'
+
+-- -- | Applies a unification map to an expression.
+-- --
+-- -- This can be seen as a partial operation when unifying expressions. This
+-- -- function applies all type abstractions and dictionary types with a unified
+-- -- version. The returned expression will have free variables as dictated by
+-- -- the unification mapping. However way the expression is used, make sure to
+-- -- eventually close the expression by binding these free unification variables.
+-- applyTypeSubst
+--   :: MonadState (TypeMap Var) m
+--   -- ^ Store dictionary instances to avoid duplicates.
+--   => Subst
+--   -- ^ Unification substitution map.
+--   -> Pass m CoreExpr
+--   -- ^ Transformation on the given CoreExpr
+-- applyTypeSubst subst@(Subst scope _ tvSubst _) expr = do
+--   -- Converts a type variable into its corresponding type application. The
+--   -- only thing this does is use the unified version of said type variable if
+--   -- it exists. Otherwise, we just return the original type variable as is.
+--   let toTyArg tyVar = Type $ case lookupVarEnv tvSubst tyVar of
+--         Just ty -> ty
+--         _ -> mkTyVarTy tyVar
+
+--   -- Get a dictionary variable for a predicate type. We instantiate fresh
+--   -- variables when we cannot resolve an instance. Note that we track these
+--   -- fresh variables in a map to avoid duplicates constraints.
+--   let toPredArg predTy = Var <$> do
+--         predMap <- get
+--         let predTy' = substTy subst predTy
+--         let existing = lookupTM predTy' predMap
+--         maybeM existing <|> do
+--           var <- freshLocalVar "constraint" ManyTy predTy'
+--           modify $ insertTM predTy' var
+--           pure var
+
+--   -- Get the type variables and predicate types that should be unified.
+--   let splitTy = tcSplitSigmaTy . exprType
+--   let (tyVars, predTys, _) = splitTy expr
+
+--   -- Applies both type variables and typeclass constraints to the given
+--   -- expression. These applied arguments occur free in the expression after
+--   -- running this function.
+--   let tyArgs = toTyArg <$> tyVars
+--   predArgs <- mapM toPredArg predTys
+--   let expr' = foldl App expr $ tyArgs <> predArgs
+--   pure expr'
 
 -- | Sort quantifiers and dictionaries.
 --

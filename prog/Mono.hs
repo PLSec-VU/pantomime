@@ -5,17 +5,18 @@ module Mono
   , sim
   , compImpl
   , compSim
+  -- , test
   ) where
 
 import Projection
--- import UC
+import UC
 
--- {-# ANN adder UC
---   { observation = 'obs
---   , leakage = 'leak
---   , simulator = 'sim
---   , projection = 'proj
---   } #-}
+{-# ANN adder UC
+  { observation = 'obs
+  , leakage = 'leak
+  , simulator = 'sim
+  , projection = 'proj
+  } #-}
 adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
 adder s i = case i of
   Just (a, b) -> (Just $ a + b, s)
@@ -28,6 +29,10 @@ compImpl = sproj proj $ oproj obs adder
 -- {-# ANN compSim UCNorm #-}
 compSim :: Maybe Int -> Maybe (Int, Int) -> (((), Maybe Bool), Maybe Bool)
 compSim = sproj' proj $ iproj leak sim
+
+-- {-# ANN test UCNorm #-}
+-- test :: Circuit ((), Maybe Bool) (Maybe (Int, Int)) (Maybe Bool)
+-- test = iproj leak
 
 obs :: Maybe Int -> Maybe Bool
 obs (Just x) = Just $ x == 0

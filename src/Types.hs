@@ -30,11 +30,11 @@ data UC a = UC
   { observation :: a
   -- ^ Observation function: o -> o'
   , leakage :: a
-  -- ^ Leakage function: i -> i'
+  -- ^ Leakage function: s1 -> i -> (s1, a)
   , simulator :: a
-  -- ^ Simulator: s' -> i' -> (s', o)
+  -- ^ Simulator: s2 -> a -> (s2, o)
   , projection :: a
-  -- ^ State projection: s -> s'
+  -- ^ State projection: s -> (s1, s2)
   }
   deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
 

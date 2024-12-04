@@ -33,20 +33,21 @@ plugin = defaultPlugin
   , pluginRecompile = purePlugin
   }
 
--- TODO: Change printUCGenerated to printAnnotated, which should take a type
--- parameter.
+-- TODO: We should take in a flag which tells normalisation to lint intermediate
+-- steps! Maybe we can just call it debug?
 install :: MonadCore m => [CommandLineOption] -> Pass m [CoreToDo]
-install _ todo = return $ mconcat
+install _ todo = pure $ mconcat
   [ normalizePasses
   , comparePasses
   , tacticPasses
   , todo
   ]
   where
-    withProxy proxy ls = (\f -> f proxy) <$> ls
+    withProxy proxy ls = ($ proxy) <$> ls
 
     normalizePasses = withProxy (Proxy @(UCGenerated UCNorm))
       [ createUCBindsPass
+      , printAndLintPass
       , normalizePass
       , printAndLintPass
       , removeUCBindsPass
@@ -67,7 +68,11 @@ install _ todo = return $ mconcat
       ]
 
 createUCBinds
-  :: forall m a b. (Data a, Data b, MonadFail m, MonadCore m)
+  :: forall m a b
+   . Data a
+  => Data b
+  => MonadFail m
+  => MonadCore m
   => (a -> m b)
   -> Pass m ModGuts
 createUCBinds f guts = do
@@ -100,7 +105,9 @@ createUCBinds f guts = do
 
 -- | Run the given pass on all binders that have the given annotation.
 annBindsPass
-  :: forall m a. (Data a, MonadCore m)
+  :: forall m a
+   . Data a
+  => MonadCore m
   => (a -> Pass m CoreBind')
   -> Pass m ModGuts
 annBindsPass pass guts = do
@@ -123,7 +130,8 @@ annBindsPassWithGuts f mods = annBindsPass f' mods
     f' a = flip runReaderT mods . f a
 
 createUCBindsPass
-  :: forall a. Data a
+  :: forall a
+   . Data a
   => Proxy (UCGenerated a)
   -> CoreToDo
 createUCBindsPass _ = CoreDoPluginPass name pass
@@ -138,7 +146,8 @@ removeUCBindsPass _ = CoreDoPluginPass name pass
     pass = removeUCBinds
 
 printAndLintPass
-  :: forall a. Data a
+  :: forall a
+   . Data a
   => Proxy a
   -> CoreToDo
 printAndLintPass _ = CoreDoPluginPass name pass
@@ -147,7 +156,8 @@ printAndLintPass _ = CoreDoPluginPass name pass
     pass = annBindsPassWithGuts $ \(_ :: a) -> printAndLint
 
 normalizePass
-  :: forall a. Data a
+  :: forall a
+   . Data a
   => Proxy a
   -> CoreToDo
 normalizePass _ = CoreDoPluginPass name pass
@@ -238,6 +248,7 @@ ucCheck
   => MonadCore m
   => MonadReader r m
   => HasModGuts r
+  => HasDynFlags m
   => UCGenerated (UC TH.Name)
   -> Pass m CoreBind'
 ucCheck (UCGenerated uc) (Bind' var expr) = do
@@ -250,7 +261,7 @@ ucCheck (UCGenerated uc) (Bind' var expr) = do
   unless (expr'' `eqCoreExpr` sim') $ do
     dbg' "implementation:"
     dbg expr''
-    dbg' "simulator"
+    dbg' "simulator:"
     dbg sim'
     fail "Implementation does not equal simulator"
 
@@ -262,6 +273,7 @@ ucCompare
   => MonadCore m
   => MonadReader r m
   => HasModGuts r
+  => HasDynFlags m
   => UCGenerated (UCCompare TH.Name)
   -> Pass m CoreBind'
 ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
@@ -283,6 +295,7 @@ unifyAndNorm
   => MonadCore m
   => MonadReader r m
   => HasModGuts r
+  => HasDynFlags m
   => CoreExpr
   -> CoreExpr
   -> m (CoreExpr, CoreExpr)
@@ -291,8 +304,8 @@ unifyAndNorm this other = do
     ??= "Unable to unify ignore/circuit pair with current/ignore pair"
 
   -- Normalize circuits
-  this'' <- occurAnalyseExpr <$> normalize this'
-  other'' <- occurAnalyseExpr <$> normalize other'
+  this'' <- normalize this'
+  other'' <- normalize other'
 
   pure (this'', other'')
 

@@ -1,126 +1,262 @@
 module Transform
-  -- Fusable transformations
-  ( betaReduce
-  , etaReduce
-  , inlineUnfolding
-  , inlineLocal
+  ( deshadowExpr
+  , betaReduce
   , caseReduce
-  , floatLambda
+  , caseBndrReduce
   , caseDistribute
-  , undefaultCase
-  , redundantCase
-  , caseDedup
   , caseMerge
   , caseSwap
+  , redundantCase
+  , undefaultCase
+  , inlineUnfolding
   , dropTick
   , dropReflCast
   , joinCasts
   , floatCast
-
-  -- Stand-alone transformations
+  , applyBuiltinRule
   , normalize
-
-  -- Helper functions
-  , compareScrut
+  , lint
   ) where
 
-import GHC.Plugins hiding (empty, (<>), split)
+import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Map.Expr (eqCoreExpr)
 import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
-import GHC.Core.TyCo.Rep (Coercion (..))
-import GHC.Core.Coercion.Opt
--- import GHC.Data.Pair
-import GHC.MonadCore
+import GHC.Core.TyCo.Rep (Coercion (..), Scaled (..))
+import GHC.Core.Lint (lintExpr)
+import GHC.Core.Rules.Config (RuleOpts(..))
+import GHC.Core.Unify (tcMatchTy)
+import GHC.Platform (genericPlatform)
+import GHC.Driver.Config.Core.Lint (initLintConfig)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
+import GHC (dataConType)
 
-import Data.List (nubBy, elemIndex)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Composition ((.:))
+import Data.Foldable (foldl', find)
+import Data.List (nubBy)
+import Data.Maybe (fromMaybe)
 
-import Control.Monad (guard, forM)
+import Control.Monad (forM, forM_, guard)
 import Control.Monad.Trans.Maybe (runMaybeT)
 import Control.Monad.Reader (MonadReader, reader)
 import Control.Applicative (Alternative (..), empty, asum)
 
-import Types
-import Fusion
-import Util
+import Lens.Micro
 
--- | Normalizes an expression.
+import Types
+import Util
+import Unification (matchArgsApp, matchExpr)
+import qualified Subst
+
+-- | Substitution over a core expression.
+type Substitution m s a = s -> Pass m a
+
+-- | A transformation.
+--
+-- Given a continuation, a transformation will modify the core expression,
+-- after which it will call the given substitution on the (sub-parts) of the
+-- new expression.
+--
+-- The intent is that we can perform multiple transformations in a single
+-- sweep over a core expression. We do this by calling the given substitution
+-- function in favor of a call to `substExpr`.
+--
+-- Notice how the given substitution function itself can be a transformation,
+-- given that it is a closure of a transformation.
+type Transform m s a = Substitution m s a -> Substitution m s a
+
+-- | Initial substitution for the normalization pass.
+initSubst :: Subst.Class s => CoreProgram -> s
+initSubst = flip Subst.extendProg $ Subst.new emptyInScopeSet
+
+-- | Lint an expression.
+--
+-- This will panic if the lint fails.
+lint
+  :: HasCallStack
+  => Monad m
+  => HasDynFlags m
+  => InScopeSet
+  -> CoreExpr
+  -> m ()
+lint (InScope scope) expr = do
+  dflags <- getDynFlags
+  let vars = nonDetEltsUniqSet scope
+  let cfg = initLintConfig dflags vars
+  let res = lintExpr cfg expr
+  forM_ res $ \message -> do
+    -- pprPanic "UC lint error:" $ ppr expr $+$ ppr message
+    pprPanic "UC lint error:" $ ppr message
+
+-- TODO: I want a version with and without lint. The lint version should go into
+-- the test bench.
 normalize
-  :: MonadCore m
-  => MonadReader r  m
+  :: MonadReader r m
   => HasModGuts r
+  => HasDynFlags m
   => Pass m CoreExpr
 normalize expr = do
-  let fused = fuse
-        [ caseReduce
-        , betaReduce
-        , inlineUnfolding
-        , inlineLocal
+  binds <- reader $ mg_binds . modGuts
+  let subst = initSubst binds
+  loop subst expr
+
+loop
+  :: Monad m
+  => HasDynFlags m
+  => Subst.Ordered
+  -> CoreExpr
+  -> m CoreExpr
+loop subst expr = do
+  expr' <- occurAnalyseExpr <$> transform subst expr
+  lint (subst ^. Subst.scope) expr'
+  -- TODO: We should do CSE (Common Sub-expression Elimination) here for case
+  -- binders.
+  -- dbg' "========================="
+  -- dbg expr'
+  -- TODO: We should do better change detection. This can be relatively
+  -- expensive.
+  if eqCoreExpr expr expr' then pure expr' else loop subst expr'
+
+-- | A full transformation pass.
+transform
+  :: Monad m
+  => Substitution m Subst.Ordered CoreExpr
+transform subst expr = do
+  let passes = asum $ fmap (\pass -> pass transform subst expr)
+        [ betaReduce
+        , caseReduce
+        , dropTick
+        , caseBndrReduce
+        , caseMerge
+        , caseDistribute
         , dropReflCast
         , joinCasts
         , floatCast
-        -- , splitCast
-        , dropTick
-        , caseDistribute
-        , redundantCase
-        , floatLambda
+        , inlineUnfolding
         , undefaultCase
-        , caseDedup
-        , caseMerge
+        , redundantCase
         , caseSwap
+        -- , applyBuiltinRule
         ]
 
-  let fixable e = do
-        dbg' "============================="
-        dbg e
-        singlePass fused e
+  expr' <- runMaybeT passes
+  let def = deshadowExpr transform subst expr
+  maybe def pure expr'
 
-  occurAnalyseExpr <$> fix fixable expr
-  -- occurAnalyseExpr <$> fixWithEnv fused expr
-
--- | Beta reduction
-betaReduce
-  :: MonadReader r m
-  => HasInScopeSet r
-  => Alternative m
-  => Pass m CoreExpr
-betaReduce = \case
-  -- Normal beta reduction.
-  App (Lam bind body) arg -> substitute body bind arg
-
-  -- Reduction on let binding.
-  Let (NonRec bind expr) body -> substitute body bind expr
-
-  _ -> empty
-  where
-    -- | substitute e1 x e2 = e1[x:=e2]
-    substitute body bind expr = do
-      inScope <- reader inScopeSet
-      let subst = extendSubst (mkEmptySubst inScope) bind expr
-      let body' = substExpr subst body
-      pure body'
-
--- | Eta reduction
+-- | Deshadow an expression.
 --
--- FIXME: Somehow this breaks with linear type on Just? The linter can give an
--- error if we for example don't do beta reduction in the pass.
--- I think the error is that somehow \x -> f x types different from f, where
--- f has Mult that is not MultTy. Idk, I should look into this more, but eta
--- reduction is not really the most interesting transformation anyway..
-etaReduce :: Alternative m => MonadCore m => Pass m CoreExpr
-etaReduce = \case
-  Lam bind (App fun (Var arg)) -> do
-    guard $ bind == arg
-    let free = exprFreeVars fun
-    guard . not $ bind `elemVarSet` free
-    pure fun
+-- This substitution will call continue on one nesting in the expression. The
+-- intention is that if no transformation happens, this will perform a normal
+-- substitution for the current layer and then continue with the transformation.
+-- That is, this can be seen as the default operation if no transformation could
+-- be made.
+deshadowExpr
+  :: Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+deshadowExpr continue subst = \case
+  Var var -> pure $ Subst.lookupId subst var
 
-  _ -> empty
+  Type ty -> do
+    let ty' = Subst.ty subst ty
+    pure $ Type ty'
+
+  Coercion co -> do
+    let co' = Subst.co subst co
+    pure $ Coercion co'
+
+  Lit lit -> pure $ Lit lit
+
+  App fun arg -> do
+    fun' <- continue subst fun
+    arg' <- continue subst arg
+    pure $ App fun' arg'
+
+  Tick tickish expr -> do
+    let tickish' = Subst.tick subst tickish
+    expr' <- continue subst expr
+    pure $ mkTick tickish' expr'
+
+  Cast expr co -> do
+    expr' <- continue subst expr
+    let co' = Subst.co subst co
+    pure $ Cast expr' co'
+
+  Lam bndr body -> do
+    let (bndr', subst') = subst & Subst.bndr bndr
+    body' <- continue subst' body
+    pure $ Lam bndr' body'
+
+  Let bind body -> do
+    -- TODO: This should do a 'continue' call on the bind no? We should make a
+    -- function called deshadowBind! Btw, maybe the deshadow family of functions
+    -- should be called transformX instead? I guess it does do deshadowing
+    -- at the layer, but it kind of hides the intent as a "if all else fails,
+    -- continue like this" function. If not rename, we maybe at least should
+    -- go from deshadowX to deShadowX
+    (bind', subst') <- deshadowBind continue subst bind
+    body' <- continue subst' body
+    pure $ Let bind' body'
+
+  Case scrut bndr ty alts -> do
+    scrut' <- continue subst scrut
+    let ty' = Subst.ty subst ty
+
+    let (bndr', subst') = subst & Subst.bndr bndr
+
+    alts' <- deshadowAlts continue subst' alts
+
+    pure $ Case scrut' bndr' ty' alts'
+
+deshadowBind
+  :: Monad m
+  => Subst.Class s
+  => Substitution m s CoreExpr
+  -> s
+  -> CoreBind
+  -> m (CoreBind, s)
+deshadowBind continue subst = \case
+  NonRec bndr rhs -> do
+    let (bndr', subst') = subst & Subst.bndr bndr
+    rhs' <- continue subst' rhs
+    pure (NonRec bndr' rhs', subst')
+
+  Rec pairs -> do
+    let (bndrs, rhss) = unzip pairs
+    let (bndrs', subst') = subst & Subst.recBndrs bndrs
+    rhss' <- forM rhss $ continue subst'
+    let pairs' = zip bndrs' rhss'
+    pure (Rec pairs', subst')
+
+-- | Deshadow multiple alternatives.
+--
+-- For more information, see `deshadowExpr` and `deshadowAlt`.
+deshadowAlts
+  :: Monad m
+  => Subst.Class s
+  => Substitution m s CoreExpr
+  -> Substitution m s [CoreAlt]
+deshadowAlts = mapM .: deshadowAlt
+
+-- | Deshadow an alternative.
+--
+-- This will substitute the binders of the expression, after which it will call
+-- the remaining substitution on the right-hand-side.
+deshadowAlt
+  :: Monad m
+  => Subst.Class s
+  => Substitution m s CoreExpr
+  -> Substitution m s CoreAlt
+deshadowAlt continue subst (Alt con bndrs rhs) = do
+  let (bndrs', subst') = subst & Subst.bndrs bndrs
+  rhs' <- continue subst' rhs
+  pure $ Alt con bndrs' rhs'
 
 -- | Inlines all non-typeclass functions.
-inlineUnfolding :: Alternative m => Pass m CoreExpr
-inlineUnfolding = \case
-  Var x -> case idUnfolding x of
+inlineUnfolding
+  :: Alternative m
+  => Transform m s CoreExpr
+inlineUnfolding _ _ = \case
+  Var var -> case idUnfolding var of
     CoreUnfolding { uf_tmpl } -> pure uf_tmpl
 
     DFunUnfolding { df_bndrs, df_con, df_args } -> do
@@ -133,312 +269,390 @@ inlineUnfolding = \case
 
   _ -> empty
 
--- | Inline definitions that are local to the current module.
-inlineLocal
+-- | Apply builtin rewrites.
+--
+-- Applies builtin rewrites for variables. This will produce plenty of case
+-- expressions, so use with caution.
+--
+-- TODO: Maybe I should pick a subset of rules to apply. Unfolding equals is for
+-- example a lot less interesting than unfolding a fromInteger on a constant.
+applyBuiltinRule
   :: Alternative m
-  => MonadReader r m
-  => HasModGuts r
-  => Pass m CoreExpr
-inlineLocal = \case
-  Var x -> do
-    Bind' _ e <- lookupLocal (== x)
-    pure e
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+applyBuiltinRule continue subst expr = do
+  let (spine, args) = collectArgs expr
+  spine' <- case spine of
+    Var var | isId var -> pure var
+    _ -> empty
+
+  asum $ idCoreRules spine' <&> \case
+    Rule {} -> empty
+    BuiltinRule { ru_nargs, ru_try } -> do
+      guard $ ru_nargs == length args
+      let opts = RuleOpts
+            { roPlatform = genericPlatform
+            , roNumConstantFolding = True
+            , roExcessRationalPrecision = False
+            , roBignumRules = False
+            }
+      let scope = ISE (subst ^. Subst.scope) noUnfoldingFun
+      expr' <- maybeM $ ru_try opts scope spine' args
+      continue subst expr'
+
+-- | Beta reduction
+betaReduce
+  :: Monad m
+  => Alternative m
+  => Subst.Class s
+  => Transform m s CoreExpr
+betaReduce continue subst = \case
+  -- Normal beta reduction.
+  App (Lam bndr body) arg -> substitute body bndr arg
+
+  -- Reduction on let binding.
+  Let (NonRec bndr expr) body -> substitute body bndr expr
+
   _ -> empty
+  where
+    substitute body bndr expr = do
+      expr' <- continue subst expr
+      let subst' = subst & Subst.extend bndr expr'
+      continue subst' body
 
 -- | Reduces a case expression if the spine of the scrutinee is a constructor.
-caseReduce :: Alternative m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
-caseReduce = \case
+caseReduce
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+caseReduce continue subst = \case
   Case scrut bndr _ alts -> do
-    -- | Get the constructor spine (if available) of this expression with all
-    -- the arguments that are applied to it.
-    let splitCon expr = do
-          let (fun, args) = collectArgs expr
+    -- Get the spine and its arguments
+    let (spine, args) = collectArgs scrut
 
-          -- Try to get the AltCon (if possible).
-          con <- case fun of
-            Var v | isDataConWorkId v -> pure $ DataAlt (idDataCon v)
-            Lit l -> pure $ LitAlt l
-            _ -> empty
+    -- Notice how we first get the constructor before substituting the
+    -- scrutinee. This is to ensure we don't throw away this part of the
+    -- computation, which would happen if we first substitute and then check if
+    -- there is a constructor afterwards.
+    (con, tyVars, exArgs) <- case spine of
+      Var v -> do
+        -- Similar to `trimConArgs`, but retains the type variables.
+        con <- maybeM $ isDataConId_maybe v
+        let idx = length $ dataConUnivTyVars con
+        let (tyVars, exArgs) = splitAt idx args
+        pure (DataAlt con, tyVars, exArgs)
 
-          -- Trim the type arguments that do not appear on the match.
-          let args' = trimConArgs con args
-          pure (con, args')
+      Lit l -> do
+        guard $ null args
+        pure (LitAlt l, [], [])
 
-    -- Get the spine if it is a constructor.
-    (altcon, args) <- splitCon scrut
+      _ -> empty
 
-    -- Get the alt matching this spine.
-    Alt _ bndrs rhs <- maybeM $ findAlt altcon alts
+    -- Get the alt matching this spine. This should never fail.
+    Alt _ bndrs rhs <- maybeM $ findAlt con alts
 
-    -- Get the variables that are in scope already.
-    inScope <- reader inScopeSet
-    let bndrs' = bndr : bndrs
-    let inScope' = extendInScopeSetList inScope bndrs'
+    -- Substitute the arguments of the spine.
+    tyVars' <- forM tyVars $ continue subst
+    exArgs' <- forM exArgs $ continue subst
+    spine' <- continue subst spine
 
-    -- Map all the binders of the case to the expressions along the spine.
-    -- Additionally, we substute the binder for the scrutinee.
-    let mapping = zip bndrs' $ scrut : args
+    -- Reconstruct the scrutinee.
+    let scrut' = foldl' App spine' $ tyVars' <> exArgs'
 
-    -- Make the substition using the mapping.
-    let subst = extendSubstList (mkEmptySubst inScope') mapping
+    -- Make the substitution map using the substituted arguments (not the types)
+    -- and the full scrutinee.
+    let mapping = (bndr, scrut') : zip bndrs exArgs'
+    let subst' = subst & Subst.extendMany mapping
 
-    -- Perform the substitution.
-    pure $ substExpr subst rhs
-
-  _ -> empty
-
--- | Extracts functions out of case statements. That is, for any case statement
--- that has a function type, we apply a fresh argument which we introduce with a
--- lambda.
---
--- TODO: I don't think I need the call to freshLocalVar here.
-floatLambda :: Alternative m => MonadCore m => Pass m CoreExpr
-floatLambda  = \case
-  Case scrut bind ty alts | Just (_, mult, argTy, resTy) <- splitFunTy_maybe ty -> do
-    var <- freshLocalVar "floated" mult argTy
-    let appAlt (Alt c bs rhs) = Alt c bs $ App rhs (Var var)
-    let alts' = appAlt <$> alts
-    let expr = Lam var $ Case scrut bind resTy alts'
-    pure expr
-
-  _ -> empty
-
--- | Remove ticks from the expression.
-dropTick :: Alternative m => Pass m CoreExpr
-dropTick = \case
-  Tick _ e -> pure e
-  _ -> empty
-
--- | Remove reflexive casts.
---
--- Reflexive casts are essentially no-ops.
-dropReflCast :: Alternative m => Pass m CoreExpr
-dropReflCast = \case
-  Cast expr co | isReflexiveCo co -> pure expr
-
-  _ -> empty
-
--- | Join two consecutive casts.
---
--- Merging casts is good both for normalisation and potentially eliminating
--- casts that become reflective by this operation.
-joinCasts :: Alternative m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
-joinCasts = \case
-  Cast (Cast expr co) co' -> do
-    inScope <- reader inScopeSet
-    let subst = mkEmptySubst inScope
-    let co'' = optCoercion (OptCoercionOpts True) subst (TransCo co co')
-    pure $ Cast expr co''
-
-  _ -> empty
-
--- | Float casts over applications.
---
--- This allows more reductions to be able to take place.
-floatCast :: Alternative m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
-floatCast = \case
-  App (Cast fun FunCo { fco_arg, fco_res }) arg -> do
-    let arg' = Cast arg fco_arg
-    pure $ Cast (App fun arg') fco_res
-
-  App (Cast fun (ForAllCo bndr argCo resCo)) (Type arg) -> do
-    inScope <- reader inScopeSet
-    let subst0 = mkEmptySubst inScope
-    let subst1 = extendTvSubst subst0 bndr arg
-
-    let argCo' = substCo subst1 argCo
-    let resCo' = substCo subst1 resCo
-
-    let arg' = Type $ mkCastTy arg argCo'
-
-    pure $ Cast (App fun arg') resCo'
+    -- We can continue substitution on the entire right-hand-side.
+    continue subst' rhs
 
   _ -> empty
 
 -- | Distrubte expressions over a case.
 --
 -- This pushes case expressions towards the root of the expression.
-caseDistribute :: Alternative m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
-caseDistribute = \case
+caseDistribute
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+caseDistribute continue subst = \case
   -- Nested case
-  Case scrut@Case {} bind ty alts ->
-    distribute (\rhs -> Case rhs bind ty alts) scrut
---     let fun = Lam temp (Case (Var temp) bind ty alts)
+  Case scrut@Case {} bndr ty alts -> do
+    let ty' = Subst.ty subst ty
+    let (bndr', subst') = subst & Subst.bndr bndr
+    alts' <- deshadowAlts continue subst' alts
+
+    distribute (\rhs -> Case rhs bndr' ty' alts') continue subst scrut
 
   -- Inline argument into case
-  App fun@Case {} arg -> distribute (flip App arg) fun
+  fun@(Case _ _ ty _) -> do
+    -- Split this case if it is a function.
+    (_, mult, argTy, _) <- maybeM $ splitFunTy_maybe ty
+
+    -- Create a fresh variable to distribute.
+    let argTy' = Scaled mult $ Subst.ty subst argTy
+    let (fresh, subst') = subst & Subst.scope %~~ freshId "distributed" argTy'
+
+    -- Distribute the variable and place it as an abstraction outside of the
+    -- lambda.
+    expr <- distribute (`App` Var fresh) continue subst' fun
+    pure $ Lam fresh expr
 
   -- Inline function into case
-  App fun arg@Case {} -> distribute (App fun) arg
+  App fun arg@Case {} -> do
+    fun' <- continue subst fun
+    distribute (fun' `App`) continue subst arg
 
   -- Inline cast into case
-  Cast expr@Case {} coercion -> distribute (flip Cast coercion) expr
-
-  _ -> empty
-  where
-    distribute f = \case
-      Case scrut bndr _ alts -> do
-        -- Create initial substitution map and substitute the case binder.
-        inScope <- reader inScopeSet
-        let subst0 = mkEmptySubst inScope
-        let (subst1, bndr') = substBndr subst0 bndr
-
-        -- For every alternative, we substitute its binders and right-hand-side.
-        -- Since all binders are now non-clashing with previously defined ones,
-        -- we can call our helper function that actually distributes without
-        -- worrying about variable capturing.
-        let alts' = flip fmap alts $ \(Alt con bndrs rhs) -> do
-              let (subst2, bndrs') = substBndrs subst1 bndrs
-              let rhs' = substExpr subst2 rhs
-              Alt con bndrs' (f rhs')
-
-        -- Get the type of the new alternatives
-        let ty' = coreAltsType alts'
-
-        -- Return the new case expression, with adjusted alts.
-        pure $ Case scrut bndr' ty' alts'
-
-      _ -> empty
-
--- | Removes the default alternative in case statements. This only works for
--- data constructors, as these have a finite number of patterns, unlike for
--- example numeric literals.
-undefaultCase :: Alternative m => MonadCore m => Pass m CoreExpr
-undefaultCase = \case
-  Case scrut bind ty alts -> do
-    -- Get the dataconstructors for this scrutinee. Note that we only remove
-    -- default cases for dataconstructors. That is, we cannot really do this
-    -- in the same way for types with infinite constructors such as literals.
-    let scrutTy = exprType scrut
-    (tycon, _) <- maybeM $ tcSplitTyConApp_maybe scrutTy
-    datacons <- maybeM $ tyConDataCons_maybe tycon
-
-    -- Get the default value and remaining alts. We return empty if there
-    -- doesn't exist a default branch.
-    let (explicit, def) = findDefault alts
-    def' <- maybeM def
-
-    -- Transforms the given dataconstructor into an 'explicit' alternative.
-    -- That is, the alt is never a default pattern.
-    let toExplicit con = do
-          let con' = DataAlt con
-          let alt = findAlt con' explicit
-          -- FIXME: The number of binders should match the arity of the
-          -- constructor, even if we don't use the binders!
-          let explicitDefault = Alt con' [] def'
-          fromMaybe explicitDefault alt
-
-    -- Make all alts explicit, such that no default branch exists in this case
-    -- expression.
-    let alts'' = toExplicit <$> datacons
-    pure $ Case scrut bind ty alts''
+  Cast expr@Case {} co -> do
+    let co' = Subst.co subst co
+    distribute (`Cast` co') continue subst expr
 
   _ -> empty
 
--- | Removes obselete cases. That is, cases whose result will not change
--- depending on the value of the scrutinee.
+-- | Distributes a map over a case expression.
+--
+-- This will ensure correct variable capturing, given that the substitution map
+-- includes all variables bound by the result of the mapping function. Note that
+-- the mapping function is not expected to substitute the right-hand-side; this
+-- already happens prior to the map using the given substitution.
+distribute
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => (CoreExpr -> CoreExpr)
+  -> Transform m s CoreExpr
+distribute adjust continue subst = \case
+  Case scrut bndr _ alts -> do
+    -- Continue on the scrutinee.
+    scrut' <- continue subst scrut
+
+    -- First deshadow the alternatives like normal.
+    let (bndr', subst') = subst & Subst.bndr bndr
+    alts' <- deshadowAlts continue subst' alts
+
+    -- Since all binders in the alts are now non-clashing with previously
+    -- defined binders, we can call our helper function that actually
+    -- distributes without worrying about variable capturing.
+    let alts'' = alts' <&> \(Alt con bndrs rhs) -> do
+          Alt con bndrs $ adjust rhs
+
+    -- Get the type of the new alternatives.
+    let ty' = coreAltsType alts''
+
+    -- Return the new case expression, with adjusted alts.
+    pure $ Case scrut' bndr' ty' alts''
+
+  _ -> empty
+
+-- | Removes obselete cases.
+--
+-- That is, cases whose result will not change depending on the value of the
+-- scrutinee.
 redundantCase
   :: Alternative m
-  => MonadReader r m
-  => HasInScopeSet r
-  => Pass m CoreExpr
-redundantCase = \case
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+redundantCase continue subst = \case
   Case scrut bind _ alts -> do
     -- Check if all alts do not bind any of their pattern (which would make
     -- them not equivalent due to different binding variables).
-    let unbound (Alt _ bs rhs) = exprFreeVars rhs `disjointVarSet` mkVarSet bs
+    let unbound (Alt _ bs _) = all isDeadBinder bs
     guard $ all unbound alts
 
     -- Check if all alts are equivalent, modulo free variables. Also returns
     -- this equivalent entry if it exists, as we'll use it later. Note we don't
     -- need to check the variables introduced by the alt as we already checked
     -- that they are unbound!
-    let cmp (Alt _ _ rhs) (Alt _ _ rhs') = do
-          eqCoreExpr rhs rhs'
+    let cmp (Alt _ _ rhs) (Alt _ _ rhs') = eqCoreExpr rhs rhs'
     expr <- case nubBy cmp alts of
       [Alt _ _ e] -> pure e
       _ -> empty
 
-    -- Get all free variables in this expression for the in-scope set.
-    inScope <- reader inScopeSet
-
-    -- Use the in-scope set to make a substitution for the scrutinee.
-    let subst = extendSubst (mkEmptySubst inScope) bind scrut
-
-    -- Perform the substitution.
-    pure $ substExpr subst expr
+    -- We substitute the case binder in the new expression.
+    let subst' = subst & Subst.extend bind scrut
+    continue subst' expr
 
   _ -> empty
 
--- | Deduplicate case expressions.
+-- | Reduces any occurence of a case binder to the alt of that branch.
 --
--- Remove case expressions that scrutinize over the same expression. Note that
--- this does nothing for a nested case in the DEFAULT branch. We merge such
--- nested cases in a separate function. This pass only deduplicates directly
--- adjacent case expressions and thus relies on case reordering to eliminate all
--- duplicates.
--- TODO: We should be merging occurence info in this pass! Both for the case
--- binder as well as the binders of each alternative.
-caseDedup :: Alternative m => MonadCore m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
-caseDedup = \case
-  Case oScrut oBndr oTy oAlts -> do
-    -- We will substitute this value later, so occurence info after this might
-    -- not be accurate.
-    let oBndr' = clearOccInfo oBndr
+-- When we inline the case binder in this way, we can actually reduce duplicate
+-- case expressions that are nested.
+caseBndrReduce
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+caseBndrReduce continue subst = \case
+  Case scrut bndr ty alts -> do
+    guard . not $ isDeadBinder bndr
 
-    let dedup = \case
-          Alt con oBndrs (Case iScrut iBndr _ iAlts) -> do
-            -- We will substitute this value later, so occurence info after this
-            -- might not be accurate.
-            let oBndrs' = clearOccInfo <$> oBndrs
+    -- Substitute the scrutinee and type like normal.
+    scrut' <- continue subst scrut
+    let ty' = Subst.ty subst ty
 
-            -- We cannot deduplicate a default case on the outer alt.
-            guard $ con /= DEFAULT
+    -- Substitute the case binder like normal
+    let (bndr', subst') = subst & Subst.bndr bndr
 
-            -- Ensure the inner scrutinee doesn't bind variables in the alt, as
-            -- it is never equivalent if it does.
-            guard $ exprFreeVars iScrut `disjointVarSet` mkVarSet oBndrs'
+    -- For every alt, substitute the case binder by the alt constructor if
+    -- possible.
+    alts' <- forM alts $ \(Alt con bndrs rhs) -> do
+      -- Substitute the binders, zapping the occurence info.
+      let (bndrs', subst'') = subst' & Subst.bndrs (fmap zapIdOccInfo bndrs)
 
-            -- Check if we bind the same scrutinee. At this point, we already
-            -- know there is no shadowing of variables due to the previous
-            -- check.
-            guard $ eqCoreExpr oScrut iScrut || eqCoreExpr (Var oBndr') iScrut
+      -- Create a substitution map where the case binder will be replaced by an
+      -- expression representing the alt, if possible.
+      let subst''' = fromMaybe subst'' $ do
+            -- Create an expression from the alt
+            let scope = subst'' ^. Subst.scope
+            expr <- altConToExpr scope con bndrs'
 
-            -- Find the inner pattern matching the outer constructor.
-            Alt _ iBndrs rhs <- maybeM $ findAlt con iAlts
+            -- Ensure the type matches that of the case binder.
+            expr' <- matchExpr scope expr $ varType bndr'
+            pure $ subst'' & Subst.extend bndr expr'
 
-            -- Map all the binders of the case to the expressions along the
-            -- spine. Additionally, the binder should be substituted by the
-            -- scrutinee.
-            let oVars = oBndr' : oBndrs'
-            let iVars = iBndr : iBndrs
-            let mapping = zip iVars $ Var <$> oVars
+      -- Substitute the rhs
+      rhs' <- continue subst''' rhs
+      pure $ Alt con bndrs' rhs'
 
-            -- Make the substition using the mapping. We make sure to extend the
-            -- environment with the new binders from both cases.
-            inScope <- reader inScopeSet
-            let inScope' = extendInScopeSetList inScope $ oVars <> iVars
-            let subst = extendSubstList (mkEmptySubst inScope') mapping
+    -- FIXME: For default branches, we actually would still need the case
+    -- binder, so it is not always dead after this pass. How would we know when
+    -- not to do this pass? For numeric altcons for example, we cannot get rid
+    -- of default branches.
+    -- Set the binder as dead, such that we do not repeat this pass!
+    let bndr'' = setIdOccInfo bndr' IAmDead
 
-            -- Perform the substitution and return the new alt.
-            let rhs' = substExpr subst rhs
-            pure $ Alt con oBndrs' rhs'
-
-          _ -> empty
-
-    -- Get the deduplicated alts.
-    maybeAlts <- forM oAlts $ runMaybeT . dedup
-
-    -- Return empty if no deduplication happened.
-    guard $ any isJust maybeAlts
-
-    -- For any alt where deduplication failed, we use the old expression.
-    let oAlts' = uncurry fromMaybe <$> zip oAlts maybeAlts
-
-    -- Return the modified case expression.
-    pure $ Case oScrut oBndr' oTy oAlts'
+    -- Return the modifier case expression.
+    pure $ Case scrut' bndr'' ty' alts'
 
   _ -> empty
+
+-- | Transform an alt con with binders to an expression.
+altConToExpr
+  :: Alternative m
+  => Monad m
+  => InScopeSet
+  -> AltCon
+  -> [CoreBndr]
+  -> m CoreExpr
+altConToExpr scope con bndrs = case con of
+  DataAlt dataCon -> dataConToExpr scope dataCon bndrs
+
+  LitAlt lit -> do
+    guard $ null bndrs
+    pure $ Lit lit
+
+  DEFAULT -> empty
+
+-- | Transform a data con with binders to an expression.
+dataConToExpr
+  :: Alternative m
+  => Monad m
+  => InScopeSet
+  -> DataCon
+  -> [CoreBndr]
+  -> m CoreExpr
+dataConToExpr scope con bndrs = do
+  -- Create an expression of the data con with blank type variables.
+  let spine = Var $ dataConWorkId con
+  let tyVars = Type . mkTyVarTy <$> dataConUnivTyVars con
+  let untyped = mkApps spine tyVars
+
+  -- Now match the blank type variable to the binders.
+  let bndrs' = Var <$> bndrs
+  matchArgsApp scope untyped bndrs'
+
+-- | Removes the default alternative in case statements.
+--
+-- This only works for data constructors, as these have a finite number of
+-- patterns, unlike for example numeric literals.
+undefaultCase
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+undefaultCase continue subst = \case
+  Case scrut bndr ty alts -> do
+    -- Get the default value and remaining alts. We return empty if there
+    -- doesn't exist a default branch.
+    (explicit, rhsDefault) <- do
+      let (explicit, def) = findDefault alts
+      def' <- maybeM def
+      pure (explicit, def')
+
+    -- Get the dataconstructors for this scrutinee. Note that we only remove
+    -- default cases for data constructors. That is, we cannot really do this
+    -- in the same way for types with infinite constructors such as literals.
+    dataCons <- maybeM $ do
+      (tyCon, _) <- tcSplitTyConApp_maybe $ varType bndr
+      tyConDataCons_maybe tyCon
+
+    -- Fetches the alt corresponding to the given constructor, if it exists.
+    let originalAlt dataCon = do
+          let cmp (Alt con _ _) = DataAlt dataCon == con
+          maybeM $ find cmp explicit
+
+    -- Create an explicit alt using the default rhs.
+    let explicitDefault dataCon = do
+          -- Get binders with types matching the scrutinee/case binder, this
+          -- should never fail if you provide a matching bndr dataCon pair.
+          let scope = subst ^. Subst.scope
+          (bndrs, _) <- freshAltBndrs scope bndr dataCon
+
+          -- Create the default binder with explicit constructor and binders.
+          let con = DataAlt dataCon
+          let bndrs' = bndrs <&> (`setIdOccInfo` IAmDead)
+          pure $ Alt con bndrs' rhsDefault
+
+    -- Create the new alternatives. Note that they should be ordered in the same
+    -- way as the its list of data constructors. For this reason, we first try
+    -- to get the original alternative, before constructing the explicit default
+    -- case. In the end, all alts are now explicit.
+    alts' <- forM dataCons $ originalAlt <|-|> explicitDefault
+
+    -- Since we only added some fresh (dead) binders to the alts, it is safe to
+    -- continue on the entire expression.
+    continue subst $ Case scrut bndr ty alts'
+
+  _ -> empty
+
+-- | Create a set of fresh binders for an alt, if possible.
+--
+-- The current in-scope set and case binder is passed along. The case binder is
+-- added to the in-scope set for fresh variable generation. Additionally, the
+-- binders will by typed such that they would match the type of the case binder
+-- if they're used in an alternative.
+--
+-- This fails if the data constructor cannot be matched to the core binder type.
+freshAltBndrs
+  :: Alternative m
+  => Monad m
+  => InScopeSet
+  -> CoreBndr
+  -> DataCon
+  -> m ([CoreBndr], InScopeSet)
+freshAltBndrs scope bndr dataCon = do
+  let scope' = extendInScopeSet scope bndr
+  let goalTy = varType bndr
+
+  -- Get the base types for the arguments and result of the constructor.
+  let (_, _, funTy) = tcSplitSigmaTy $ dataConType dataCon
+  let (argTys, resTy) = splitFunTys funTy
+
+  -- We try to match the result type of the constructor to the case binder.
+  -- Really, this should never fail.
+  subst <- maybeM $ tcMatchTy resTy goalTy
+  let argTys' = substScaledTy subst <$> argTys
+
+  -- Now we construct the case binders, with the correct types.
+  let ids = argTys' <&> ("unused",)
+  pure $ freshIds ids scope'
 
 -- | Merges nested cases.
 --
@@ -446,90 +660,140 @@ caseDedup = \case
 -- cannot be deduplicated. As such, we instead merge the two cases. This
 -- pass only merges adjacent cases (no deep nesting) and thus relies on case
 -- reodering to make the cases adjecent.
-caseMerge :: Alternative m => MonadReader r m => HasInScopeSet r => Pass m CoreExpr
-caseMerge = \case
-  Case oScrut oBind oTy (Alt DEFAULT _ (Case iScrut iBind _ iAlts) : oAlts) -> do
+caseMerge
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+caseMerge continue subst = \case
+  Case oScrut oBndr oTy (Alt DEFAULT _ (Case iScrut iBndr _ iAlts) : oAlts) -> do
     -- Ensure that the cases scrutinize the same expression.
-    guard $ eqCoreExpr oScrut iScrut || eqCoreExpr (Var oBind) iScrut
+    guard $ eqCoreExpr (Var oBndr) iScrut || eqCoreExpr oScrut iScrut
 
-    -- Substitute the inner case binder.
-    inScope <- reader inScopeSet
-    let subst = extendSubst (mkEmptySubst inScope) iBind (Var oBind)
-    let iAlts' = substAlt subst <$> iAlts
+    -- Continue on the outer alts.
+    oAlts' <- deshadowAlts continue subst oAlts
+
+    -- Continue on the inner alts, substituting the case binder.
+    let subst' = subst & Subst.extend iBndr (Var oBndr)
+    iAlts' <- deshadowAlts continue subst' iAlts
 
     -- Merge the alternatives. Note that we provide the outer alts first as they
-    -- should be prioritised.
-    let oAlts' = mergeAlts oAlts iAlts'
-    pure $ Case oScrut oBind oTy oAlts'
+    -- should be prioritised. We purposely leave out the default case in this
+    -- merge. Otherwise, it would be a no-op.
+    let oAlts'' = mergeAlts oAlts' iAlts'
+    pure $ Case oScrut oBndr oTy oAlts''
 
   _ -> empty
 
--- | Swap the order of nested cases.
+-- TODO: Implement the case reordering
+-- More detailed:
+-- I want to order based on the uniques of binders. The thing is that they're
+-- not guaranteed stable. The way local uniques are assigned is by finding
+-- the next identifier. Thus if we're smart about the way we introduce local
+-- uniques are assigned, we can let the unique reflect the declaration order of
+-- variables. Then ordering based on uniques is equivalent to ordering based on
+-- declaration order.
 --
--- This function will swap the order of two adjacent cases. It checks whether
--- this is required by definition order of the variables in the scrutinee.
+-- How:
+-- There are two things we should do in order to ensure our declaration order
+-- property is maintained.
+-- 1. When we start the normalisation, we want the uniques to be in declaration
+--    order.
+-- 2. Any transformation should maintain declaration order.
+--
+-- The first step is rather simple. We can just make a pass that performs
+-- substBndr, but then always fetches the next unique.
+--
+-- The second step might be a bit more difficult. I guess we could also use this
+-- new substBndr that fetches the next unique? Otherwise, I'm worried there will
+-- be holes, such that later invokations of the old substBndr gets a unique from
+-- such a hole. An example where a hole would occur would be in a beta reduction.
+--
+-- The problem with doing this would be that it causes a lot more substitutions.
+-- I'm slightly worried about performance with this approach, but maybe it's
+-- not so bad? Fetching the new unique would be somewhat quick no? The annoying
+-- thing is that this would influence the other passes in a non-trivial way;
+-- they would all need to use different set of substitution functions.
+-- 
+-- The alternative would be to track the ordering in a list or such. I would be
+-- completely fine with this if I could restrict it to this pass and perhaps the
+-- transform function. That would require a lot less adjustments, but then I
+-- don't think that this is really possible either. At least not without again
+-- adjusting the functions that see all declarations (i.e. substBndr et al).
+--
+-- Though maybe, it is a lot advisable to just track the ordering in a list via
+-- a modified substBndr than to adjust the whole scheme of in which uniques are
+-- assigned? Even if it gets a bit more messy...
+--
+-- Hmm. Actually, it seems the local uniques are just fetched via a counter. It
+-- will not attempt to find empty slots. With this in mind, probably we can
+-- uphold our invariant with the normal substBndr. Then we only need to do step
+-- 1. I'm pretty sure the other passes always create binders in declaration
+-- order. I think in fact this is required in order to avoid capturing. My
+-- guess is that we can simply perform step 1 and that the invariant is held
+-- afterwards.
+--
+-- Wait. The problem is not with finding new binders. It's with old binders that
+-- actually do not conflict with the in-scope set. For any of such binders, we
+-- will actually not call uniqAway, and thus risk ruining declaration order.
+-- The funny thing is that a modification to substBndr that always would call
+-- uniqAway would probably be enough. In the end, it's not so clear. Let's
+-- come back to this!
+--
+-- It think adjusting the substBndr et al would work. I also think it is a very
+-- invisible invariant, that highly depends on an implementation detail of the
+-- unique binder generation of haskell. In that sense, perhaps we should make
+-- our own subst type. Maybe even a typeclass for it, such that we can use the
+-- normal GHC version or any adjusted one.
 caseSwap
   :: Alternative m
-  => MonadCore m
-  => MonadReader r m
-  => HasCaseBndrs r
-  => HasOrderedDecl r
-  => HasInScopeSet r
-  => Pass m CoreExpr
-caseSwap = \case
+  => Monad m
+  => Transform m Subst.Ordered CoreExpr
+caseSwap continue subst = \case
   Case oScrut oBind oTy oAlts -> do
-    -- TODO: I feel like there exists a library function that does this!
-    let firstSucceeding f = asum . flip fmap f
-
     -- Get the unbound alt as an irrefutable pattern.
-    (oConSwap, oBndrsSwap, (iScrut, iBndr, iTy, iAlts))
-      <- firstSucceeding oAlts $ \case
-        Alt con bndrs (Case iScrut iBndr iTy iAlts) -> do
-          -- Checks whether the cases are swappable
-          guard $ exprFreeVars iScrut `disjointVarSet` mkVarSet bndrs
+    (oConSwap, oBndrsSwap, (iScrut, iBndr, iTy, iAlts)) <- asum $ oAlts <&> \case
+      Alt con bndrs (Case iScrut iBndr iTy iAlts) -> do
+        -- Checks whether the cases are swappable
+        guard $ exprFreeVars iScrut `disjointVarSet` mkVarSet bndrs
 
-          -- Checks whether we should reorder the cases, according to some
-          -- ordering based on the scrutinees.
-          decl <- reader orderedDecl
-          let decl' = bndrs <> (oBind : decl)
-          cmp <- compareScrut' decl' oScrut iScrut
-          guard $ LT == cmp
+        -- Checks whether we should reorder the cases, according to some
+        -- ordering based on the scrutinees.
+        guard $ LT == compareScrut subst oScrut iScrut
 
-          -- Irrefutable pattern of the inner case.
-          pure (con, bndrs, (iScrut, iBndr, iTy, iAlts))
-        _ -> empty
+        -- Irrefutable pattern of the inner case.
+        pure (con, bndrs, (iScrut, iBndr, iTy, iAlts))
+      _ -> empty
 
-    -- Create substitution with outer case binder.
-    inScope <- reader inScopeSet
-    let subst0 = mkEmptySubst inScope
-    let (subst1, oBind') = substBndr subst0 oBind
+    oScrut' <- continue subst oScrut
+    let oTy' = Subst.ty subst oTy
+    let (oBind', subst') = subst & Subst.bndr oBind
 
     -- For the alternative that will be swapped for the inner binder, we need to
     -- adhere to the ordering of case binders. That is, the outer alternative
     -- binders should be substituted first.
-    let (substSwap0, oBndrsSwap') = substBndrs subst1 oBndrsSwap
+    let (oBndrsSwap', substSwap) = subst' & Subst.bndrs oBndrsSwap
 
-    -- Substitute a possible case binder in the inner scrutinee.
-    let iScrut' = do
-          let subst = extendSubst substSwap0 oBind' oScrut
-          substExpr subst iScrut
+    -- Get the new inner scrutinee and type.
+    iScrut' <- continue substSwap iScrut
+    let iTy' = Subst.ty substSwap iTy
 
     -- Substitute the inner case binder.
-    let (substSwap1, iBndr') = substBndr substSwap0 iBndr
+    let (iBndr', substSwap') = substSwap & Subst.bndr iBndr
 
     -- Adjust every inner alternative to contain the outer alternative. Note
     -- that special care is taken whenever we encounter the "swap" alternative
     -- (i.e. the outer alternative that originally contained the inner case).
     iAlts' <- forM iAlts $ \(Alt iCon iBndrs iRhs) -> do
       -- Substitute the inner binders
-      let (substSwap2, iBndrs') = substBndrs substSwap1 iBndrs
+      let (iBndrs', substSwap'') = substSwap' & Subst.bndrs iBndrs
 
       -- We return the outer alt as its inner version.
       oAlts' <- forM oAlts $ \case
         -- This is the alternative where the inner case resides. Thus, this is
         -- where the outer case should perform the operation of the inner case.
         Alt oCon _ _ | oCon == oConSwap -> do
-          let iRhs' = substExpr substSwap2 iRhs
+          iRhs' <- continue substSwap'' iRhs
           pure $ Alt oConSwap oBndrsSwap' iRhs'
 
         -- This is a non swap-alternative, we only need to ensure binders
@@ -537,190 +801,115 @@ caseSwap = \case
         -- don't use a substitution with the inner case variables, as these
         -- should have never occurred in this outer branch in the first place.
         -- Substituting these binders would cause variable capturing.
-        oAlt -> pure $ substAlt subst1 oAlt
+        oAlt -> deshadowAlt continue subst' oAlt
 
       -- The new inner rhs contain the outer rhs. Use the inner binders as
       -- populated when building the substitution map for the swap case.
-      let iRhs' = Case oScrut oBind' oTy oAlts'
+      let iRhs' = Case oScrut' oBind' oTy' oAlts'
       pure $ Alt iCon iBndrs' iRhs'
 
-    pure $ Case iScrut' iBndr' iTy iAlts'
+    pure $ Case iScrut' iBndr' iTy' iAlts'
 
   _ -> empty
 
--- NOTE: Case Reordering
+-- | Compares scrutinees.
 --
--- Let's first consider swapping binders without the complexity of case
--- expressions.
+-- Note that we only expect to swap scrutinees that are normalized (i.e. only
+-- contain applications, variables and literals. Any other expression will get
+-- an equality, as we don't want to swap them (yet). We compare scrutinees
+-- based on declaration ordering.
 --
--- :: a -> b -> b
--- \x -> \x -> x
---        |    |
---        +----+
+-- FIXME: I think this ordering doesn't really work for normalisation. It
+-- might be better to consider what is the 'lowest' variable in an expression,
+-- if this is equal, 'second lowest' etc. If all of this is equalt, then we
+-- should consider their order of appearance in the expression.
 --
--- transform to (handling shadowing correctly)
---
--- :: b -> a -> b
--- \x -> \x -> x
---  |          |
---  +----------+
---
--- I think if we use substBndr in the normal ordering first, we would get
---
--- :: a -> b -> b
--- \x -> y -> y
---
--- Then we can just reorder afterwards:
---
--- :: b -> a -> b
--- \y -> \x -> y
---
--- Which is then alpha equivalent to the above
---
--- So how does this work for nested cases?
---
--- case x of
---   Just a -> case y of
---        |
---        +-------+
---                |
---     Nothing -> a
-
---     Just a -> a
---          |    |
---          +----+
---
---   Nothing -> a
---              |
---             free
---
--- transform to (handling shadowing correctly)
---
--- case y of
---   Nothing -> case x of
---     Just a -> a
---          |    |
---          +----+
---
---     Nothing -> a
---                |
---               free
---
---   Just a -> case x of
---        |
---        +------+
---               |
---     Just a -> a
---
---     Nothing -> a
---                |
---               free
---
--- My intuition is that for the paths that did not contain the inner case y
--- (i.e. the free a in this example), we should **not** add the binders of
--- the inner case when substituting. How do we unique away the case binders
--- of the inner expression? I guess we can just do it, as the in scope set
--- should make sure we don't pick variables that are free in the other
--- scope no?
-
--- | Compares two scrutinees given some ordered in scope set. Note that the
--- scrutinees are expected to be normalised. Normalised scrutinees should only
--- contain variables, literals and their application.
---
--- The given ordered list of Id's decides ordering when comparing variables.
--- Global variables are ordered by their Unique.
---
--- The fine-grained ordering is only checked if both expressions only contain
--- local Id's in the given list. Otherwise, the list that doesn't fulfill this
--- condition is the smaller one. If this is the case for both, they're
--- considered equal.
---
--- TODO: We should order product types before sum types wherever possible.
--- This will reduce the total expression size, while being easy to uphold.
-compareScrut :: [Id] -> CoreExpr -> CoreExpr -> Ordering
-compareScrut def lhs rhs = do
-  -- Finds the index of an id, if it exists
-  let idIndex = flip elemIndex def
-
-  -- Compares variables. We can compare local variables using the ordering
-  -- defined by the Id list. The global names should be ordered across functions
-  -- and as such retain total ordering on comparison.
-  let cmpVar x y = case (idIndex x, idIndex y) of
-        (Nothing, Nothing) -> compare x y
-        (idx, idx') -> compare idx idx'
-
-  -- Compares scrutinees. Note that at this point, we expect scrutinees to be
-  -- normalized. Thus, we only provide comparison for the constructs we expect
-  -- to be there. We use the given ordered Id list to order variable occurences.
-  let cmp l r = case (l, r) of
-        (Var x, Var y) -> cmpVar x y
-        (Var _, _) -> GT
-        (_, Var _) -> LT
-        (Lit x, Lit y) -> compare x y
-        (Lit _, _) -> GT
-        (_, Lit _) -> LT
-        (App f a, App f' a') -> cmp f a <> cmp f' a'
-        _ -> EQ
-  -- FIXME: I think this ordering doesn't really work for normalisation. It
-  -- might be better to consider what is the 'lowest' variable in an expression,
-  -- if this is equal, 'second lowest' etc. If all of this is equalt, then we
-  -- should consider their order of appearance in the expression.
-  --
-  -- To be explicit; the total ordering should respect that some cases cannot
-  -- be reordered (i.e. because the outer binds variables used in the inner
-  -- scrutinee). The current comparison doesn't respect this property! Hopefully
-  -- this proposed solution does.
-
-  cmp lhs rhs
-
-compareScrut'
-  :: MonadReader r m
-  => HasOrderedDecl r
-  => HasCaseBndrs r
-  => [CoreBndr]
+-- To be explicit; the total ordering should respect that some cases cannot
+-- be reordered (i.e. because the outer binds variables used in the inner
+-- scrutinee). The current comparison doesn't respect this property! Hopefully
+-- this proposed solution does.
+compareScrut
+  :: Subst.Ordered
   -> CoreExpr
   -> CoreExpr
-  -> m Ordering
-compareScrut' bndrs lhs rhs = do
-  decl <- (bndrs <>) <$> reader orderedDecl
+  -> Ordering
+compareScrut subst lhs rhs = case (lhs, rhs) of
+  (Var x, Var y) -> Subst.compareVar subst x y
+  (Var _, _) -> GT
+  (_, Var _) -> LT
+  (Lit x, Lit y) -> compare x y
+  (Lit _, _) -> GT
+  (_, Lit _) -> LT
+  (App f a, App f' a') -> compareScrut subst f f' <> compareScrut subst a a'
+  (Cast e _, Cast e' _) -> compareScrut subst e e'
+  _ -> EQ
 
-  -- Finds the index of an id, if it exists
-  let idIndex = flip elemIndex decl
+-- | Remove ticks from the expression.
+dropTick
+  :: Alternative m
+  => Transform m s CoreExpr
+dropTick continue subst = \case
+  Tick _ expr -> continue subst expr
 
-  -- Compares variables. We can compare local variables using the ordering
-  -- defined by the Id list. The global names should be ordered across functions
-  -- and as such retain total ordering on comparison.
-  let cmpVar x y = case (idIndex x, idIndex y) of
-        (Nothing, Nothing) -> compare x y
-        (idx, idx') -> compare idx idx'
+  _ -> empty
 
-  -- Compares scrutinees. Note that at this point, we expect scrutinees to be
-  -- normalized. Thus, we only provide comparison for the constructs we expect
-  -- to be there. We use the given ordered Id list to order variable occurences.
-  let cmp l r = case (l, r) of
-        (Var x, Var y) -> cmpVar x y
-        (Var _, _) -> GT
-        (_, Var _) -> LT
-        (Lit x, Lit y) -> compare x y
-        (Lit _, _) -> GT
-        (_, Lit _) -> LT
-        (App f a, App f' a') -> cmp f f' <> cmp a a'
-        (Cast e _, Cast e' _) -> cmp e e'
-        _ -> EQ
-  -- FIXME: I think this ordering doesn't really work for normalisation. It
-  -- might be better to consider what is the 'lowest' variable in an expression,
-  -- if this is equal, 'second lowest' etc. If all of this is equalt, then we
-  -- should consider their order of appearance in the expression.
-  --
-  -- To be explicit; the total ordering should respect that some cases cannot
-  -- be reordered (i.e. because the outer binds variables used in the inner
-  -- scrutinee). The current comparison doesn't respect this property! Hopefully
-  -- this proposed solution does.
+-- | Remove reflexive casts.
+--
+-- Reflexive casts are essentially no-ops.
+dropReflCast
+  :: Alternative m
+  => Transform m s CoreExpr
+dropReflCast continue subst = \case
+  Cast expr co | isReflexiveCo co -> continue subst expr
 
-  wilds <- reader caseBndrs
-  let isWild = \case
-        Var x -> elemVarSet x wilds
-        _ -> False
+  _ -> empty
 
-  pure $ if isWild lhs || isWild rhs then EQ else cmp lhs rhs
+-- | Join two consecutive casts.
+--
+-- Merging casts is good both for normalisation and potentially eliminating
+-- casts that become reflective by this operation.
+joinCasts
+  :: Alternative m
+  => Transform m s CoreExpr
+joinCasts continue subst = \case
+  Cast (Cast expr co) co' -> do
+    let co'' = mkTransCo co co'
+    let expr' = Cast expr co''
+    continue subst expr'
+
+  _ -> empty
+
+-- | Float casts over applications.
+--
+-- This allows more reductions to be able to take place.
+floatCast
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+floatCast continue subst = \case
+  App (Cast fun FunCo { fco_arg, fco_res }) arg -> do
+    let arg' = Cast arg fco_arg
+    let expr = Cast (App fun arg') fco_res
+    continue subst expr
+
+  App (Cast fun (ForAllCo bndr argCo resCo)) (Type arg) -> do
+    -- The forall binder should only be substituted within the coercions. As
+    -- there is no correct substitution for the entire returned expression, we
+    -- continue only on the function body.
+    fun' <- continue subst fun
+    let arg' = Subst.ty subst arg
+
+    -- Substitute the coercions
+    let subst' = subst & Subst.extend bndr (Type arg')
+    let argCo' = Subst.co subst' argCo
+    let resCo' = Subst.co subst' resCo
+
+    -- Create the new type argument.
+    let arg'' = Type $ mkCastTy arg' argCo'
+
+    -- Return the floated cast.
+    pure $ Cast (App fun' arg'') resCo'
+
+  _ -> empty
 
