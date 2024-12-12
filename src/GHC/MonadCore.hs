@@ -5,7 +5,7 @@ module GHC.MonadCore
   , dbg'
   ) where
 
-import GHC.Plugins (CoreM, Outputable, putMsg, putMsgS, ppr)
+import GHC.Plugins (CoreM, Outputable, debugTraceMsg, ppr, text)
 
 import Control.Monad.Trans.Maybe (MaybeT)
 import Control.Monad.Trans.Class (lift)
@@ -39,8 +39,8 @@ instance MonadFail CoreM where
 
 -- | Debug print GHC structures in a CoreM monad stack.
 dbg :: (MonadCore m, Outputable o) => o -> m ()
-dbg = liftCore . putMsg . ppr
+dbg = liftCore . debugTraceMsg . ppr
 
 -- | Debug print a string in a CoreM monad stack.
 dbg' :: MonadCore m => String -> m ()
-dbg' = liftCore . putMsgS
+dbg' = liftCore . debugTraceMsg . text

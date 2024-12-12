@@ -88,7 +88,8 @@ progPaths = do
 check' :: FilePath -> SpecWith ()
 check' path = do
   it ("checks " <> "\"" <> path <> "\"") $ do
-    result <- hSilence [stdout, stderr] . runGhc' $ do
+    -- result <- hSilence [stdout, stderr] . runGhc' $ do
+    result <- runGhc' $ do
       setupPlugin
       compile path
 

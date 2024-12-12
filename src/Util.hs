@@ -14,6 +14,7 @@ module Util
   , freshIds
   , freshLocalVar
   , freshGlobalVar
+  , zapOccInfo
 
   , resolveTH
   , resolveTH'
@@ -47,6 +48,8 @@ import qualified Language.Haskell.TH.Syntax as TH
 
 import Data.Foldable (foldl')
 import Data.Maybe (mapMaybe, listToMaybe)
+import Data.Generics.Aliases (mkT)
+import Data.Generics.Schemes (everywhere)
 
 import Lens.Micro (Lens)
 
@@ -86,6 +89,9 @@ accumL :: Traversable f => (a -> s -> (b, s)) -> f a -> s -> (f b, s)
 accumL f = runState . traverse (state . f)
 
 -- | Update the outer record and get some inner value.
+--
+-- The inner value might be the adjusted value, but it could also be some
+-- anything else produced by the modification function.
 --
 -- This function is intended to run some computation on an inner field, where
 -- the computation additionally returns a value.
@@ -148,6 +154,17 @@ freshGlobalVar name ty = do
   let name' = mkSystemName unique $ mkVarOcc name
   let var = mkGlobalVar VanillaId name' ty vanillaIdInfo
   return var
+
+-- | Zap occurance information of an expression.
+--
+-- The main purpose for this function is to inspect variable shadowing of a term
+-- within the context of dead variables, which are not printed otherwise.
+zapOccInfo :: CoreExpr -> CoreExpr
+zapOccInfo = everywhere $ mkT zap
+  where
+    zap var
+      | isId var = zapIdOccInfo var
+      | otherwise = var
 
 -- | Resolves a template haskell name to a non-recursive variable.
 resolveTH

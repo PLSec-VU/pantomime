@@ -1,23 +1,17 @@
 module Types
   ( UC (..)
-  , UCGenerated (..)
   , UCNorm (..)
+  , UCCompare (..)
+
+  , UCGenerated (..)
   , ucGenAnn
 
-  , UCCompare (..)
-  -- , UCCheck (..)
-  -- , mkCheck
-
+  , Pass
   , Bind' (..)
   , CoreBind'
   , nonRec
 
-  , Pass
-
   , HasModGuts (..)
-  , HasInScopeSet (..)
-  , HasOrderedDecl (..)
-  , HasCaseBndrs (..)
   ) where
 
 import Data.Data
@@ -96,21 +90,3 @@ class HasModGuts a where
 
 instance HasModGuts ModGuts where
   modGuts = id
-
--- | Anything that has an in scope set.
-class HasInScopeSet a where
-  inScopeSet :: a -> InScopeSet
-
-instance HasInScopeSet InScopeSet where
-  inScopeSet = id
-
--- | Anything that tracks an ordering in declarations.
-class HasOrderedDecl a where
-  orderedDecl :: a -> [CoreBndr]
-
-instance HasOrderedDecl [CoreBndr] where
-  orderedDecl = id
-
--- | Anything that tracks which binders are case binders.
-class HasCaseBndrs a where
-  caseBndrs :: a -> VarSet

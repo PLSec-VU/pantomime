@@ -1,6 +1,8 @@
 module Subst
   ( Class (..)
+  , lookupId
   , bndrs
+  , extend
   , extendMany
   , extendBind
   , extendProg
@@ -27,51 +29,69 @@ import Lens.Micro.Extras (view)
 
 import Util (accumL, (%~~))
 
--- TODO: I guess we should just keep the ordering of the original functions.
--- It seems to be nicer to first write the substitution and then the other
--- stuff. It's also how the current code is written! Also, maybe we can remove
--- all the subst stuff from the function names? It seems like we'll be writing
--- qualified syntax anyway? Let's give this some thought!
-class Class a where
+-- | Anything that can perform a substitution.
+class Class s where
   -- | Create an empty substitution, with the given in-scope set.
-  new :: InScopeSet -> a
+  new :: InScopeSet -> s
 
   -- | Lens into the in-scope set of this substitution.
-  scope :: Lens' a InScopeSet
+  scope :: Lens' s InScopeSet
 
   -- | Substitute a binder.
   --
   -- This will ensure the given binder is fresh.
-  bndr :: CoreBndr -> a -> (CoreBndr, a)
+  bndr :: CoreBndr -> s -> (CoreBndr, s)
 
   -- | Substitute recursive binders.
   --
   -- Ideally, we make this a non-typeclass function. The problem is that GHC
   -- doesn't expose `substIdBndr`, which would be required to put in this
   -- interface in order to make recBndrs non-typeclass.
-  recBndrs :: Traversable f => f CoreBndr -> a -> (f CoreBndr,  a)
+  recBndrs :: Traversable f => f CoreBndr -> s -> (f CoreBndr,  s)
 
   -- | Lookup an Id in the substitution.
-  --
-  -- It may return the variable if no substitution exists. Can panic if the
-  -- variable was not in scope.
-  lookupId :: a -> Id -> CoreExpr
+  lookupId' :: s -> Id -> Maybe CoreExpr
 
   -- | Extend a substitution.
-  --
-  -- Compared to `extendSubst` as provided by GHC, this should additionally
-  -- extend the in-scope set. This is important when deshadowing names.
-  extend :: Var -> CoreArg -> a -> a
+  extend' :: Var -> CoreArg -> s -> s
 
   -- | We should actually expose lookups for coercions and types instead of
   -- these directly. We can implement these functions generically then for all
   -- substitutions. There is no use-case so far, hence we keep it like this.
-  ty :: a -> Type -> Type
+  ty :: s -> Type -> Type
 
   -- | We should actually expose lookups for coercions and types instead of
   -- these directly. We can implement these functions generically then for all
   -- substitutions. There is no use-case so far, hence we keep it like this.
-  co :: a -> Coercion -> Coercion
+  co :: s -> Coercion -> Coercion
+
+-- | Lookup an Id in the substitution.
+--
+-- It may return the variable if no substitution exists. Can panic if the
+-- variable was not in scope.
+lookupId :: Class s => s -> Id -> CoreExpr
+lookupId subst var
+  | assertPpr (isId var && not (isCoVar var)) (ppr var)
+    not (isLocalId var) = Var var
+  | Just expr <- lookupId' subst var = expr
+  | Just var' <- subst ^. scope . to (`lookupInScope` var) = Var var'
+  | otherwise = pprPanic "lookupId" $ ppr var $$ ppr (subst ^. scope)
+
+-- | Extend the substitution.
+--
+-- This will additionally extend the in-scope set with the variable, if the
+-- `Unique` was not in use previously. While the occurrence of this variable
+-- itself is not interesting, we wish to store that its `Unique` is in use. This
+-- way, we can generate fresh variables that will not be substituted using the
+-- in-scope set of this substitution.
+extend :: Class s => Var -> CoreArg -> s -> s
+extend var arg subst = do
+  let extendScope var' scope'
+        | elemInScopeSet var' scope' = scope'
+        | otherwise = extendInScopeSet scope' var'
+  subst
+    & scope %~ extendScope var
+    & extend' var arg
 
 -- | Substitute multiple binders.
 --
@@ -101,8 +121,8 @@ extendMany = flip . foldl' . flip $ uncurry extend
 -- That is, this will cause the substitution to replace any variable occurence
 -- with its definition.
 extendBind :: Subst.Class s => CoreBind -> s -> s
-extendBind (NonRec bndr' expr) = Subst.extend bndr' expr
-extendBind (Rec pairs) = Subst.extendMany pairs
+extendBind (NonRec bndr' expr) = extend bndr' expr
+extendBind (Rec pairs) = extendMany pairs
 
 -- | Extend the substitution with a program.
 --
@@ -118,6 +138,7 @@ tick subst = \case
 
   other -> other
 
+-- | Base GHC substitution.
 type Base = Subst
 
 instance Class Base where
@@ -131,11 +152,9 @@ instance Class Base where
 
   recBndrs = swap .: flip substRecBndrs
 
-  lookupId = lookupIdSubst
+  lookupId' = lookupIdSubst_maybe
 
-  extend var arg subst = do
-    let subst' = subst & scope %~ flip extendInScopeSet var
-    extendSubst subst' var arg
+  extend' var arg subst = extendSubst subst var arg
 
   ty = substTy
 
@@ -156,15 +175,11 @@ order f (Ordered b o) = do
   let rebuild = Ordered b
   rebuild <$> f o
 
-compareVar :: Ordered -> Var -> Var -> Ordering
-compareVar subst x y = do
-  -- Finds the index of an id, if it exists
-  let idIndex = subst ^. order . to (flip elemIndex)
-
-  -- Sort variables based on their declaration.
-  case (idIndex x, idIndex y) of
-    (Nothing, Nothing) -> compare x y
-    (idx, idx') -> compare idx idx'
+instance Outputable Ordered where
+  ppr subst = vcat
+    [ subst ^. base . to ppr
+    , subst ^. order . to ppr
+    ]
 
 instance Class Ordered where
   new s = Ordered
@@ -188,10 +203,24 @@ instance Class Ordered where
       -- Substitute the binders in the base substitution
       & base %~~ recBndrs vars
 
-  lookupId subst = subst ^. base . to lookupId
+  lookupId' subst = subst ^. base . to lookupId'
 
-  extend var arg subst = subst & base %~ extend var arg
+  extend' var arg subst = subst & base %~ extend' var arg
 
   ty = ty . view base
 
   co = co . view base
+
+-- | Compare two variables.
+--
+-- The comparison is based on the definition order of tracked by the substition
+-- map.
+compareVar :: Ordered -> Var -> Var -> Ordering
+compareVar subst x y = do
+  -- Finds the index of an id, if it exists
+  let idIndex = subst ^. order . to (flip elemIndex)
+
+  -- Sort variables based on their declaration.
+  case (idIndex x, idIndex y) of
+    (Nothing, Nothing) -> compare x y
+    (idx, idx') -> compare idx idx'

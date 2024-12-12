@@ -26,10 +26,10 @@ source-repository head
 library
   exposed-modules:
       GHC.MonadCore
+      Lint
       Projection
       Subst
       Transform
-      Transform2
       Types
       UC
       Unification
@@ -72,12 +72,12 @@ executable uc-plugin-exe
   main-is: Main.hs
   other-modules:
       ClassInline
-      Cyclic
       LocalClass
       RW
       ThreeAdder
       TwoAdders
       TwoAddersStall
+      TwoAddersStallPrecise
       Paths_uc_plugin
   autogen-modules:
       Paths_uc_plugin

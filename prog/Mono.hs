@@ -5,7 +5,6 @@ module Mono
   , sim
   , compImpl
   , compSim
-  -- , test
   ) where
 
 import Projection
@@ -29,10 +28,6 @@ compImpl = sproj proj $ oproj obs adder
 -- {-# ANN compSim UCNorm #-}
 compSim :: Maybe Int -> Maybe (Int, Int) -> (((), Maybe Bool), Maybe Bool)
 compSim = sproj' proj $ iproj leak sim
-
--- {-# ANN test UCNorm #-}
--- test :: Circuit ((), Maybe Bool) (Maybe (Int, Int)) (Maybe Bool)
--- test = iproj leak
 
 obs :: Maybe Int -> Maybe Bool
 obs (Just x) = Just $ x == 0
