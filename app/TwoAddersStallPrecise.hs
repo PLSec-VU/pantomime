@@ -16,7 +16,7 @@ module TwoAddersStallPrecise
 --   , proj12
   ) where
 
-import Test.QuickCheck
+-- import Test.QuickCheck
 import Projection
 import UC
 
@@ -51,12 +51,12 @@ sim1 _ o1 = ((), o1)
 proj1 :: Int -> (Int, ())
 proj1 reg = (reg, ())
 
-{-# ANN add2 UC
-  { observation = 'obs2
-  , leakage = 'leak2
-  , simulator = 'sim2
-  , projection = 'proj2
-  } #-}
+-- {-# ANN add2 UC
+--   { observation = 'obs2
+--   , leakage = 'leak2
+--   , simulator = 'sim2
+--   , projection = 'proj2
+--   } #-}
 
 isJust :: Maybe a -> Bool
 isJust (Just _) = True

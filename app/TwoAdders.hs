@@ -15,7 +15,6 @@ module TwoAdders
   , proj12
   ) where
 
-import Projection
 import UC
 
 
@@ -73,7 +72,7 @@ sim2 _ (Just False, True) = (True, False)
 sim2 s _ = (False, s)
 
 proj2 :: Maybe Int -> ((), Bool)
-proj2 (Just res) = ((), True)
+proj2 (Just _) = ((), True)
 proj2 Nothing    = ((), False)
 
 leak2 :: () -> (Maybe Int , Maybe Int) -> ((), (Maybe Bool , Bool))
@@ -81,12 +80,12 @@ leak2 _ (Just a, i2) = ((), (Just (a == 0), isJust i2))
 leak2 _ (Nothing, i2) = ((), (Nothing, isJust i2))
 
 -- | Joint proof
-{-# ANN add12 UC
-  { observation = 'obs12
-  , leakage = 'leak12
-  , simulator = 'sim12
-  , projection = 'proj12
-  } #-}
+-- {-# ANN add12 UC
+--   { observation = 'obs12
+--   , leakage = 'leak12
+--   , simulator = 'sim12
+--   , projection = 'proj12
+--   } #-}
 
 add12 :: (Int, Maybe Int) -> ( Maybe Int , Maybe Int ) -> ((Int , Maybe Int), Maybe Int)
 add12 (s1, s2) (i1, i2) = ((s1', s2'), o2)

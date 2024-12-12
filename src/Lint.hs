@@ -24,7 +24,7 @@ panic
   -> m ()
 panic scope expr = full scope expr >>= \case
   Nothing -> pure ()
-  Just err -> pprPanic "panicLint" $ hcat
+  Just err -> pprPanic "panicLint" $ vcat
     [ ppr expr
     , ppr scope
     , ppr err

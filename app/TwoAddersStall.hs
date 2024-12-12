@@ -9,14 +9,15 @@ module TwoAddersStall
   , sim2
   , proj2
   , add2
-  --, test
   , add12
   , obs12
   , sim12
   , proj12
+  , leak12
+  , test
   ) where
 
-import Test.QuickCheck
+-- import Test.QuickCheck
 import Projection
 import UC
 
@@ -76,7 +77,7 @@ obs2 (Just _, stall) = (True, stall)
 obs2 (Nothing, stall) = (False, stall)
 
 leak2 :: () -> (Maybe Int , Maybe Int) -> ((), (Maybe Bool, Bool))
-leak2 _ (Just a, Just b) = ((), (Just (a == 0),  True))
+leak2 _ (Just a, Just _) = ((), (Just (a == 0),  True))
 leak2 _ _ = ((), (Nothing, False))
 
 sim2 :: Bool -> (Maybe Bool , Bool) -> (Bool , (Bool, Bool))
@@ -85,23 +86,27 @@ sim2 _ (Just False, True) = (True, (False, True))
 sim2 s _ = (False, (s, False))
 
 proj2 :: Maybe Int -> ((), Bool)
-proj2 (Just res) = ((), True)
-proj2 Nothing    = ((), False)
+proj2 (Just _) = ((), True)
+proj2 Nothing  = ((), False)
 
 -- Proof of the composed circuit
 
-{-# ANN add12 UC
-  { observation = 'obs12
-  , leakage = 'leak12
-  , simulator = 'sim12
-  , projection = 'proj12
-  } #-}
+-- {-# ANN add12 UC
+--   { observation = 'obs12
+--   , leakage = 'leak12
+--   , simulator = 'sim12
+--   , projection = 'proj12
+--   } #-}
 
 add12 :: (Int, Maybe Int, Bool) -> (Maybe Int, Maybe Int) -> ((Int, Maybe Int, Bool), Maybe Int)
 add12 (s1, s2, stalled) (i1, i2) = ((s1', s2', stall), o2)
     where
         (s1', o1) = add1 s1 (stalled, i1)
         (s2', (o2, stall)) = add2 s2 (o1, i2)
+
+-- {-# ANN test UCNorm #-}
+test :: (Int, Maybe Int, Bool) -> (Maybe Int, Maybe Int) -> (((), (Int, Bool, Bool)), Bool)
+test = sproj proj12 $ oproj obs12 add12
 
 -- -- | Overall observation is just timing
 obs12 :: Maybe Int -> Bool
