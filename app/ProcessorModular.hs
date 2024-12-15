@@ -6,9 +6,12 @@ module ProcessorModular
     , obsFetch
     , leakFetch
     , simFetchRun
-    , fetchProj
-    ) where
---import Test.QuickCheck
+    , execRun
+    , obsExec
+    , leakExec
+    , simExecRun
+    , proj
+    ) where 
 
 import Data.Word
 import Data.Bits
@@ -106,7 +109,6 @@ writeback instr = do
         let (wb, out) = writebackOut state
         return (instr, out, maybe (reg state) (\(Write v) -> v) wb)
 
-
 tick :: (MonadState State m, MonadIO m) => Word16 -> m (Maybe Output, Word8)
 tick rawInst = do
     state <- get
@@ -123,23 +125,28 @@ tick rawInst = do
     put $ state {fetchInstruction = inst}
     -- outputs
     return (out, pc state)
-    
-run :: (MonadState State m,  MonadIO m) => [Word16] -> m ()
+
+
+--run :: MonadState State m => [Word16] -> m [Maybe Output]
+run :: (MonadState State m, MonadIO m) => [Word16] -> m [Maybe Output]
 run program = do
     state <- get
     if pc state >= fromIntegral (length program) 
-    then return ()
+    then return []
     else 
         do
         let inst = program !! fromIntegral (pc state)
         (out, _) <- tick inst
-        liftIO $ putStrLn $ "Output:" ++ show out
-        run program
+        os <- run program
+        return $ out:os
+
 
 test :: IO ()
 test = do 
-    (_, s) <- runStateT (run bin) initState
+    (outs, s) <- runStateT (run bin) initState
     putStrLn $ "halted, with final state" ++ show s
+    putStrLn $ "outputs" ++ show outs
+
     where 
       --prog = [Out, Add 2, Out, Add 3, Out, Clr, Out]  
       --prog = [Out, Add 2, Out, Clr, Out, Add 3, Out]  
@@ -186,15 +193,15 @@ data LState = LState {
 
 -- | Fetch Proof
 
-{-# ANN fetchRun UC
-  { observation = 'obsFetch
-  , leakage = 'leakFetch
-  , simulator = 'simFetchRun
-  , projection = 'fetchProj
-} #-}
+-- {-# ANN fetchRun UC
+--   { observation = 'obsFetch
+--   , leakage = 'leakFetch
+--   , simulator = 'simFetchRun
+--   , projection = 'proj
+-- } #-}
 
-obsFetch :: () -> (Instruction, Maybe Output) -> ((), (LeakInst, Bool))
-obsFetch _ (inst, out) = ((), (leakInst inst, isJust out))
+obsFetch :: (Instruction, Maybe Output) -> (LeakInst, Bool)
+obsFetch (inst, out) = (leakInst inst, isJust out)
 
 leakFetch :: () -> (Bool, Word16, Maybe Output) -> ((), (Bool, LeakInst, Bool))
 leakFetch _ (stalled, rawInstr, out) = ((), (stalled, leakInst $ decode rawInstr, isJust out))
@@ -212,8 +219,8 @@ simFetch stalled inst out = do
     else do 
         return (inst, out) 
 
-fetchProj :: State -> ((), LState)
-fetchProj s = ((), ls)
+proj :: State -> ((), LState)
+proj s = ((), ls)
     where    
     ls = LState{ 
         lstalled = stalled s
@@ -221,22 +228,81 @@ fetchProj s = ((), ls)
         , lWBout = isJust $ snd $ writebackOut s
     }
 
--- | Writeback Proof
+-- | Exec Proof
+{-# ANN execRun UC
+  { observation = 'obsExec
+  , leakage = 'leakExec
+  , simulator = 'simExecRun
+  , projection = 'proj
+} #-}
 
--- writeback :: MonadState State m => m (Maybe Output, Word32)
--- writeback = do
---         state <- get
---         let (wb, out) = writebackOut state
---         return (out, maybe (reg state) (\(Write v) -> v) wb)
+
+execRun :: State -> (Word32, Instruction, Maybe Output, Word16) -> (State, (Bool, Word16, Maybe Writeback, Maybe Output,  Maybe Output))
+execRun s (reg, instr, out, curInst) = swap $ runState (execute reg instr out curInst) s   
+
+obsExec :: (Bool, Word16, Maybe Writeback, Maybe Output, Maybe Output) -> (Bool, LeakInst, Bool, Bool)
+obsExec (stall, rawInst, wb, wbout, out) = (stall, leakInst $ decode rawInst, isJust wbout, isJust out)
+
+leakExec :: () -> (Word32, Instruction, Maybe Output, Word16) -> ((), (LeakInst, Bool, LeakInst))
+leakExec _ (reg, instr, out, curInst) = ((), (leakInst instr, isJust out, leakInst $ decode curInst))
 
 
--- wbRun :: State -> (State, (Maybe Output, Word8))
--- wbRun s = swap $ runState writeback s   
+simExecRun :: LState -> (LeakInst, Bool, LeakInst) -> (LState, (Bool, LeakInst, Bool, Bool))
+simExecRun s (inst, out, curInst) = swap $ runState (simExec inst out curInst) s   
 
--- simWBRun :: LState -> (LState, (Bool, Word8))
--- simWBRun s = swap $ runState simWB s   
 
--- simWB :: MonadState LState m => m (Bool, Word8)
--- simWB = do
+simExec :: MonadState LState m => LeakInst -> Bool -> LeakInst ->  m (Bool, LeakInst, Bool, Bool)
+simExec inst out curInst = do
+    state <- get
+    let instr = lFetchInst state
+    case instr of 
+        -- fast path, execute now
+        LAdd fast -> 
+            if fast || lstalled state then do
+                return (False, curInst, False, out)
+            else do
+                return (True, curInst, False, out)
+        LOut ->
+                return (False, curInst, True, out)
+        LClr ->
+                return (False, curInst, False, out)
+
+
+
+-- ------------------------------------------------------------------------------------
+-- -- Testing
+-- ------------------------------------------------------------------------------------
+
+-- lrun :: MonadState LState m => [Word16] -> m [Bool]
+-- lrun program = do
 --     state <- get
---     return (lWBout state, lpc state)
+--     if lpc state >= fromIntegral (length program) 
+--     then return []
+--     else 
+--         do
+--         let inst = program !! fromIntegral (lpc state)
+--         let (_, leaked) = leak () inst
+--         (out, _) <- sim leaked
+--         os <- lrun program
+--         return $ out:os
+
+
+-- ------------------------------------------------------------------------------------
+-- -- Correctness Theorem
+-- ------------------------------------------------------------------------------------
+
+-- instance Arbitrary Instruction where
+--   arbitrary = oneof [
+--     Add <$> arbitrary,
+--     pure Clr,
+--     pure Out
+--     ]
+
+-- theorem :: [Instruction] -> Bool
+-- theorem prog = map isJust outs == outsL
+--     where
+--         bin = map encode prog
+--         initState = State { pc = 0, reg = 0, stalled = False, fetchInstruction = Add 0, writebackOut = (Nothing, Nothing)}
+--         initStateL = LState {lpc =0, lstalled = False, lFetchInst = LAdd True, lWBout = False}
+--         (outs, _) = runState (run bin) initState
+--         (outsL, _) = runState (lrun bin) initStateL
