@@ -10,6 +10,10 @@ module ProcessorModular
     , obsExec
     , leakExec
     , simExecRun
+    , wbRun
+    , obsWb
+    , leakWb
+    , simWbRun
     , proj
     ) where 
 
@@ -103,17 +107,17 @@ execute reg instr out curInst = do
         Out ->
                 return (False, curInst, Nothing, Just $ Val reg, out)
 
-writeback :: MonadState State m => Word16 -> m (Word16, Maybe Output, Word32)
-writeback instr = do
+writeback :: MonadState State m => Word16 -> (Maybe Writeback, Maybe Output) -> m (Word16, Maybe Output, Word32)
+writeback instr writebacks = do
         state <- get
-        let (wb, out) = writebackOut state
+        let (wb, out) = writebacks
         return (instr, out, maybe (reg state) (\(Write v) -> v) wb)
 
 tick :: (MonadState State m, MonadIO m) => Word16 -> m (Maybe Output, Word8)
 tick rawInst = do
     state <- get
     -- writeback
-    (rawInst, out, newReg) <- writeback rawInst
+    (rawInst, out, newReg) <- writeback rawInst (writebackOut state)
     put $ state {reg = newReg}
     -- execute
     state <- get
@@ -229,12 +233,12 @@ proj s = ((), ls)
     }
 
 -- | Exec Proof
-{-# ANN execRun UC
-  { observation = 'obsExec
-  , leakage = 'leakExec
-  , simulator = 'simExecRun
-  , projection = 'proj
-} #-}
+-- {-# ANN execRun UC
+--   { observation = 'obsExec
+--   , leakage = 'leakExec
+--   , simulator = 'simExecRun
+--   , projection = 'proj
+-- } #-}
 
 
 execRun :: State -> (Word32, Instruction, Maybe Output, Word16) -> (State, (Bool, Word16, Maybe Writeback, Maybe Output,  Maybe Output))
@@ -267,7 +271,29 @@ simExec inst out curInst = do
         LClr ->
                 return (False, curInst, False, out)
 
+-- | Writeback Proof
+{-# ANN wbRun UC
+  { observation = 'obsWb
+  , leakage = 'leakWb
+  , simulator = 'simWbRun
+  , projection = 'proj
+} #-}
 
+wbRun :: State -> (Word16, (Maybe Writeback, Maybe Output)) -> (State, (Word16, Maybe Output, Word32))
+wbRun s (instr, wb) = swap $ runState (writeback instr wb) s   
+
+obsWb :: (Word16, Maybe Output, Word32) -> (LeakInst, Bool)
+obsWb (rawInstr, out, reg) = (leakInst $ decode rawInstr, isJust out)
+
+leakWb :: () -> (Word16, (Maybe Writeback, Maybe Output)) -> ((),(LeakInst, (Bool, Bool)))
+leakWb _ (rawInstr, (wb, out)) = ((), (leakInst $ decode rawInstr, (isJust wb, isJust out)))
+
+simWbRun :: LState -> (LeakInst, (Bool, Bool)) -> (LState, (LeakInst, Bool))
+simWbRun s (instr, wbOut) = swap $ runState (simWb instr wbOut) s   
+
+simWb :: MonadState LState m => LeakInst -> (Bool, Bool) -> m (LeakInst, Bool)
+simWb instr (wb, out) = do
+        return (instr, out)
 
 -- ------------------------------------------------------------------------------------
 -- -- Testing
