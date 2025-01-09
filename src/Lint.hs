@@ -1,30 +1,33 @@
 module Lint
   ( panic
   , full
+  , subterm
   , base
   , extra
   ) where
 
-import GHC.Plugins hiding (panic)
+import GHC.Plugins hiding (panic, empty)
 import Data.Function ((&))
 import Control.Monad (forM_, foldM)
-import Control.Applicative ((<|>))
+import Control.Applicative ((<|>), Alternative (..))
 
 import GHC.Core.Lint (lintExpr)
 import GHC.Driver.Config.Core.Lint (initLintConfig)
-import GHC.Data.Bag (Bag, unitBag)
+import GHC.Data.Bag (Bag, unitBag, filterBag, isEmptyBag)
+import Control.Monad.Trans.Maybe (MaybeT(..))
+import Data.List (isInfixOf)
 
 -- | Lint but panic on error.
 panic
   :: HasCallStack
   => Monad m
-  => HasDynFlags m
-  => InScopeSet
+  => (InScopeSet -> CoreExpr -> m (Maybe (Bag SDoc)))
+  -> InScopeSet
   -> CoreExpr
   -> m ()
-panic scope expr = full scope expr >>= \case
+panic lint scope expr = lint scope expr >>= \case
   Nothing -> pure ()
-  Just err -> pprPanic "panicLint" $ vcat
+  Just err -> pprPanic "Panic on linter warnings/errors" $ vcat
     [ ppr expr
     , ppr scope
     , ppr err
@@ -55,6 +58,30 @@ base (InScope vars) expr = do
   let vars' = nonDetEltsUniqSet vars
   let cfg = initLintConfig dflags vars'
   pure $ lintExpr cfg expr
+
+-- | GHC base lint that ignore some warnings.
+--
+-- The ignored lints are ones that do not necessarily make sense for sub-terms.
+-- The lints require the context to actually perform the check. Hence, we ignore
+-- these warnings.
+subterm
+  :: Monad m
+  => HasDynFlags m
+  => InScopeSet
+  -> CoreExpr
+  -> m (Maybe (Bag SDoc))
+subterm scope expr = runMaybeT $ do
+  result <- MaybeT $ base scope expr
+
+  dflags <- getDynFlags
+  let result' = flip filterBag result $ \doc -> do
+        let doc' = showSDoc dflags doc
+        let join = "join variable" `isInfixOf` doc'
+        -- TODO: I think we should match on more than just "concrete"
+        let test = "concrete" `isInfixOf` doc'
+        not $ join || test
+
+  if isEmptyBag result' then empty else pure result'
 
 -- | Perform additional lints.
 extra

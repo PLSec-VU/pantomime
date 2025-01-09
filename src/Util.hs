@@ -21,9 +21,6 @@ module Util
   , lookupLocal
   , thNameToGhcName'
   , getInstEnvs'
-
-  , lintExpr'
-  , resolveInstance
   ) where
 
 import Control.Applicative
@@ -35,14 +32,9 @@ import Control.Monad.State (state, runState)
 import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Types.TyThing (lookupId)
-import GHC.Core.InstEnv (InstEnvs (..), lookupUniqueInstEnv, instanceDFunId)
+import GHC.Core.InstEnv (InstEnvs (..))
 import GHC.Core.TyCo.Rep (Scaled(..))
 import GHC.Unit.External (eps_inst_env)
-import GHC.Data.Maybe (rightToMaybe)
-import GHC.Data.Bag (Bag)
-
-import GHC.Driver.Config.Core.Lint (initLintConfig)
-import GHC.Core.Lint
 
 import qualified Language.Haskell.TH.Syntax as TH
 
@@ -87,6 +79,8 @@ fuse = foldl' (<|-|>) $ const empty
 -- | Accumulate a stateful function over a traversable input.
 accumL :: Traversable f => (a -> s -> (b, s)) -> f a -> s -> (f b, s)
 accumL f = runState . traverse (state . f)
+
+infixr 4 %~~
 
 -- | Update the outer record and get some inner value.
 --
@@ -234,31 +228,3 @@ getInstEnvs' = do
     -- TODO: Get actual visible orphan modules
     , ie_visible = mkModuleSet []
     }
-
--- | Fetch a dictionary identifier.
---
--- Lookup an instance of the predicate type. We return the dictionary variable
--- that corresponds to the instance.
-resolveInstance
-  :: Alternative m
-  => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
-  => PredType
-  -> m DFunId
-resolveInstance predTy = do
-  instEnvs <- getInstEnvs'
-  (tyCon, tyArgs) <- maybeM $ splitTyConApp_maybe predTy
-  tyClass <- maybeM $ tyConClass_maybe tyCon
-  let eitherInst = lookupUniqueInstEnv instEnvs tyClass tyArgs
-  (clsInst, _) <- maybeM $ rightToMaybe eitherInst
-  let dictVar = instanceDFunId clsInst
-  return dictVar
-
--- TODO: I think we don't use this anymore. We should prune it!
-lintExpr' :: MonadCore m => CoreExpr -> m (Maybe (Bag SDoc))
-lintExpr' expr = do
-  dflags <- liftCore getDynFlags
-  let vars = exprFreeVarsList expr
-  let cfg = initLintConfig dflags vars
-  return $ lintExpr cfg expr

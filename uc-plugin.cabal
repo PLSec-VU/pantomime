@@ -30,6 +30,7 @@ library
       Projection
       Subst
       Transform
+      Transform2
       Types
       UC
       Unification

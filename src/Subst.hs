@@ -69,7 +69,7 @@ class Class s where
 --
 -- It may return the variable if no substitution exists. Can panic if the
 -- variable was not in scope.
-lookupId :: Class s => s -> Id -> CoreExpr
+lookupId :: HasCallStack => Class s => s -> Id -> CoreExpr
 lookupId subst var
   | assertPpr (isId var && not (isCoVar var)) (ppr var)
     not (isLocalId var) = Var var

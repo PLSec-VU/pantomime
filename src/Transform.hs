@@ -78,7 +78,8 @@ initSubst prog = do
 -- TODO: I want a version with and without lint. The lint version should go into
 -- the test bench.
 normalize
-  :: MonadReader r m
+  :: HasCallStack
+  => MonadReader r m
   => HasModGuts r
   => HasDynFlags m
   => Pass m CoreExpr
@@ -88,7 +89,8 @@ normalize expr = do
   loop subst expr
 
 loop
-  :: Monad m
+  :: HasCallStack
+  => Monad m
   => HasDynFlags m
   => Subst.Ordered
   -> CoreExpr
@@ -96,6 +98,7 @@ loop
 loop subst expr = do
   let extra = occurAnalyseExpr . scrutCSE emptyTM
   expr' <- extra <$> linted subst expr
+  Lint.panic Lint.full (subst ^. Subst.scope) expr'
 
   -- TODO: We should do better change detection. This can be relatively
   -- expensive.
@@ -103,7 +106,8 @@ loop subst expr = do
 
 -- | A substitution function from the full transformation.
 substitute
-  :: Monad m
+  :: HasCallStack
+  => Monad m
   => Substitution m Subst.Ordered CoreExpr
 substitute = fix transform
 
@@ -115,14 +119,15 @@ substitute = fix transform
 -- TODO: Ideally we pass a flag to the plugin to do linting or not. I want this
 -- check as top-level as possible; no `when` at every iteration!
 linted
-  :: Monad m
+  :: HasCallStack
+  => Monad m
   => HasDynFlags m
   => Substitution m Subst.Ordered CoreExpr
 linted subst expr = do
   expr' <- transform linted subst expr
 
   let scope = subst ^. Subst.scope
-  Lint.panic scope expr'
+  Lint.panic Lint.subterm scope expr'
   pure expr'
 
 -- | A full transformation.
@@ -131,10 +136,11 @@ linted subst expr = do
 -- One can recursively apply this transformation to itself to get a full
 -- substitution.
 transform
-  :: Monad m
+  :: HasCallStack
+  => Monad m
   => Transform m Subst.Ordered CoreExpr
 transform continue subst expr = do
-  let passes = asum $ fmap (\pass -> pass (lift .: continue) subst expr)
+  let passes = asum $ (\pass -> pass (lift .: continue) subst expr) <$>
         [ betaReduce
         , caseReduce
         , dropTick
@@ -168,7 +174,8 @@ transform continue subst expr = do
 -- kind of hides the intent as a "if all else fails, continue like this"
 -- function.
 deShadowExpr
-  :: Monad m
+  :: HasCallStack
+  => Monad m
   => Subst.Class s
   => Transform m s CoreExpr
 deShadowExpr continue subst = \case
@@ -724,10 +731,70 @@ freshAltBndrs scope bndr dataCon = do
 --    for case binders. I guess that in this way, we could actually do scrutCSE
 --    as well, since we also need to know the scrutinees for binders in that
 --    example.
--- 3. Somehow it can be decoupled? Similar to how we have caseBndrReduce
---    and reduceCase. Both of which work towards deduplicating nested case
---    expressions. It is not entirely clear to me how this would be achieved,
---    but it would be very nice.
+-- 3. We have two separate passes, both in different directions. The first is
+--    inner to outer. This will tell any case (with default) which branches are
+--    explicitely handled by some inner case expression. We can simply duplicate
+--    the current default branch as explicit alt with dead binders for each
+--    of these. Of course, we still keep the normal default btw. With this, the
+--    case-binder-reduce pass will "merge"/deduplicate these inner branches.
+--
+--    This does however not work for the remaining default branch and any nested
+--    cases there. Luckily, we do know that in these cases, only the default
+--    alternative is actually ever chosen. An outer to inner pass can solve
+--    this, with the knowledge that a particular case binder **cannot** be a set
+--    of alternative, such that only the default pattern remains. Keep in mind
+--    that this needs to be a substitution, since we need to substitute the
+--    case binder for scrutinee.
+--
+-- So far, the last one seems by far the best to me. It's just that it doesn't
+-- quite fit in the current framework. The inner-to-outer direction could
+-- be sort of shoe-horned on top, as it could just be called on whatever is
+-- returned from the transformation. Not pretty, but workable.
+--
+-- The other one is a bit more problematic: We now need an additional thing
+-- to track which alternatives a case binder cannot inhibit. Wait, there is
+-- actually an unfolding for this now that I think about. We could just track it
+-- through there I think. Still though, now every transformation would need to
+-- add this information for the pass to work efficiently (technically just
+-- doing it for deShadowExpr would be correct, but not efficient).
+--
+-- I feel like I want a more structured way to pass through this type of
+-- information. It would be tremendously helpful for scrutCSE. Actually,
+-- it would also be really nice for caseSwap, as now we kind of shoe-horned
+-- variable ordering tracking for this one as well...
+--
+-- My current view on this is that we require some helper function for building
+-- expressions. These take for every argument a substitution and expression and
+-- build up this context.
+--
+-- The idea is that any pass creates a (possible empty) expression part tells it
+-- how to compose with the remaining parts on which we continue. For example, if
+-- we were to build a lambda expression like the following:
+-- let (x', subst') = subst & Subst.bndr x'
+-- e' <- continue subst' e
+-- Lam x' e'
+--
+-- We actually have "set in stone" that the expression will at least define
+-- binder x' through the lambda. We don't know yet what e' will look like.
+-- Ideally we can use the knowledge that the expression for sure looks like
+-- Lam x' ?
+-- when we actually call continue on e.
+--
+-- That's why I'm thinking. Wouldn't it make sense to have some set of functions
+-- that can be used as follows:
+--
+-- let (x', subst') = subst & Subst.bndr x'
+-- mkLam continue x' (subst', e)
+--
+-- Or something along these lines. This could allow any auxiliary function to
+-- track whatever it is that is required before calling continue. Think of
+-- variable declaration order, scrutinee binder pairs for scrutCSE, OtherCon
+-- unfoldings for removing defaults.
+--
+-- Another thing though: I don't want to shoe-horn inner-to-outer passes. We
+-- currently only have outer-to-inner passes. That is, passes where we pass
+-- along some data to the inner components (variable ordering, substitutions,
+-- etc.). For the part of the case merging where we want to 
 caseMerge
   :: Alternative m
   => Monad m
@@ -738,18 +805,23 @@ caseMerge continue subst = \case
     -- Ensure that the cases scrutinize the same expression.
     guard $ eqCoreExpr (Var oBndr) iScrut || eqCoreExpr oScrut iScrut
 
+    oScrut' <- continue subst oScrut
+    let oTy' = Subst.ty subst oTy
     -- Continue on the outer alts.
-    oAlts' <- deShadowAlts continue subst oAlts
+    let (oBndr', subst') = subst & Subst.bndr oBndr
+    oAlts' <- deShadowAlts continue subst' oAlts
 
+    -- TODO: This is a bit redundant. We're actually computing continue for
+    -- expressions we will later discard...
     -- Continue on the inner alts, substituting the case binder.
-    let subst' = subst & Subst.extend iBndr (Var oBndr)
-    iAlts' <- deShadowAlts continue subst' iAlts
+    let subst'' = subst' & Subst.extend iBndr (Var oBndr')
+    iAlts' <- deShadowAlts continue subst'' iAlts
 
     -- Merge the alternatives. Note that we provide the outer alts first as they
     -- should be prioritised. We purposely leave out the default case in this
     -- merge. Otherwise, it would be a no-op.
     let oAlts'' = mergeAlts oAlts' iAlts'
-    pure $ Case oScrut oBndr oTy oAlts''
+    pure $ Case oScrut' oBndr' oTy' oAlts''
 
   _ -> empty
 

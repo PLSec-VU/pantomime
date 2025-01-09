@@ -1,78 +1,361 @@
+-- TODO: Add module docs.
 module Unification
-  ( polyApp
+  ( unifyApp
+  , unifyApps
   , unifyExprs
+  , resolveInstances
+
   , matchArgsApp
   , matchExpr
   ) where
 
-import Control.Applicative
-import Control.Monad.Trans.Maybe
-import Control.Monad.State (MonadState (..), modify, evalStateT)
-import Control.Monad.Reader (MonadReader)
-
-import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
-import GHC.Core.Unify (tcUnifyTy, tcMatchTys, tcMatchTy)
+import GHC.Core.Unify (tcMatchTyX, tcMatchTysX, tcUnifyTys, alwaysBindFun)
 import GHC.Core.Map.Type (TypeMap)
 import GHC.Core.Predicate (isDictId)
+import GHC.Core.InstEnv (InstEnvs, lookupUniqueInstEnv, instanceDFunId)
+import GHC.Core.TyCo.Rep (Type (..), Scaled (..), scaledThing)
+import GHC.Data.TrieMap (TrieMap (..), insertTM)
+import GHC.Data.Maybe (rightToMaybe)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy)
-import GHC.Data.TrieMap (lookupTM, insertTM, emptyTM)
 
-import Types
+import Data.Foldable (foldl')
+import Data.Maybe (fromMaybe)
+
+import Control.Applicative (Alternative (..))
+import Control.Monad (guard)
+
+import Lens.Micro
+import Lens.Micro.Extras (view)
+
 import Util
-import GHC.Core.TyCo.Rep (scaledThing)
+import qualified Subst
 
--- collectTyAndValBinders
+-- | Mapping used to track information for unification.
+data Unification = Unification
+  { _substitution :: Subst
+  -- ^ The substitution as dictated by a GHC unification.
+  , _dictionaries :: TypeMap CoreExpr
+  -- ^ The dictionary expressions/variables currently in-scope.
+  , _quantifiers :: DTyCoVarSet
+  -- ^ The quantifiers currently in use.
+  }
 
--- -- | Collect all binders.
--- --
--- -- This entails typevariables, dictionaries and identifiers, solely in this
--- -- order.
--- collectAllBinders :: CoreExpr -> ([TyVar], [DictId], [Id], CoreExpr)
--- collectAllBinders expr = do
---   let (tyVars, dictAndIds, expr') = collectTyAndValBinders expr
---   let (dict, ids) = span isDictId dictAndIds
---   (tyVars, dict, ids, expr')
+-- | An empty unification mapping.
+emptyUnif :: Unification
+emptyUnif = Unification
+  { _substitution = emptySubst
+  , _dictionaries = emptyTM
+  , _quantifiers = emptyDVarSet
+  }
 
--- -- | Apply the given arguments.
--- --
--- -- This will apply type variables to the function first to match the types of
--- -- the arguments, if they can be matched. This assumes the dictionary variables
--- -- are also present in the arguments.
--- matchArgsApp
---   :: Alternative m
---   => Monad m
---   => CoreExpr
---   -> [CoreArg]
---   -> m CoreExpr
--- matchArgsApp fun arg = do
---   -- Split the quantifiers and typeclass constraints from the type
---   let (tyVars, funTy) = tcSplitForAllTyVars $ exprType fun
+-- | Lens into substitution of the 'Unification'.
+substitution :: Lens' Unification Subst
+substitution f unif = do
+  let rebuild subst = Unification
+        { _substitution = subst
+        , _dictionaries = _dictionaries unif
+        , _quantifiers = _quantifiers unif
+        }
+  rebuild <$> f (_substitution unif)
 
---   let (argTys, innerTy) = tcSplitFunTys funTy
+-- | Lens into dictionaries of the 'Unification'.
+dictionaries :: Lens' Unification (TypeMap CoreExpr)
+dictionaries f unif = do
+  let rebuild dict = Unification
+        { _substitution = _substitution unif
+        , _dictionaries = dict
+        , _quantifiers = _quantifiers unif
+        }
+  rebuild <$> f (_dictionaries unif)
 
---   tcMatchTys argTys 
-  
---   -- let (tyVars, _, funTy) = tcSplitSigmaTy $ exprType fun
---   -- guard $ null dicts
---   let argTy = unifiableType arg
+-- | Lens into quantifiers of the 'Unification'.
+quantifiers :: Lens' Unification DVarSet
+quantifiers f unif = do
+  let rebuild quants = Unification
+        { _substitution = _substitution unif
+        , _dictionaries = _dictionaries unif
+        , _quantifiers = quants
+        }
+  rebuild <$> f (_quantifiers unif)
 
---   -- Get the required argument type, that is, the given argument needs to be of
---   -- this type.
---   (_, _, argTyRequired, _) <- maybeM $ splitFunTy_maybe funTy
+-- | Lookup a dictionary identifier given a type.
+--
+-- This will not resolve instances. The purpose of this lookup is to not have
+-- duplicate dictionary constraints in a unified expression.
+lookupDict
+  :: Type
+  -> Unification
+  -> (CoreExpr, Unification)
+lookupDict ty unif = do
+  -- Note that we need to use the new type for lookup in order to properly
+  -- deduplicate constraints.
+  let ty' = substTy (unif ^. substitution) ty
 
---   -- Try to match the required type for the function to the argument.
---   Subst _ _ subst _ <- maybeM $ tcMatchTy argTyRequired argTy
+  -- Attempt to get an already existing identifier in the unification map.
+  let found = do
+        let existing = lookupTM ty' $ unif ^. dictionaries
+        (, unif) <$> existing
 
---   let toTyArg tyVar = Type $ case lookupVarEnv subst tyVar of
---         Just ty -> ty
---         _ -> mkTyVarTy tyVar
---   undefined
+  -- If it doesn't exists, we create a fresh variable with the appropriate type.
+  -- Additionally, we add it to the dictionary map for future unification.
+  let new = do
+        let scaled = Scaled ManyTy ty'
+        let (fresh, unif') = unif
+              & substitution . Subst.scope %~~ freshId "dict" scaled
+
+        let fresh' = Var fresh
+        let unif'' = unif' & dictionaries %~ insertTM ty' fresh'
+        (fresh', unif'')
+
+  -- Attempt to use an existing dictionary, otherwise create a fresh one.
+  fromMaybe new found
+
+-- | Multiple lookups using 'lookupDict'.
+lookupDicts
+  :: Traversable f
+  => f Type
+  -> Unification
+  -> (f CoreExpr, Unification)
+lookupDicts = accumL lookupDict
+
+-- | Lookup the unifying type of a type variable.
+--
+-- This will additionally track the type variables that are used by the new,
+-- unified type in the unification map.
+lookupTy
+  :: TyVar
+  -> Unification
+  -> (Type, Unification)
+lookupTy var unif = do
+  let ty = substTyVar (unif ^. substitution) var
+  -- Extend the quantifier set if the substitution was a type variable.
+  let extend = case ty of
+        TyVarTy var' -> flip extendDVarSet var'
+        _ -> id
+  let unif' = unif & quantifiers %~ extend
+
+  (ty, unif')
+
+-- | Multiple lookups using 'lookupTy'.
+lookupTys
+  :: Traversable f
+  => f TyVar
+  -> Unification
+  -> (f Type, Unification)
+lookupTys = accumL lookupTy
+
+-- | Fetches all free type and dictionary variables.
+--
+-- The intent for this is to close expressions which we unified using
+-- 'applyUnification'.
+tyVarsAndDictIds :: Unification -> ([TyVar], [DictId])
+tyVarsAndDictIds unif = do
+  let tyVars = dVarSetElems $ unif ^. quantifiers
+  let select = \case
+        Var var | isDictId var && isLocalId var -> (var :)
+        _ -> id
+  let dictIds = foldTM select (unif ^. dictionaries) []
+  (tyVars, dictIds)
+
+-- | Closes an expression using a unification.
+--
+-- It is assumed that this expression has been first unified using the
+-- 'applyUnification'.
+closeExpr :: Unification -> CoreExpr -> CoreExpr
+closeExpr unif expr = do
+  let (tyVars, dictIds) = tyVarsAndDictIds unif
+  foldr Lam expr $ tyVars <> dictIds
+
+-- | Split the type of an expression into its components.
+splitExprTy :: CoreExpr -> ([TyVar], ThetaType, Type)
+splitExprTy = tcSplitSigmaTy . exprType
+
+-- | Unify two types using 'unifyTypes'.
+unifyType
+  :: Alternative m
+  => Monad m
+  => Type
+  -> Type
+  -> m Unification
+unifyType lhs rhs = unifyTypes [(lhs, rhs)]
+
+-- | Unify the given types.
+--
+-- Creates a unification map for use in 'applyUnification'.
+unifyTypes
+  :: Alternative m
+  => Monad m
+  => [(Type, Type)]
+  -> m Unification
+unifyTypes tys = do
+  let (lhs, rhs) = unzip tys
+  subst <- maybeM $ tcUnifyTys alwaysBindFun lhs rhs
+  pure $ Unification subst emptyTM emptyDVarSet
+
+-- | Applies the unification map the the expression.
+--
+-- This will apply the type variables from the substitution to the expression.
+-- Additionally, it will apply dictionary variables. They are tracked in the
+-- 'Unification' map to avoid duplicate constraints.
+--
+-- The returned expression will have free variables as dictated by the
+-- unification mapping. However way the expression is used, make sure to
+-- eventually close the expression using 'closeExpr'.
+applyUnification
+  :: CoreExpr
+  -> Unification
+  -> (CoreExpr, Unification)
+applyUnification expr unif = do
+  -- Split the type variables and theta type.
+  let (tyVars, thetaTy, _) = splitExprTy expr
+
+  -- Get the type arguments and lookup the dictionary variables.
+  let (tyArgs, unif') = lookupTys tyVars unif
+  let (thetaArg, unif'') = lookupDicts thetaTy unif'
+
+  -- Apply the type arguments and dictionary variables
+  let args = fmap Type tyArgs <> thetaArg
+  let expr' = foldl' App expr args
+
+  -- Return the updated unification map and expression with the appropriate
+  -- unification variables applied.
+  (expr', unif'')
+
+-- | Multiple applications of the unification via 'applyUnification'.
+applyUnifications
+  :: Traversable f
+  => f CoreExpr
+  -> Unification
+  -> (f CoreExpr, Unification)
+applyUnifications = accumL applyUnification
+
+-- | A single unifying application using 'unifyApps'.
+unifyApp
+  :: Alternative m
+  => Monad m
+  => CoreExpr
+  -> CoreArg
+  -> m CoreExpr
+unifyApp fun arg = unifyApps fun [arg]
+
+-- | Application that unifies polymorphic types.
+--
+-- This will apply the given arguments to the spine. Any type or dictionary
+-- variables that occur prior any of the body type are unified and placed as
+-- outer type and dictionary variables.
+unifyApps
+  :: Alternative m
+  => Monad m
+  => CoreExpr
+  -> [CoreArg]
+  -> m CoreExpr
+unifyApps fun args = do
+  -- Get the base types without type variables or theta type of all expressions.
+  let bodyTy = view _3 . splitExprTy
+  let funTy = bodyTy fun
+  let argTys = bodyTy <$> args
+
+  -- Create a unification mapping.
+  -- TODO: Can we just ignore the multiplicity on this application?
+  let (argTysRequired, _) = splitFunTys funTy & _1 . mapped %~ scaledThing
+  let pairs = zip argTysRequired argTys
+  guard $ length pairs == length argTys
+  unif <- unifyTypes pairs
+
+  -- Perform apply unification.
+  let (fun', unif') = applyUnification fun unif
+  let (args', unif'') = applyUnifications args unif'
+
+  -- Apply the function to the argument. The type and dictionary variables are
+  -- still free in this expression.
+  let open = mkApps fun' args'
+
+  -- Close the expression by binding the type and dictionary variables.
+  pure $ closeExpr unif'' open
+
+-- | Unify two expressions.
+--
+-- This can be used to compare two expressions that are quantified different,
+-- but are otherwise comparable.
+unifyExprs
+  :: Alternative m
+  => Monad m
+  => CoreExpr
+  -> CoreExpr
+  -> m (CoreExpr, CoreExpr)
+unifyExprs lhs rhs = do
+  -- Get the unifiable part of the type.
+  let bodyTy = view _3 . splitExprTy
+  let lhsTy = bodyTy lhs
+  let rhsTy = bodyTy rhs
+
+  -- Get a unification mapping.
+  unif <- unifyType lhsTy rhsTy
+
+  -- Apply the unification for both expressions.
+  let (lhs', unif') = applyUnification lhs unif
+  let (rhs', unif'') = applyUnification rhs unif'
+
+  -- Close both expressions.
+  let lhs'' = closeExpr unif'' lhs'
+  let rhs'' = closeExpr unif'' rhs'
+
+  pure (lhs'', rhs'')
+
+-- | Lookup a class instance in the instantiation environment.
+--
+-- This will return a dictionary instance as core expression.
+lookupClassInst
+  :: Alternative m
+  => Monad m
+  => InstEnvs
+  -> Type
+  -> m CoreExpr
+lookupClassInst env ty = do
+  -- Get the typeclass constructor of this type, if possible.
+  (tyCon, tyArgs) <- maybeM $ splitTyConApp_maybe ty
+  tyClass <- maybeM $ tyConClass_maybe tyCon
+
+  -- Get the instance for this typeclass with supplied types, if possible.
+  let eitherInst = lookupUniqueInstEnv env tyClass tyArgs
+  (clsInst, tys) <- maybeM $ rightToMaybe eitherInst
+
+  -- Create an expression for the instance.
+  let dict = Var $ instanceDFunId clsInst
+  pure $ mkApps dict (Type <$> tys)
+
+-- | Instantiate dictionaries in a core expression.
+--
+-- Notably, this will only instantiate if a unique option exists for the
+-- instance. GHC will generally not by itself miss a resolvable instance of a
+-- typeclass. Instead, this function is intended to be used together with other
+-- unification-like functions in this module, as these unifications can create
+-- resolvable typeclass constraints.
+resolveInstances
+  :: InstEnvs
+  -> CoreExpr
+  -> CoreExpr
+resolveInstances env expr = do
+  -- Get a mapping from constraints to instances.
+  let theta = splitExprTy expr ^. _2
+  let instances = zip theta $ theta <&> lookupClassInst env
+
+  -- Convert this mapping into a trie map.
+  let extend key val = alterTM key (val <|>)
+  let dicts = foldl' (flip $ uncurry extend) emptyTM instances
+
+  -- Set this dictionary for a unification.
+  let unif = emptyUnif & dictionaries .~ dicts
+
+  -- Apply the unification using the resolved instances and close it.
+  let (expr', unif') = applyUnification expr unif
+  closeExpr unif' expr'
 
 -- | Transforms the types in the function to match the argument, if possible.
 --
 -- Note that this thus expects both the function and argument to not contain
--- any type variables and such. It should just be the case that these could be
+-- any type arguments and such. It should just be the case that these could be
 -- applied given that their types matched up.
 matchArgsApp
   :: Alternative m
@@ -92,12 +375,16 @@ matchArgsApp scope fun args = do
   let argTysRequired' = scaledThing <$> argTysRequired
 
   -- Try to match the required type for the function to the argument.
-  subst <- maybeM $ tcMatchTys argTysRequired' argTys
-  let subst' = unionSubst subst $ mkEmptySubst scope
+  let subst = mkEmptySubst scope
+  subst' <- maybeM $ tcMatchTysX subst argTysRequired' argTys
 
+  -- Perform the substitution as dictated by the match.
   let fun' = substExpr subst' fun
   pure $ mkApps fun' args
 
+-- TODO: Comment this!
+-- TODO: I think we actually want to provide the full substitution no? It would
+-- reduce the number of traversals I think. Same for 'matchArgsApp'.
 matchExpr
   :: Alternative m
   => Monad m
@@ -106,214 +393,6 @@ matchExpr
   -> Type
   -> m CoreExpr
 matchExpr scope expr ty = do
-  subst <- maybeM $ tcMatchTy (exprType expr) ty
-  let subst' = unionSubst subst $ mkEmptySubst scope
+  let subst = mkEmptySubst scope
+  subst' <- maybeM $ tcMatchTyX subst (exprType expr) ty
   pure $ substExpr subst' expr
-
--- | Application with possibly polymorphic functions.
---
--- Apply the given expressions, handling both type abstractions and  typeclass
--- constraints that may exist before either of the expressions.
---
--- This will fail if the first argument was not a function, or if we could not
--- unify the actual argument type with the required type.
-polyApp
-  :: Alternative m
-  => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
-  => CoreExpr
-  -- ^ Function expression.
-  -> CoreExpr
-  -- ^ Argument expression.
-  -> m CoreExpr
-  -- ^ Application of argument to function.
-polyApp fun arg = do
-  -- Split the quantifiers and typeclass constraints from the type
-  let funTy = unifiableType fun
-  let argTy = unifiableType arg
-
-  -- Get the required argument type, that is, the given argument needs to be of
-  -- this type.
-  (_, _, argTyRequired, _) <- maybeM $ splitFunTy_maybe funTy
-
-  -- Try to unify the required argument with the actual argument type.
-  subst <- maybeM $ tcUnifyTy argTyRequired argTy
-  -- TODO: Really I want to give some Result type here as return. For error
-  -- reporting, it would be really nice if it tells us why unification failed
-  -- (or with the check above that the first argument was not actually a
-  -- function).
-
-  -- Perform the necessary type and typeclass applications to the function
-  -- and argument expression. We use the resulting expressions to form an
-  -- application. Note that the types and typeclass we applied are still free
-  -- in the expression.
-  expr <- flip evalStateT emptyTM $ do
-    fun' <- applyUnification subst fun
-    arg' <- applyUnification subst arg
-    return $ App fun' arg'
-
-  -- We introduce abstractions for all the new variables, making the expression
-  -- well-formed.
-  let tyVarsAndPredArgs = sortQuantDictVars $ exprFreeVarsList expr
-  let expr' = foldr Lam expr tyVarsAndPredArgs
-  return expr'
-
--- | Unify two expressions.
---
--- This can be used to compare two expressions that are quantified different,
--- but are otherwise comparable.
-unifyExprs
-  :: Alternative m
-  => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
-  => CoreExpr
-  -> CoreExpr
-  -> m (CoreExpr, CoreExpr)
-unifyExprs lhs rhs = do
-  -- Split the quantifiers and typeclass constraints from the type
-  let lhsTy = unifiableType lhs
-  let rhsTy = unifiableType rhs
-
-  -- Try to unify the lhs with the rhs
-  subst <- maybeM $ tcUnifyTy lhsTy rhsTy
-
-  -- Perform apply unfication on both expressions according to the unification.
-  (lhs', rhs') <- flip evalStateT emptyTM $ do
-    lhs' <- applyUnification subst lhs
-    rhs' <- applyUnification subst rhs
-    return (lhs', rhs')
-
-  -- Fetch all quantifier variables. Note that we have to fetch the variables
-  -- for both expressions as one list. If we do not do this, we may miss some
-  -- dictionaries that are used in only one of the expressions. This would make
-  -- the unification incorrect!
-  let sort = sortQuantDictVars . nonDetStrictFoldVarSet (:) []
-  let quantifiers = sort $ exprFreeVars lhs' <> exprFreeVars rhs'
-
-  -- We introduce abstractions for all the new variables, making the expression
-  -- well-formed.
-  let lhs'' = foldr Lam lhs' quantifiers
-  let rhs'' = foldr Lam rhs' quantifiers
-  return (lhs'', rhs'')
-
--- | Fetch a unifiable type for the given expression.
---
--- Gets the type of the current expression and splits the quantifiers and
--- typeclass constraints from it. When unifying, we want to use this type.
-unifiableType :: CoreExpr -> Type
-unifiableType expr = ty
-  where
-    (_, _, ty) = tcSplitSigmaTy $ exprType expr
-
--- | Applies a unification map to an expression.
---
--- This can be seen as a partial operation when unifying expressions. This
--- function applies all type abstractions and dictionary types with a unified
--- version. The returned expression will have free variables as dictated by
--- the unification mapping. However way the expression is used, make sure to
--- eventually close the expression by binding these free unification variables.
-applyUnification
-  :: MonadCore m
-  => MonadReader r m
-  => HasModGuts r
-  => MonadState (TypeMap Var) m
-  -- ^ Store dictionary instances to avoid duplicates.
-  => Subst
-  -- ^ Unification substitution map.
-  -> Pass m CoreExpr
-  -- ^ Transformation on the given CoreExpr
-applyUnification subst@(Subst _ _ tvSubst _) expr = do
-  -- Converts a type variable into its corresponding type application. The
-  -- only thing this does is use the unified version of said type variable if
-  -- it exists. Otherwise, we just return the original type variable as is.
-  let toTyArg tyVar = Type $ case lookupVarEnv tvSubst tyVar of
-        Just ty -> ty
-        _ -> mkTyVarTy tyVar
-
-  -- Get a dictionary variable for a predicate type. We instantiate fresh
-  -- variables when we cannot resolve an instance. Note that we track these
-  -- fresh variables in a map to avoid duplicates constraints.
-  let toPredArg predTy = Var <$> do
-        let predTy' = substTy subst predTy
-        -- TODO: I want to split unification from resolving dictionary
-        -- instances. Could we not just apply dictionaries afterwards? This way
-        -- I can just reuse this bit of code when I don't want the whole modguts
-        -- stuff here.
-        dict <- runMaybeT $ resolveInstance predTy'
-        predMap <- get
-        case dict <|> lookupTM predTy' predMap of
-          Just var -> return var
-          Nothing -> do
-            -- TODO: We should be able to generate free variables without the
-            -- access to CoreM. We should adjust this!
-            var <- freshLocalVar "constraint" ManyTy predTy'
-            modify $ insertTM predTy' var
-            return var
-
-  -- Get the type variables and predicate types that should be unified.
-  let splitTy = tcSplitSigmaTy . exprType
-  let (tyVars, predTys, _) = splitTy expr
-
-  -- Applies both type variables and typeclass constraints to the given
-  -- expression. These applied arguments occur free in the expression after
-  -- running this function.
-  let tyArgs = toTyArg <$> tyVars
-  predArgs <- mapM toPredArg predTys
-  let expr' = foldl App expr $ tyArgs <> predArgs
-  return expr'
-
--- -- | Applies a unification map to an expression.
--- --
--- -- This can be seen as a partial operation when unifying expressions. This
--- -- function applies all type abstractions and dictionary types with a unified
--- -- version. The returned expression will have free variables as dictated by
--- -- the unification mapping. However way the expression is used, make sure to
--- -- eventually close the expression by binding these free unification variables.
--- applyTypeSubst
---   :: MonadState (TypeMap Var) m
---   -- ^ Store dictionary instances to avoid duplicates.
---   => Subst
---   -- ^ Unification substitution map.
---   -> Pass m CoreExpr
---   -- ^ Transformation on the given CoreExpr
--- applyTypeSubst subst@(Subst scope _ tvSubst _) expr = do
---   -- Converts a type variable into its corresponding type application. The
---   -- only thing this does is use the unified version of said type variable if
---   -- it exists. Otherwise, we just return the original type variable as is.
---   let toTyArg tyVar = Type $ case lookupVarEnv tvSubst tyVar of
---         Just ty -> ty
---         _ -> mkTyVarTy tyVar
-
---   -- Get a dictionary variable for a predicate type. We instantiate fresh
---   -- variables when we cannot resolve an instance. Note that we track these
---   -- fresh variables in a map to avoid duplicates constraints.
---   let toPredArg predTy = Var <$> do
---         predMap <- get
---         let predTy' = substTy subst predTy
---         let existing = lookupTM predTy' predMap
---         maybeM existing <|> do
---           var <- freshLocalVar "constraint" ManyTy predTy'
---           modify $ insertTM predTy' var
---           pure var
-
---   -- Get the type variables and predicate types that should be unified.
---   let splitTy = tcSplitSigmaTy . exprType
---   let (tyVars, predTys, _) = splitTy expr
-
---   -- Applies both type variables and typeclass constraints to the given
---   -- expression. These applied arguments occur free in the expression after
---   -- running this function.
---   let tyArgs = toTyArg <$> tyVars
---   predArgs <- mapM toPredArg predTys
---   let expr' = foldl App expr $ tyArgs <> predArgs
---   pure expr'
-
--- | Sort quantifiers and dictionaries.
---
--- First filters non-quantifier or dictionary variables. Then sorts them to
--- ensure correct order of definitions.
-sortQuantDictVars :: [Var] -> [Var]
-sortQuantDictVars = sortQuantVars . filter (\v -> isDictId v || isTyVar v)
-
