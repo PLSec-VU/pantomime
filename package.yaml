@@ -45,6 +45,7 @@ dependencies:
 - template-haskell
 - mtl
 - microlens
+- QuickCheck
 
 ghc-options:
 - -Wall
