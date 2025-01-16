@@ -29,6 +29,7 @@ library
       Lint
       Projection
       Subst
+      Synth
       Transform
       Transform2
       Types
@@ -58,7 +59,8 @@ library
       TypeApplications
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
-      base >=4.7 && <5
+      QuickCheck
+    , base >=4.7 && <5
     , composition
     , containers
     , ghc >=9.6.4
@@ -75,6 +77,7 @@ executable uc-plugin-exe
       ClassInline
       LocalClass
       Processor
+      ProcessorModular
       RW
       ThreeAdder
       TwoAdders
@@ -102,7 +105,8 @@ executable uc-plugin-exe
       TypeApplications
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -fplugin UC -fexpose-all-unfoldings
   build-depends:
-      base >=4.7 && <5
+      QuickCheck
+    , base >=4.7 && <5
     , composition
     , containers
     , ghc >=9.6.4
@@ -141,6 +145,7 @@ test-suite uc-plugin-test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       HUnit
+    , QuickCheck
     , base >=4.7 && <5
     , composition
     , containers

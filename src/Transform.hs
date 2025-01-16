@@ -4,7 +4,7 @@ module Transform
   , caseReduce
   , caseBndrReduce
   , caseDistribute
-  , caseMerge
+  -- , caseMerge
   , caseSwap
   , redundantCase
   , undefaultCase
@@ -22,6 +22,7 @@ module Transform
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Map.Expr (eqCoreExpr, CoreMap)
 import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
+import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep (Coercion (..), Scaled (..))
 import GHC.Core.Rules.Config (RuleOpts(..))
 import GHC.Core.Unify (tcMatchTy)
@@ -33,8 +34,12 @@ import GHC (dataConType)
 import Data.Composition ((.:))
 import Data.Foldable (foldl', find)
 import Data.Function (fix)
-import Data.List (nubBy)
-import Data.Maybe (fromMaybe, isNothing)
+import Data.List (nubBy, sortBy)
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, isNothing, fromJust)
 import Data.Data (gmapT)
 import Data.Generics.Aliases (mkT)
 
@@ -42,7 +47,7 @@ import Control.Monad (forM, guard)
 import Control.Monad.Trans.Maybe (runMaybeT)
 import Control.Monad.Reader (MonadReader, reader)
 import Control.Monad.Trans.Class (MonadTrans (..))
-import Control.Applicative (Alternative (..), empty, asum, optional)
+import Control.Applicative (Alternative (..), empty, asum)
 
 import Lens.Micro
 
@@ -51,6 +56,14 @@ import Util
 import Unification (matchArgsApp, matchExpr)
 import qualified Subst
 import qualified Lint
+
+-- import qualified Debug.Trace as Debug
+
+-- dbg :: Applicative m => Outputable o => o -> m ()
+-- dbg m = Debug.trace (showSDocUnsafe $ ppr m) $ pure ()
+
+-- dbg' :: Applicative m => Show o => o -> m ()
+-- dbg' m = Debug.trace (show m) $ pure ()
 
 -- | Substitution over some expression.
 type Substitution m s a = s -> Pass m a
@@ -96,9 +109,10 @@ loop
   -> CoreExpr
   -> m CoreExpr
 loop subst expr = do
-  let extra = occurAnalyseExpr . scrutCSE emptyTM
+  let scope = subst ^. Subst.scope
+  let extra = occurAnalyseExpr . prepCaseDedup' scope . scrutCSE'
   expr' <- extra <$> linted subst expr
-  Lint.panic Lint.full (subst ^. Subst.scope) expr'
+  Lint.panic Lint.full scope expr'
 
   -- TODO: We should do better change detection. This can be relatively
   -- expensive.
@@ -143,8 +157,9 @@ transform continue subst expr = do
   let passes = asum $ (\pass -> pass (lift .: continue) subst expr) <$>
         [ betaReduce
         , caseReduce
+        , caseSelectDefault
         , dropTick
-        , caseMerge
+        -- , caseMerge
         , caseDistribute
         , dropReflCast
         , joinCasts
@@ -152,9 +167,10 @@ transform continue subst expr = do
         , inlineUnfolding
         , undefaultCase
         , redundantCase
-        , caseBndrReduce
         , caseSwap
-        -- , applyBuiltinRule
+        , applyBuiltinRule
+        , testBuiltinRule
+        , caseBndrReduce
         ]
 
   expr' <- runMaybeT passes
@@ -320,23 +336,63 @@ applyBuiltinRule
 applyBuiltinRule continue subst expr = do
   let (spine, args) = collectArgs expr
   spine' <- case spine of
-    Var var | isId var -> pure var
+    Var var | isPrimOpId var -> pure var
     _ -> empty
 
-  asum $ idCoreRules spine' <&> \case
+  -- Apply the first rule that works.
+  expr' <- asum $ idCoreRules spine' <&> \case
     Rule {} -> empty
     BuiltinRule { ru_nargs, ru_try } -> do
-      guard $ ru_nargs == length args
       let opts = RuleOpts
             { roPlatform = genericPlatform
             , roNumConstantFolding = True
-            , roExcessRationalPrecision = False
-            , roBignumRules = False
+            , roExcessRationalPrecision = True
+            , roBignumRules = True
             }
+
+      -- Apply the built-in rule.
       -- TODO: Should we pick some unfolding fun?
-      let scope = ISE (subst ^. Subst.scope) noUnfoldingFun
+      let scope = ISE (subst ^. Subst.scope) idUnfolding
       expr' <- maybeM $ ru_try opts scope spine' args
-      continue subst expr'
+
+      -- Apply the remaining arguments and continue.
+      let remaining = drop ru_nargs args
+      pure $ mkApps expr' remaining
+
+  continue subst expr'
+
+testBuiltinRule
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+testBuiltinRule continue subst expr = do
+  let (spine, args) = collectArgs expr
+  spine' <- case spine of
+    Var var | isPrimOpId var -> pure var
+    _ -> empty
+
+  -- Apply the first rule that works.
+  expr' <- asum $ idCoreRules spine' <&> \case
+    Rule {} -> empty
+    BuiltinRule { ru_nargs, ru_try } -> do
+      let opts = RuleOpts
+            { roPlatform = genericPlatform
+            , roNumConstantFolding = True
+            , roExcessRationalPrecision = True
+            , roBignumRules = True
+            }
+
+      -- Apply the built-in rule.
+      -- TODO: Should we pick some unfolding fun?
+      let scope = ISE (subst ^. Subst.scope) idUnfolding
+      expr' <- maybeM $ ru_try opts scope spine' args
+
+      -- Apply the remaining arguments and continue.
+      let remaining = drop ru_nargs args
+      pure $ mkApps expr' remaining
+
+  continue subst expr'
 
 -- | Beta reduction.
 betaReduce
@@ -405,6 +461,43 @@ caseReduce continue subst = \case
 
     -- We can continue substitution on the entire right-hand-side.
     continue subst' rhs
+
+  _ -> empty
+
+-- | Select the default case if no other construct can possible match.
+--
+-- This will use the OtherCon unfolding to determine whether it is okay to
+-- inline the default case.
+caseSelectDefault
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+caseSelectDefault continue subst = \case
+  Case (Var scrut) bndr _ alts -> do
+    -- We lookup the scrutinee to see if it has an OtherCon unfolding. Note
+    -- we don't call `continue` on the scrutinee here as it might incur a lot
+    -- of work for an operation that may fail. Instead, we just do this limited
+    -- lookup.
+    scrut' <- case Subst.lookupId subst scrut of
+      Var scrut' -> pure scrut'
+      _ -> empty
+
+    -- Get the default and explicit alternatives, if possible.
+    (explicit, rhsDefault) <- do
+      let (explicit, def) = findDefault alts
+      def' <- maybeM def
+      pure (explicit, def')
+
+    -- Check that none of the alternative match the scrutinee.
+    let others = Set.fromList . otherCons . idUnfolding $ scrut'
+    let noScrutMatch (Alt con _ _) = con `elem` others
+    guard $ all noScrutMatch explicit
+
+    -- We just return the default right hand side, since we know for certain
+    -- that none of the other alternatives will match.
+    let subst' = subst & Subst.extend bndr (Var scrut')
+    continue subst' rhsDefault
 
   _ -> empty
 
@@ -505,6 +598,9 @@ distribute dist continue subst = \case
 
   _ -> empty
 
+-- TODO: We could do a similar thing with patterns where a default case (for
+-- infinite patterns only of course) can be equivalent to an explicit pattern.
+-- We could merge the explicit pattern into the default.
 -- | Removes obselete cases.
 --
 -- That is, cases whose result will not change depending on the value of the
@@ -551,7 +647,9 @@ caseBndrReduce continue subst = \case
   Case scrut bndr ty alts -> do
     -- FIXME: Some case binders may never be dead (think of default cases). For
     -- numeric altcons for example, we cannot get rid of default branches. How
-    -- wo we decide not to run for those?
+    -- do we decide not to run for those? Ideally, we just always run this pass
+    -- btw. The problem is that that behaviour gets in the way of other passes
+    -- in the current framework.
     guard . not $ isDeadBinder bndr
 
     -- Substitute the scrutinee and type like normal.
@@ -567,25 +665,30 @@ caseBndrReduce continue subst = \case
       -- Substitute the binders, zapping the occurrence info.
       let (bndrs', subst'') = subst' & Subst.bndrs (zapIdOccInfo <$> bndrs)
 
-      -- Create a substitution map where the case binder will be replaced by an
-      -- expression representing the alt, if possible.
-      mSubst <- optional $ do
-        -- Create an expression from the alt.
-        let scope = subst'' ^. Subst.scope
-        expr <- altConToExpr scope con bndrs'
+      -- The expression to substitute the case binder with in this alternative.
+      expr <- case con of
+        DEFAULT -> do
+          -- Fetch all alternatives that this expression is not.
+          let others = filter (/= DEFAULT) $ alts <&> \(Alt con' _ _) -> con'
 
-        -- Ensure the type matches that of the case binder.
-        expr' <- matchExpr scope expr $ varType bndr'
-        pure $ subst'' & Subst.extend bndr expr'
+          -- Propagate this information by binding this to the unfolding.
+          let bndr'' = setIdUnfolding bndr' $ OtherCon others
+          pure $ Var bndr''
 
-      -- Use the new substitution, if it exists.
-      let subst''' = fromMaybe subst'' mSubst
+        _ -> do
+          -- Create an expression from the alt.
+          let scope = subst'' ^. Subst.scope
+          expr <- altConToExpr scope con bndrs'
+
+          -- Ensure the type matches that of the case binder.
+          matchExpr scope expr $ varType bndr'
 
       -- Substitute the rhs.
+      let subst''' = subst'' & Subst.extend bndr expr
       rhs' <- continue subst''' rhs
       pure $ Alt con bndrs' rhs'
 
-    -- Return the modifier case expression.
+    -- Return the modified case expression.
     pure $ Case scrut' bndr' ty' alts'
 
   _ -> empty
@@ -643,27 +746,27 @@ undefaultCase continue subst = \case
       def' <- maybeM def
       pure (explicit, def')
 
-    -- Get the dataconstructors for this scrutinee. Note that we only remove
-    -- default cases for data constructors. That is, we cannot really do this
-    -- in the same way for types with infinite constructors such as literals.
-    dataCons <- maybeM $ do
+    -- Get the constructors for this scrutinee. Note that we only remove default
+    -- cases for data constructors. That is, we cannot really do this in the
+    -- same way for types with infinite constructors such as literals.
+    cons <- maybeM $ do
       (tyCon, _) <- tcSplitTyConApp_maybe $ varType bndr
-      tyConDataCons_maybe tyCon
+      dataCons <- tyConDataCons_maybe tyCon
+      pure $ dataCons <&> DataAlt
 
     -- Fetches the alt corresponding to the given constructor, if it exists.
-    let originalAlt dataCon = do
-          let cmp (Alt con _ _) = DataAlt dataCon == con
+    let originalAlt con = do
+          let cmp (Alt con' _ _) = con == con'
           maybeM $ find cmp explicit
 
     -- Create an explicit alt using the default rhs.
-    let explicitDefault dataCon = do
+    let explicitDefault con = do
           -- Get binders with types matching the scrutinee/case binder, this
           -- should never fail if you provide a matching bndr dataCon pair.
           let scope = subst ^. Subst.scope
-          (bndrs, _) <- freshAltBndrs scope bndr dataCon
+          (bndrs, _) <- freshAltBndrs scope bndr con
 
           -- Create the default binder with explicit constructor and binders.
-          let con = DataAlt dataCon
           let bndrs' = bndrs <&> (`setIdOccInfo` IAmDead)
           pure $ Alt con bndrs' rhsDefault
 
@@ -671,7 +774,7 @@ undefaultCase continue subst = \case
     -- way as the its list of data constructors. For this reason, we first try
     -- to get the original alternative, before constructing the explicit default
     -- case. In the end, all alts are now explicit.
-    alts' <- forM dataCons $ originalAlt <|-|> explicitDefault
+    alts' <- forM cons $ originalAlt <|-|> explicitDefault
 
     -- Since we only added some fresh (dead) binders to the alts, it is safe to
     -- continue on the entire expression.
@@ -692,24 +795,31 @@ freshAltBndrs
   => Monad m
   => InScopeSet
   -> CoreBndr
-  -> DataCon
+  -> AltCon
   -> m ([CoreBndr], InScopeSet)
-freshAltBndrs scope bndr dataCon = do
-  let scope' = extendInScopeSet scope bndr
-  let goalTy = varType bndr
+freshAltBndrs scope bndr = \case
+  DataAlt dataCon -> do
+    let scope' = extendInScopeSet scope bndr
+    let goalTy = varType bndr
 
-  -- Get the base types for the arguments and result of the constructor.
-  let (_, _, funTy) = tcSplitSigmaTy $ dataConType dataCon
-  let (argTys, resTy) = splitFunTys funTy
+    -- Get the base types for the arguments and result of the constructor.
+    let (_, _, funTy) = tcSplitSigmaTy $ dataConType dataCon
+    let (argTys, resTy) = splitFunTys funTy
 
-  -- We try to match the result type of the constructor to the case binder.
-  -- Really, this should never fail.
-  subst <- maybeM $ tcMatchTy resTy goalTy
-  let argTys' = substScaledTy subst <$> argTys
+    -- We try to match the result type of the constructor to the case binder.
+    -- Really, this should never fail.
+    subst <- maybeM $ tcMatchTy resTy goalTy
+    let argTys' = substScaledTy subst <$> argTys
 
-  -- Now we construct the case binders, with the correct types.
-  let ids = argTys' <&> ("unused",)
-  pure $ freshIds ids scope'
+    -- Now we construct the case binders, with the correct types.
+    let ids = argTys' <&> ("unused",)
+    pure $ freshIds ids scope'
+
+  LitAlt lit -> do
+    guard $ varType bndr `eqType` literalType lit
+    pure ([], scope)
+
+  DEFAULT -> pure ([], scope)
 
 -- | Merges nested cases.
 --
@@ -795,35 +905,37 @@ freshAltBndrs scope bndr dataCon = do
 -- currently only have outer-to-inner passes. That is, passes where we pass
 -- along some data to the inner components (variable ordering, substitutions,
 -- etc.). For the part of the case merging where we want to 
-caseMerge
-  :: Alternative m
-  => Monad m
-  => Subst.Class s
-  => Transform m s CoreExpr
-caseMerge continue subst = \case
-  Case oScrut oBndr oTy (Alt DEFAULT _ (Case iScrut iBndr _ iAlts) : oAlts) -> do
-    -- Ensure that the cases scrutinize the same expression.
-    guard $ eqCoreExpr (Var oBndr) iScrut || eqCoreExpr oScrut iScrut
+-- TODO: Remove this stuff. We maybe want to retain the comment explaining
+-- case merging in the new framework!
+-- caseMerge
+--   :: Alternative m
+--   => Monad m
+--   => Subst.Class s
+--   => Transform m s CoreExpr
+-- caseMerge continue subst = \case
+--   Case oScrut oBndr oTy (Alt DEFAULT _ (Case iScrut iBndr _ iAlts) : oAlts) -> do
+--     -- Ensure that the cases scrutinize the same expression.
+--     guard $ eqCoreExpr (Var oBndr) iScrut || eqCoreExpr oScrut iScrut
 
-    oScrut' <- continue subst oScrut
-    let oTy' = Subst.ty subst oTy
-    -- Continue on the outer alts.
-    let (oBndr', subst') = subst & Subst.bndr oBndr
-    oAlts' <- deShadowAlts continue subst' oAlts
+--     oScrut' <- continue subst oScrut
+--     let oTy' = Subst.ty subst oTy
+--     -- Continue on the outer alts.
+--     let (oBndr', subst') = subst & Subst.bndr oBndr
+--     oAlts' <- deShadowAlts continue subst' oAlts
 
-    -- TODO: This is a bit redundant. We're actually computing continue for
-    -- expressions we will later discard...
-    -- Continue on the inner alts, substituting the case binder.
-    let subst'' = subst' & Subst.extend iBndr (Var oBndr')
-    iAlts' <- deShadowAlts continue subst'' iAlts
+--     -- TODO: This is a bit redundant. We're actually computing continue for
+--     -- expressions we will later discard...
+--     -- Continue on the inner alts, substituting the case binder.
+--     let subst'' = subst' & Subst.extend iBndr (Var oBndr')
+--     iAlts' <- deShadowAlts continue subst'' iAlts
 
-    -- Merge the alternatives. Note that we provide the outer alts first as they
-    -- should be prioritised. We purposely leave out the default case in this
-    -- merge. Otherwise, it would be a no-op.
-    let oAlts'' = mergeAlts oAlts' iAlts'
-    pure $ Case oScrut' oBndr' oTy' oAlts''
+--     -- Merge the alternatives. Note that we provide the outer alts first as they
+--     -- should be prioritised. We purposely leave out the default case in this
+--     -- merge. Otherwise, it would be a no-op.
+--     let oAlts'' = mergeAlts oAlts' iAlts'
+--     pure $ Case oScrut' oBndr' oTy' oAlts''
 
-  _ -> empty
+--   _ -> empty
 
 -- | Swap nested case expressions according.
 --
@@ -963,6 +1075,8 @@ isPrimitive :: Subst.Class s => s -> CoreExpr -> Bool
 isPrimitive subst = \case
   Var v -> isNothing $ Subst.lookupId' subst v
   Lit _ -> True
+  Coercion _ -> True
+  Type _ -> True
   Cast expr _ -> isPrimitive subst expr
   App fun arg -> all (isPrimitive subst) [fun, arg]
   _ -> False
@@ -1036,8 +1150,12 @@ floatCast continue subst = \case
 
   _ -> empty
 
+scrutCSE' :: CoreExpr -> CoreExpr
+scrutCSE' = scrutCSE emptyTM
+
 -- | Perform Common Sub-Expression Elminiation on scrutinees.
 --
+-- Note that this expect the expression to not have any variable shadowing.
 -- TODO: Ideally this is somehow part of the pass infrastructure!
 scrutCSE :: CoreMap Var -> CoreExpr -> CoreExpr
 scrutCSE common = \case
@@ -1054,3 +1172,88 @@ scrutCSE common = \case
 
   expr -> gmapT (mkT $ scrutCSE common) expr
 
+prepCaseDedup' :: InScopeSet -> CoreExpr -> CoreExpr
+prepCaseDedup' = fst .: prepCaseDedup
+
+prepCaseDedup :: InScopeSet -> CoreExpr -> (CoreExpr, Map Var (Set AltCon))
+prepCaseDedup scope = \case
+  Case scrut bndr ty alts | (explicit, rhsDefault) <- findDefault alts -> do
+    let scope' = extendInScopeSet scope bndr
+
+    -- Recurse for all explicit alternatives.
+    let (explicit', altMaps) = unzip $ explicit <&> \(Alt con bndrs rhs) -> do
+          let scope'' = extendInScopeSetList scope' bndrs
+          let (rhs', altMap) = prepCaseDedup scope'' rhs
+          (Alt con bndrs rhs', altMap)
+
+    let (additional, addAltMap) = fromMaybe (mempty, mempty) $ do
+          -- Recurse for the default alternative.
+          rhs <- rhsDefault
+          let (rhs', altMap) = prepCaseDedup scope' rhs
+
+          -- Fetch the alternative constructors we are missing.
+          let nested = fromMaybe mempty $ lookupTM bndr altMap
+          let used = explicit' <&> \(Alt con _ _) -> con
+          let missing = Set.toList $ foldl' (flip Set.delete) nested used
+
+          -- Create the missing alternatives.
+          let missing' = missing <&> \con -> do
+                -- TODO: We are shadowing variables here. Ideally, we just don't as
+                -- many passes expect fully non-shadowed expressions. I think the only
+                -- to not have this shadow would be to run a full substitution.
+                let (bndrs, _) = fromJust $ freshAltBndrs scope bndr con
+                Alt con bndrs rhs'
+
+          -- Since we cannot eliminate the default alt, we also add it here.
+          -- FIXME: In some cases, this will actually remove all defaults. I
+          -- guess our other pass deals with those cases, but still this is not
+          -- nice.
+          let defaultAlt = Alt DEFAULT [] rhs'
+
+          pure (defaultAlt : missing', altMap)
+
+    -- Merge the missing alternatives into the original alternatives.
+    let cmp (Alt con _ _) (Alt con' _ _) = compare con con'
+    let alts' = sortBy cmp $ additional <> explicit'
+
+    -- New case statement, with the alternatives included.
+    let expr = Case scrut bndr ty alts'
+
+    -- Gather all used explicit patterns for every scrutinee.
+    let altMap' = Map.unionsWith (<>) $ addAltMap : altMaps
+    let altMap'' = case scrut of
+          Var scrut' -> do
+            let insert s (Alt DEFAULT _ _) = s
+                insert s (Alt con _ _) = Set.insert con s
+            let current = foldl' insert mempty alts'
+            Map.insert scrut' current altMap'
+          _ -> altMap'
+
+    (expr, altMap'')
+
+  App fun arg -> do
+    let (fun', fAltMap) = prepCaseDedup scope fun
+    let (arg', aAltMap) = prepCaseDedup scope arg
+    let expr = App fun' arg'
+    let altMap = Map.unionWith (<>) fAltMap aAltMap
+    (expr, altMap)
+
+  Tick tickish expr -> do
+    let (expr', altMap) = prepCaseDedup scope expr
+    (Tick tickish expr', altMap)
+
+  Cast expr co -> do
+    let (expr', altMap) = prepCaseDedup scope expr
+    (Cast expr' co, altMap)
+
+  Lam bndr body -> do
+    let scope' = extendInScopeSet scope bndr
+    let (body', altMap) = prepCaseDedup scope' body
+    let expr = Lam bndr body'
+    (expr, altMap)
+
+  -- TODO: We can just skip it for now, since we don't really have let bindings
+  -- but I guess this isn't very nice.
+  Let bind body -> (Let bind body, mempty)
+
+  e -> (e, mempty)

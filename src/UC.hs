@@ -21,6 +21,7 @@ import Control.Monad (forM, unless)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
+import qualified Lint
 import qualified Projection
 import Types
 import Util
@@ -191,6 +192,8 @@ printAndLint bind = do
   dbg res
   pure bind
 
+-- TODO: Clean up this function. It's pretty much the same as composeSim.
+-- It feels as though we could do better...
 composeImpl
   :: MonadFail m
   => MonadCore m
@@ -200,18 +203,17 @@ composeImpl
   -> Pass m CoreExpr
 composeImpl uc expr = do
   let resolve name = Var <$> resolveTH' name
-  let polyApp3 x y z = polyApp x y >>= flip polyApp z
 
   oproj <- resolve 'Projection.oproj
   obs <- resolve $ observation uc
 
+  expr' <- unifyApps oproj [obs, expr]
+    ??= "Incompatible types on observation/implementation pair"
+
   sproj <- resolve 'Projection.sproj
   proj <- resolve $ projection uc
 
-  expr' <- polyApp3 oproj obs expr
-    ??= "Incompatible types on observation/implementation pair"
-
-  expr'' <- polyApp3 sproj proj expr'
+  expr'' <- unifyApps sproj [proj, expr']
     ??= "Incompatible types on (implementation/observation)/projection pair"
 
   pure $ occurAnalyseExpr expr''
@@ -225,7 +227,6 @@ composeSim
   -> m CoreExpr
 composeSim uc = do
   let resolve name = Var <$> resolveTH' name
-  let polyApp3 x y z = polyApp x y >>= flip polyApp z
 
   sim <- resolve $ simulator uc
 
@@ -235,10 +236,10 @@ composeSim uc = do
   sproj' <- resolve 'Projection.sproj'
   proj <- resolve $ projection uc
 
-  expr' <- polyApp3 iproj leak sim
+  expr' <- unifyApps iproj [leak, sim]
     ??= "Incompatible types on leakage/simulator pair"
 
-  expr'' <- polyApp3 sproj' proj expr'
+  expr'' <- unifyApps sproj' [proj, expr']
     ??= "Incompatible types on projection/(leakage/simulator) pair"
 
   pure $ occurAnalyseExpr expr''
@@ -303,9 +304,19 @@ unifyAndNorm this other = do
   (this', other') <- unifyExprs this other
     ??= "Unable to unify ignore/circuit pair with current/ignore pair"
 
+  instEnv <- getInstEnvs'
+
+  prog <- reader $ mg_binds . modGuts
+  let scope = extendInScopeSetBndrs emptyInScopeSet prog
+
+  let instantiateAndNormalize expr = do
+          let expr' = resolveInstances instEnv expr
+          Lint.panic Lint.base scope expr'
+          normalize expr'
+
   -- Normalize circuits
-  this'' <- normalize this'
-  other'' <- normalize other'
+  this'' <- instantiateAndNormalize this'
+  other'' <- instantiateAndNormalize other'
 
   pure (this'', other'')
 

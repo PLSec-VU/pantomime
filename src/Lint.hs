@@ -78,7 +78,7 @@ subterm scope expr = runMaybeT $ do
         let doc' = showSDoc dflags doc
         let join = "join variable" `isInfixOf` doc'
         -- TODO: I think we should match on more than just "concrete"
-        let test = "concrete" `isInfixOf` doc'
+        let test = "fixed runtime representation" `isInfixOf` doc'
         not $ join || test
 
   if isEmptyBag result' then empty else pure result'
