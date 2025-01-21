@@ -12,6 +12,7 @@ module Types
   , nonRec
 
   , HasModGuts (..)
+  , HasRuleEnv (..)
   ) where
 
 import Data.Data
@@ -90,3 +91,10 @@ class HasModGuts a where
 
 instance HasModGuts ModGuts where
   modGuts = id
+
+-- | Anything that has a rule environment.
+class HasRuleEnv a where
+  ruleEnv :: a -> RuleEnv
+
+instance HasRuleEnv RuleEnv where
+  ruleEnv = id

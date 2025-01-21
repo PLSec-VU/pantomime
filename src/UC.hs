@@ -23,6 +23,8 @@ import qualified Language.Haskell.TH.Syntax as TH
 
 import qualified Lint
 import qualified Projection
+-- Import the RULES defined in Diverge.
+import Diverge ()
 import Types
 import Util
 import Transform
@@ -164,7 +166,9 @@ normalizePass
 normalizePass _ = CoreDoPluginPass name pass
   where
     name = TH.nameBase 'normalizePass
-    pass = annBindsPassWithGuts $ \(_ :: a) -> bindPass normalize
+    pass = annBindsPassWithGuts $ \(_ :: a) bind -> do
+      guts <- reader modGuts
+      bindPass (normalize guts) bind
 
 ucCheckPass :: proxy -> CoreToDo
 ucCheckPass _ = CoreDoPluginPass name pass
@@ -312,7 +316,8 @@ unifyAndNorm this other = do
   let instantiateAndNormalize expr = do
           let expr' = resolveInstances instEnv expr
           Lint.panic Lint.base scope expr'
-          normalize expr'
+          guts <- reader modGuts
+          normalize guts expr'
 
   -- Normalize circuits
   this'' <- instantiateAndNormalize this'

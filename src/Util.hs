@@ -33,7 +33,7 @@ import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Types.TyThing (lookupId)
 import GHC.Core.InstEnv (InstEnvs (..))
-import GHC.Core.TyCo.Rep (Scaled(..))
+import GHC.Core.TyCo.Rep (Scaled (..))
 import GHC.Unit.External (eps_inst_env)
 
 import qualified Language.Haskell.TH.Syntax as TH
@@ -44,7 +44,6 @@ import Data.Generics.Aliases (mkT)
 import Data.Generics.Schemes (everywhere)
 
 import Lens.Micro (Lens)
-
 
 import Types
 
@@ -185,7 +184,7 @@ resolveTH'
   => TH.Name
   -> m Var
 resolveTH' name = resolveTH name
-  ??= "Could not resolve function: " <> TH.nameBase name
+  ??= "Could not resolve expression: " <> TH.nameBase name
 
 -- | Lookup a local non-recursive binder.
 lookupLocal

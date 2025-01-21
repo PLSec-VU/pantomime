@@ -4,7 +4,6 @@ module Transform
   , caseReduce
   , caseBndrReduce
   , caseDistribute
-  -- , caseMerge
   , caseSwap
   , redundantCase
   , undefaultCase
@@ -13,10 +12,10 @@ module Transform
   , dropReflCast
   , joinCasts
   , floatCast
-  , applyBuiltinRule
+  , applyRule
+  , lintPass
 
   , normalize
-  , substitute
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
@@ -30,6 +29,7 @@ import GHC.Data.TrieMap (insertTM, TrieMap (..))
 import GHC.Platform (genericPlatform)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC (dataConType)
+import GHC.MonadCore
 
 import Data.Composition ((.:))
 import Data.Foldable (foldl', find)
@@ -44,8 +44,8 @@ import Data.Data (gmapT)
 import Data.Generics.Aliases (mkT)
 
 import Control.Monad (forM, guard)
-import Control.Monad.Trans.Maybe (runMaybeT)
-import Control.Monad.Reader (MonadReader, reader)
+import Control.Monad.Trans.Maybe (MaybeT (..))
+import Control.Monad.Reader (MonadReader, reader, ReaderT (..))
 import Control.Monad.Trans.Class (MonadTrans (..))
 import Control.Applicative (Alternative (..), empty, asum)
 
@@ -56,14 +56,7 @@ import Util
 import Unification (matchArgsApp, matchExpr)
 import qualified Subst
 import qualified Lint
-
--- import qualified Debug.Trace as Debug
-
--- dbg :: Applicative m => Outputable o => o -> m ()
--- dbg m = Debug.trace (showSDocUnsafe $ ppr m) $ pure ()
-
--- dbg' :: Applicative m => Show o => o -> m ()
--- dbg' m = Debug.trace (show m) $ pure ()
+import qualified Diverge
 
 -- | Substitution over some expression.
 type Substitution m s a = s -> Pass m a
@@ -82,84 +75,59 @@ type Substitution m s a = s -> Pass m a
 -- given that it is a closure of a transformation.
 type Transform m s a = Substitution m s a -> Substitution m s a
 
+data Env = Env
+  { envModGuts :: ModGuts
+  , envRuleEnv :: RuleEnv
+  , envDiverge :: Var
+  }
+
+instance HasModGuts Env where
+  modGuts = envModGuts
+
+instance HasRuleEnv Env where
+  ruleEnv = envRuleEnv
+
+class HasDiverge a where
+  diverge :: a -> Var
+
+instance HasDiverge Env where
+  diverge = envDiverge
+
 -- | Initial substitution for the normalization pass.
 initSubst :: Subst.Class s => CoreProgram -> s
 initSubst prog = do
   let scope = mkInScopeSetBndrs prog
   Subst.new scope & Subst.extendProg prog
 
--- TODO: I want a version with and without lint. The lint version should go into
--- the test bench.
+-- TODO: I want a version of normalisation with and without lint. The lint
+-- version should go into the test bench. Better yet, we should make a debug
+-- flag to enable the excessive lints and just enable that in the test bench.
 normalize
-  :: HasCallStack
-  => MonadReader r m
-  => HasModGuts r
+  :: MonadCore m
+  => MonadFail m
   => HasDynFlags m
-  => Pass m CoreExpr
-normalize expr = do
-  binds <- reader $ mg_binds . modGuts
-  let subst = initSubst binds
-  loop subst expr
+  => ModGuts
+  -> Pass m CoreExpr
+normalize guts expr = do
+  -- Lookup our special diverging variable.
+  diverge' <- flip runReaderT guts $ resolveTH' 'Diverge.diverge
 
-loop
-  :: HasCallStack
-  => Monad m
-  => HasDynFlags m
-  => Subst.Ordered
-  -> CoreExpr
-  -> m CoreExpr
-loop subst expr = do
-  let scope = subst ^. Subst.scope
-  let extra = occurAnalyseExpr . prepCaseDedup' scope . scrutCSE'
-  expr' <- extra <$> linted subst expr
-  Lint.panic Lint.full scope expr'
+  -- Setup the envronment required to run the passes.
+  rules <- liftCore $ initRuleEnv guts
+  let runPass = flip runReaderT $ Env
+        { envModGuts = guts
+        , envRuleEnv = rules
+        , envDiverge = diverge'
+        }
 
-  -- TODO: We should do better change detection. This can be relatively
-  -- expensive.
-  if eqCoreExpr expr expr' then pure expr' else loop subst expr'
-
--- | A substitution function from the full transformation.
-substitute
-  :: HasCallStack
-  => Monad m
-  => Substitution m Subst.Ordered CoreExpr
-substitute = fix transform
-
--- | A substitution function from the full transformation.
---
--- Additionally, this will lint at every substage to check correctness of the
--- transformations. The intent is to use this solely for debugging.
---
--- TODO: Ideally we pass a flag to the plugin to do linting or not. I want this
--- check as top-level as possible; no `when` at every iteration!
-linted
-  :: HasCallStack
-  => Monad m
-  => HasDynFlags m
-  => Substitution m Subst.Ordered CoreExpr
-linted subst expr = do
-  expr' <- transform linted subst expr
-
-  let scope = subst ^. Subst.scope
-  Lint.panic Lint.subterm scope expr'
-  pure expr'
-
--- | A full transformation.
---
--- This combines all the passes in a single, non-failible transformation pass.
--- One can recursively apply this transformation to itself to get a full
--- substitution.
-transform
-  :: HasCallStack
-  => Monad m
-  => Transform m Subst.Ordered CoreExpr
-transform continue subst expr = do
-  let passes = asum $ (\pass -> pass (lift .: continue) subst expr) <$>
+  -- TODO: I want a debug flag to enable/disable lints.
+  -- All passes to run for the normalisation.
+  let passes =
         [ betaReduce
         , caseReduce
         , caseSelectDefault
         , dropTick
-        -- , caseMerge
+        , divergingScrut
         , caseDistribute
         , dropReflCast
         , joinCasts
@@ -168,13 +136,74 @@ transform continue subst expr = do
         , undefaultCase
         , redundantCase
         , caseSwap
-        , applyBuiltinRule
-        , testBuiltinRule
+        , applyRule
         , caseBndrReduce
         ]
 
-  expr' <- runMaybeT passes
+  -- Run passes on the expression until saturation.
+  let subst = initSubst $ mg_binds guts
+  expr' <- runPass $ saturate passes subst expr
+  Lint.panic Lint.full (subst ^. Subst.scope) expr'
+  pure expr'
+
+-- | Will saturate the passes on the expression.
+--
+-- That is, the passes will be run until no more changes are made to the final
+-- core expression.
+saturate
+  :: Foldable f
+  => Functor f
+  => Monad m
+  => Subst.Class s
+  => f (Transform (MaybeT m) s CoreExpr)
+  -- ^ The passes that we will consider for this substitution.
+  -> Substitution m s CoreExpr
+saturate passes subst expr = do
+  let scope = subst ^. Subst.scope
+  let extra = occurAnalyseExpr . prepCaseDedup' scope . scrutCSE'
+  expr' <- extra <$> substitute passes subst expr
+  -- Lint.panic Lint.full scope expr'
+
+  -- TODO: We should do better change detection. This can be relatively
+  -- expensive.
+  if eqCoreExpr expr expr' then pure expr' else saturate passes subst expr'
+
+-- | A substitution function that performs the given transformation passes.
+--
+-- It will perform as many passes as possible within a single substitution.
+substitute
+  :: Foldable f
+  => Functor f
+  => Monad m
+  => Subst.Class s
+  => f (Transform (MaybeT m) s CoreExpr)
+  -- ^ The passes that we will consider for this substitution.
+  -> Substitution m s CoreExpr
+substitute passes = fix $ transform passes
+
+-- | A full transformation.
+--
+-- This combines all the passes in a single, non-failible transformation pass.
+-- One can recursively apply this transformation to itself to get a full
+-- substitution. The first succeeding pass will be applied as a transformation,
+-- where the order when trying passes is dictated by 'asum'.
+transform
+  :: Foldable f
+  => Functor f
+  => Monad m
+  => Subst.Class s
+  => f (Transform (MaybeT m) s CoreExpr)
+  -- ^ The passes that we will consider for this transformation.
+  -> Transform m s CoreExpr
+transform passes continue subst expr = do
+  -- Get the first pass that produces an expression.
+  let passes' = passes <&> \pass -> pass (lift .: continue) subst expr
+  expr' <- runMaybeT . asum $ passes'
+
+  -- The default pass.
   let def = deShadowExpr continue subst expr
+
+  -- Use the first succesful pass, or the default in case there was none.
   maybe def pure expr'
 
 -- | Deshadow an expression.
@@ -185,8 +214,8 @@ transform continue subst expr = do
 -- That is, this can be seen as the default operation if no transformation could
 -- be made.
 --
--- TODO: Btw, maybe the deshadow family of functions should be called
--- transformX instead? I guess it does do deshadowing at the layer, but it
+-- TODO: Btw, maybe the de-shadow family of functions should be called
+-- transformX instead? I guess it does do de-shadowing at the layer, but it
 -- kind of hides the intent as a "if all else fails, continue like this"
 -- function.
 deShadowExpr
@@ -293,6 +322,27 @@ deShadowAlt continue subst (Alt con bndrs rhs) = do
   rhs' <- continue subst' rhs
   pure $ Alt con bndrs' rhs'
 
+-- | Will lint the current expression.
+--
+-- This is a pass that "always fails". That is, it does not block any other
+-- transformations from happening. This will simply panic when the expression
+-- has a lint warning/error. Otherwise, it is a no-op pass.
+--
+-- FIXME: This actually breaks. The problem is that the linter should be run
+-- after transformations. The in-scope set actually is about the new expression,
+-- while the given expression is still untouched.
+lintPass
+  :: HasCallStack
+  => Monad m
+  => Alternative m
+  => HasDynFlags m
+  => Subst.Class s
+  => Transform m s CoreExpr
+lintPass _ subst expr = do
+  let scope = subst ^. Subst.scope
+  Lint.panic Lint.subterm scope expr
+  empty
+
 -- | Inlines all non-typeclass functions.
 --
 -- TODO: I think to correctly de-shadow, we should either do an empty substition
@@ -321,78 +371,55 @@ inlineUnfolding continue subst = \case
 
   _ -> empty
 
--- | Apply builtin rewrites.
+-- | Apply rewrite rules.
 --
--- Applies builtin rewrites for variables. This will produce plenty of case
--- expressions, so use with caution.
+-- This will indiscriminately apply both built-in and user defined rewrite
+-- rules. Generally, it is assumed that rewrite rules are confluent. That
+-- is, it is considered bad practise for them to be non-confluent. Hence,
+-- we will simply apply all of them.
 --
--- TODO: Maybe I should pick a subset of rules to apply. Unfolding equals is for
--- example a lot less interesting than unfolding a fromInteger on a constant.
-applyBuiltinRule
+-- Technically, this could be problematic, but we heavily rely on many rewrite
+-- rules. Whitelisting them all seems unmaintainable. Additionally, a user of
+-- this plugin can now also supply their own rewrites in this way. All in all,
+-- this the positives seem to weigh up against the negatives.
+applyRule
   :: Alternative m
-  => Monad m
+  => MonadCore m
+  => MonadReader r m
+  => HasRuleEnv r
   => Subst.Class s
   => Transform m s CoreExpr
-applyBuiltinRule continue subst expr = do
+applyRule continue subst expr = do
+  -- Fetch the spine if it is an identifier.
   let (spine, args) = collectArgs expr
   spine' <- case spine of
-    Var var | isPrimOpId var -> pure var
+    Var var | isId var -> pure var
     _ -> empty
 
-  -- Apply the first rule that works.
-  expr' <- asum $ idCoreRules spine' <&> \case
-    Rule {} -> empty
-    BuiltinRule { ru_nargs, ru_try } -> do
-      let opts = RuleOpts
-            { roPlatform = genericPlatform
-            , roNumConstantFolding = True
-            , roExcessRationalPrecision = True
-            , roBignumRules = True
-            }
+  -- Find all rules that may be applied to this spine.
+  env <- reader ruleEnv
+  let rules = getRules env spine'
 
-      -- Apply the built-in rule.
-      -- TODO: Should we pick some unfolding fun?
-      let scope = ISE (subst ^. Subst.scope) idUnfolding
-      expr' <- maybeM $ ru_try opts scope spine' args
+  -- Prepare arguments for the rule application.
+  let opts = RuleOpts
+        { roPlatform = genericPlatform
+        , roNumConstantFolding = True
+        , roExcessRationalPrecision = True
+        , roBignumRules = True
+        }
+  -- TODO: Should we pick some unfolding fun?
+  let scope = ISE (subst ^. Subst.scope) idUnfolding
+  let alwaysActive = const True
 
-      -- Apply the remaining arguments and continue.
-      let remaining = drop ru_nargs args
-      pure $ mkApps expr' remaining
+  -- Apply the built-in rule.
+  (rule, expr') <- maybeM $ lookupRule opts scope alwaysActive spine' args rules
 
-  continue subst expr'
+  -- Apply the remaining arguments that were skipped by the rule.
+  let remaining = drop (ruleArity rule) args
+  let expr'' =  mkApps expr' remaining
 
-testBuiltinRule
-  :: Alternative m
-  => Monad m
-  => Subst.Class s
-  => Transform m s CoreExpr
-testBuiltinRule continue subst expr = do
-  let (spine, args) = collectArgs expr
-  spine' <- case spine of
-    Var var | isPrimOpId var -> pure var
-    _ -> empty
-
-  -- Apply the first rule that works.
-  expr' <- asum $ idCoreRules spine' <&> \case
-    Rule {} -> empty
-    BuiltinRule { ru_nargs, ru_try } -> do
-      let opts = RuleOpts
-            { roPlatform = genericPlatform
-            , roNumConstantFolding = True
-            , roExcessRationalPrecision = True
-            , roBignumRules = True
-            }
-
-      -- Apply the built-in rule.
-      -- TODO: Should we pick some unfolding fun?
-      let scope = ISE (subst ^. Subst.scope) idUnfolding
-      expr' <- maybeM $ ru_try opts scope spine' args
-
-      -- Apply the remaining arguments and continue.
-      let remaining = drop ru_nargs args
-      pure $ mkApps expr' remaining
-
-  continue subst expr'
+  -- Continue with the new expression.
+  continue subst expr''
 
 -- | Beta reduction.
 betaReduce
@@ -1150,6 +1177,34 @@ floatCast continue subst = \case
 
   _ -> empty
 
+-- | Reduces case expressions over diverging scrutinee.
+--
+-- If we case scrutinizes over a diverging expression, we might as well remove
+-- the whole case expression. This will reduce bloat, as any of the alternatives
+-- is dead code anyway.
+--
+-- Instead of dealing with all diverging cases directly. We have a marker for
+-- diverging code that we operate on here. One may create a rewrite RULE to
+-- rewrite a snippet into the marker. Ideally, we would have this function as
+-- a RULE as well, but we cannot deal with case expressions in those. Hence, we
+-- do it programmatically like so...
+divergingScrut
+  :: Alternative m
+  => MonadReader r m
+  => HasDiverge r
+  => Transform m s CoreExpr
+divergingScrut continue subst = \case
+  Case (App (Var spine) (Type _)) _ ty _ -> do
+    -- Check if we are actually dealing with a diverging scrutinee.
+    diverge' <- reader diverge
+    guard $ spine == diverge'
+
+    -- Ensure the new diverging expression has the correct type.
+    let expr' = App (Var diverge') (Type ty)
+    continue subst expr'
+
+  _ -> empty
+
 scrutCSE' :: CoreExpr -> CoreExpr
 scrutCSE' = scrutCSE emptyTM
 
@@ -1175,6 +1230,7 @@ scrutCSE common = \case
 prepCaseDedup' :: InScopeSet -> CoreExpr -> CoreExpr
 prepCaseDedup' = fst .: prepCaseDedup
 
+-- TODO: Ideally this is somehow part of the pass infrastructure!
 prepCaseDedup :: InScopeSet -> CoreExpr -> (CoreExpr, Map Var (Set AltCon))
 prepCaseDedup scope = \case
   Case scrut bndr ty alts | (explicit, rhsDefault) <- findDefault alts -> do
@@ -1198,9 +1254,10 @@ prepCaseDedup scope = \case
 
           -- Create the missing alternatives.
           let missing' = missing <&> \con -> do
-                -- TODO: We are shadowing variables here. Ideally, we just don't as
-                -- many passes expect fully non-shadowed expressions. I think the only
-                -- to not have this shadow would be to run a full substitution.
+                -- TODO: We are shadowing variables here. Ideally, we just don't
+                -- as many passes expect fully non-shadowed expressions. I think
+                -- the only way to not have this shadow would be to run a full
+                -- substitution.
                 let (bndrs, _) = fromJust $ freshAltBndrs scope bndr con
                 Alt con bndrs rhs'
 
