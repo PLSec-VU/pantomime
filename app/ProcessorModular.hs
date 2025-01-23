@@ -233,12 +233,12 @@ proj s = ((), ls)
     }
 
 -- | Exec Proof
-{-# ANN execRun UC
-  { observation = 'obsExec
-  , leakage = 'leakExec
-  , simulator = 'simExecRun
-  , projection = 'proj
-} #-}
+-- {-# ANN execRun UC
+--   { observation = 'obsExec
+--   , leakage = 'leakExec
+--   , simulator = 'simExecRun
+--   , projection = 'proj
+-- } #-}
 
 execRun :: State -> (Word32, Instruction, Maybe Output, Word16) -> (State, (Bool, Word16, Maybe Writeback, Maybe Output,  Maybe Output))
 execRun s (reg, instr, out, curInst) = swap $ runState (execute reg instr out curInst) s   
