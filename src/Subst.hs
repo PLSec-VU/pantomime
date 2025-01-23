@@ -18,7 +18,7 @@ import GHC.Core.TyCo.Subst (substTy)
 import GHC.Types.Tickish (CoreTickish, GenTickish (Breakpoint))
 
 import Data.Composition ((.:))
-import Data.Foldable (foldl', toList)
+import Data.Foldable (toList)
 import Data.Function ((&))
 import Data.List (elemIndex)
 import Data.Maybe (mapMaybe)
@@ -132,9 +132,10 @@ extendProg = flip . foldl' . flip $ extendBind
 
 tick :: Class s => s -> CoreTickish -> CoreTickish
 tick subst = \case
-  Breakpoint ext n ids -> do
+  Breakpoint ext n ids modl -> do
     let go = getIdFromTrivialExpr_maybe . lookupId subst
-    Breakpoint ext n $ mapMaybe go ids
+    let ids' = mapMaybe go ids
+    Breakpoint ext n ids' modl
 
   other -> other
 

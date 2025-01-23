@@ -25,14 +25,16 @@ import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep (Coercion (..), Scaled (..))
 import GHC.Core.Rules.Config (RuleOpts(..))
 import GHC.Core.Unify (tcMatchTy)
+-- import GHC.Core.Opt.Arity (exprIsDeadEnd)
 import GHC.Data.TrieMap (insertTM, TrieMap (..))
 import GHC.Platform (genericPlatform)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
 import GHC (dataConType)
 import GHC.MonadCore
+import GHC.Builtin.PrimOps
 
 import Data.Composition ((.:))
-import Data.Foldable (foldl', find)
+import Data.Foldable (find)
 import Data.Function (fix)
 import Data.List (nubBy, sortBy)
 import Data.Set (Set)
@@ -56,7 +58,7 @@ import Util
 import Unification (matchArgsApp, matchExpr)
 import qualified Subst
 import qualified Lint
-import qualified Diverge
+-- import qualified Diverge
 
 -- | Substitution over some expression.
 type Substitution m s a = s -> Pass m a
@@ -78,7 +80,7 @@ type Transform m s a = Substitution m s a -> Substitution m s a
 data Env = Env
   { envModGuts :: ModGuts
   , envRuleEnv :: RuleEnv
-  , envDiverge :: Var
+  -- , envDiverge :: Var
   }
 
 instance HasModGuts Env where
@@ -87,11 +89,11 @@ instance HasModGuts Env where
 instance HasRuleEnv Env where
   ruleEnv = envRuleEnv
 
-class HasDiverge a where
-  diverge :: a -> Var
+-- class HasDiverge a where
+--   diverge :: a -> Var
 
-instance HasDiverge Env where
-  diverge = envDiverge
+-- instance HasDiverge Env where
+--   diverge = envDiverge
 
 -- | Initial substitution for the normalization pass.
 initSubst :: Subst.Class s => CoreProgram -> s
@@ -102,22 +104,25 @@ initSubst prog = do
 -- TODO: I want a version of normalisation with and without lint. The lint
 -- version should go into the test bench. Better yet, we should make a debug
 -- flag to enable the excessive lints and just enable that in the test bench.
+-- TODO: I guess canonicalize is a better name for this?
+-- TODO: I want a monomophize pass. This would be useful for symbolic execution
+-- among other things.
 normalize
   :: MonadCore m
-  => MonadFail m
+  -- => MonadFail m
   => HasDynFlags m
   => ModGuts
   -> Pass m CoreExpr
 normalize guts expr = do
-  -- Lookup our special diverging variable.
-  diverge' <- flip runReaderT guts $ resolveTH' 'Diverge.diverge
+  -- -- Lookup our special diverging variable.
+  -- diverge' <- flip runReaderT guts $ resolveTH' 'Diverge.diverge
 
   -- Setup the envronment required to run the passes.
   rules <- liftCore $ initRuleEnv guts
   let runPass = flip runReaderT $ Env
         { envModGuts = guts
         , envRuleEnv = rules
-        , envDiverge = diverge'
+        -- , envDiverge = diverge'
         }
 
   -- TODO: I want a debug flag to enable/disable lints.
@@ -127,7 +132,7 @@ normalize guts expr = do
         , caseReduce
         , caseSelectDefault
         , dropTick
-        , divergingScrut
+        -- , divergingScrut
         , caseDistribute
         , dropReflCast
         , joinCasts
@@ -138,6 +143,7 @@ normalize guts expr = do
         , caseSwap
         , applyRule
         , caseBndrReduce
+        , reorderPrim
         ]
 
   -- Run passes on the expression until saturation.
@@ -458,7 +464,7 @@ caseReduce continue subst = \case
     -- there is a constructor afterwards.
     (con, tyVars, exArgs) <- case spine of
       Var v -> do
-        -- Similar to `trimConArgs`, but retains the type variables.
+        -- Similar to 'trimConArgs', but retains the type variables.
         dataCon <- maybeM $ isDataConId_maybe v
         let idx = length $ dataConUnivTyVars dataCon
         let (tyVars, exArgs) = splitAt idx args
@@ -501,6 +507,11 @@ caseSelectDefault
   => Subst.Class s
   => Transform m s CoreExpr
 caseSelectDefault continue subst = \case
+  -- Note on safety w.r.t. strictness:
+  --
+  -- We only know a scrutinee is "not one of these constructors" because
+  -- of an earlier scrutinisation. As such, it is safe to drop because the
+  -- computation, even if it has side-effects, as it was already evaluated.
   Case (Var scrut) bndr _ alts -> do
     -- We lookup the scrutinee to see if it has an OtherCon unfolding. Note
     -- we don't call `continue` on the scrutinee here as it might incur a lot
@@ -564,6 +575,9 @@ caseDistribute continue subst = \case
 
   -- Inline function into case
   App fun arg@Case {} -> do
+    -- FIXME: This may change meaning as the case scrutinee may have
+    -- side-effects that might otherwise not be used. We should check the
+    -- scrutinee before applying this.
     distribute' subst arg $ \subst' rhs -> do
       fun' <- continue subst' fun
       pure $ App fun' rhs
@@ -635,6 +649,7 @@ distribute dist continue subst = \case
 redundantCase
   :: Alternative m
   => Monad m
+  -- => MonadCore m
   => Subst.Class s
   => Transform m s CoreExpr
 redundantCase continue subst = \case
@@ -652,6 +667,37 @@ redundantCase continue subst = \case
     expr <- case nubBy cmp alts of
       [Alt _ _ rhs] -> pure rhs
       _ -> empty
+
+    -- -- -- Ensure the scrutinee doesn't have side-effects, as this would break
+    -- -- -- confluence.
+    -- dbg' "================="
+    -- dbg scrut
+    -- dbg $ exprOkToDiscard scrut
+    -- dbg $ exprOkForSpeculation scrut
+    -- dbg $ exprOkForSpecEval isStrictId scrut
+    -- dbg $ case scrut of
+    --   Var var -> isStrictId var
+    --   _ -> False
+    -- -- dbg $ isStrict
+    -- guard $ exprOkToDiscard scrut
+    -- FIXME: Okay. It seems there are some assumptions that make our equality
+    -- checker work for some expressions. This has to do with side-effects and
+    -- divergence. Ideally, we want to be able to simply ditch the evaluation of
+    -- some terms that are actually put in a strict position (case scrutinee).
+    -- We cannot however, as simply ignoring these would cause us to modify
+    -- behaviour. Right now, we actually come across some case expressions where
+    -- the only reason to scrutinize is because we force the value. To maintain
+    -- correctness, we cannot really get past this...
+    --
+    -- I think the best way to solve this would be to ensure this is to require
+    -- these values to be strict anyway, no? If we already know that values are
+    -- forced, then we can remove the case expression with the knowledge that
+    -- this doesn't compromise correctness.
+    -- 'isStrictType' can maybe help identify these cases??? Otherwise, I'm
+    -- not sure yet. The 'exprOkToDiscard' call might also catch it. We should
+    -- experiment with lazy/strict data structure inputs. Also, we can try
+    -- out the diverging example between impl and sim no? I.e. provide undefined
+    -- to the forced input and we should see a difference!
 
     -- We substitute the case binder in the new expression for the new
     -- scrutinee.
@@ -975,6 +1021,8 @@ caseSwap
   => Monad m
   => Transform m Subst.Ordered CoreExpr
 caseSwap continue subst = \case
+  -- FIXME: I think case swapping might not be meaning preserving when there
+  -- are side-effects. We should check for this before swapping.
   Case oScrut oBndr oTy oAlts -> do
     -- Get the unbound alt as an irrefutable pattern.
     (oConSwap, oBndrsSwap, (iScrut, iBndr, iTy, iAlts)) <- asum $ oAlts <&> \case
@@ -1100,7 +1148,7 @@ compareScrut subst lhs rhs = case (lhs, rhs) of
 
 isPrimitive :: Subst.Class s => s -> CoreExpr -> Bool
 isPrimitive subst = \case
-  Var v -> isNothing $ Subst.lookupId' subst v
+  Var v -> isNothing (Subst.lookupId' subst v) && not (hasCoreUnfolding $ idUnfolding v)
   Lit _ -> True
   Coercion _ -> True
   Type _ -> True
@@ -1157,7 +1205,7 @@ floatCast continue subst = \case
     let expr = Cast (App fun arg') fco_res
     continue subst expr
 
-  App (Cast fun (ForAllCo bndr argCo resCo)) (Type arg) -> do
+  App (Cast fun ForAllCo { fco_tcv,  fco_kind, fco_body}) (Type arg) -> do
     -- The forall binder should only be substituted within the coercions. As
     -- there is no correct substitution for the entire returned expression, we
     -- continue only on the function body.
@@ -1165,45 +1213,115 @@ floatCast continue subst = \case
     let arg' = Subst.ty subst arg
 
     -- Substitute the coercions
-    let subst' = subst & Subst.extend bndr (Type arg')
-    let argCo' = Subst.co subst' argCo
-    let resCo' = Subst.co subst' resCo
+    let subst' = subst & Subst.extend fco_tcv (Type arg')
+    let fco_kind' = Subst.co subst' fco_kind
+    let fco_body' = Subst.co subst' fco_body
 
     -- Create the new type argument.
-    let arg'' = Type $ mkCastTy arg' argCo'
+    let arg'' = Type $ mkCastTy arg' fco_kind'
 
     -- Return the floated cast.
-    pure $ Cast (App fun' arg'') resCo'
+    pure $ Cast (App fun' arg'') fco_body'
 
   _ -> empty
 
--- | Reduces case expressions over diverging scrutinee.
---
--- If we case scrutinizes over a diverging expression, we might as well remove
--- the whole case expression. This will reduce bloat, as any of the alternatives
--- is dead code anyway.
---
--- Instead of dealing with all diverging cases directly. We have a marker for
--- diverging code that we operate on here. One may create a rewrite RULE to
--- rewrite a snippet into the marker. Ideally, we would have this function as
--- a RULE as well, but we cannot deal with case expressions in those. Hence, we
--- do it programmatically like so...
-divergingScrut
+-- TODO: This is **very weak** canonicalisation. We should properly order a
+-- a chain of nested (commutative + associative) operations. What about just
+-- commutative/associative operations? I guess we could force some ordering over
+-- those as well? Ideally, the ordering enforced by those as separate passes
+-- would be enough to create a good ordering on commutative + associative. I
+-- believe it would, so it would be good to explore this.
+reorderPrim
   :: Alternative m
-  => MonadReader r m
-  => HasDiverge r
+  => Monad m
   => Transform m s CoreExpr
-divergingScrut continue subst = \case
-  Case (App (Var spine) (Type _)) _ ty _ -> do
-    -- Check if we are actually dealing with a diverging scrutinee.
-    diverge' <- reader diverge
-    guard $ spine == diverge'
-
-    -- Ensure the new diverging expression has the correct type.
-    let expr' = App (Var diverge') (Type ty)
+reorderPrim continue subst = \case
+  App (App (Var op) lhs@(Lit _)) rhs -> do
+    op' <- maybeM $ isPrimOpId_maybe op
+    guard $ isCommutative op'
+    let expr' = App (App (Var op) rhs) lhs
     continue subst expr'
 
   _ -> empty
+
+isCommutative :: PrimOp -> Bool
+isCommutative = \case
+  Int8AddOp -> True
+  Int8MulOp -> True
+  Word8AddOp -> True
+  Word8MulOp -> True
+  Word8AndOp -> True
+  Word8OrOp -> True
+  Word8XorOp -> True
+
+  Int16AddOp -> True
+  Int16MulOp -> True
+  Word16AddOp -> True
+  Word16MulOp -> True
+  Word16AndOp -> True
+  Word16OrOp -> True
+  Word16XorOp -> True
+
+  Int32AddOp -> True
+  Int32MulOp -> True
+  Word32AddOp -> True
+  Word32MulOp -> True
+  Word32AndOp -> True
+  Word32OrOp -> True
+  Word32XorOp -> True
+
+  Int64AddOp -> True
+  Int64MulOp -> True
+  Word64AddOp -> True
+  Word64MulOp -> True
+  Word64AndOp -> True
+  Word64OrOp -> True
+  Word64XorOp -> True
+
+  IntAddOp -> True
+  IntMulOp -> True
+  WordAddOp -> True
+  WordMulOp -> True
+  WordAndOp -> True
+  WordOrOp -> True
+  WordXorOp -> True
+
+  _ -> False
+
+-- | Reduces case expressions over diverging scrutinee.
+--
+-- If a case scrutinizes over a diverging expression, we might as well remove
+-- the whole case expression. This will reduce bloat, as all of the alternatives
+-- are dead code anyway.
+--
+-- Instead of dealing with all diverging cases directly. We have a marker for
+-- diverging code that we operate on here. One may create a rewrite RULE to
+-- rewrite a snippet into the marker. Common cases like 'error' and 'undefined'
+-- already have a rule to be swapped into 'diverge'.
+--
+-- Ideally, this pass would be a RULE as well. Sadly, we cannot deal with case
+-- expressions in those. Hence, we do it programmatically like so...
+-- divergingScrut
+--   :: Alternative m
+--   => MonadReader r m
+--   => HasDiverge r
+--   => MonadCore m
+--   => Transform m s CoreExpr
+-- divergingScrut continue subst = \case
+--   Case scrut _ ty _ -> do
+--     -- Check if we are actually dealing with a diverging scrutinee.
+--     diverge' <- reader diverge
+--     dbg' "========================"
+--     dbg scrut
+--     dbg $ exprIsDeadEnd scrut
+--     guard $ exprIsDeadEnd scrut
+--     -- guard $ spine == diverge'
+
+--     -- Ensure the new diverging expression has the correct type.
+--     let expr' = App (Var diverge') (Type ty)
+--     continue subst expr'
+
+--   _ -> empty
 
 scrutCSE' :: CoreExpr -> CoreExpr
 scrutCSE' = scrutCSE emptyTM
@@ -1262,9 +1380,9 @@ prepCaseDedup scope = \case
                 Alt con bndrs rhs'
 
           -- Since we cannot eliminate the default alt, we also add it here.
-          -- FIXME: In some cases, this will actually remove all defaults. I
+          -- FIXME: In some cases, this could actually remove all defaults. I
           -- guess our other pass deals with those cases, but still this is not
-          -- nice.
+          -- nice. We can maybe check with 'altsAreExhaustive'.
           let defaultAlt = Alt DEFAULT [] rhs'
 
           pure (defaultAlt : missing', altMap)

@@ -23,13 +23,17 @@ diverge = error "diverging code rewrite, should not occur in actual code"
 
 -- Notice that we disable the rules for common usage. We will force their usage
 -- in the plugin.
-{-# RULES
-"error/diverge" [~]
-  forall m. error m = diverge
+-- FIXME: I'm not sure if we actually want to keep the marker? Somehow, it seems
+-- to break confluence... I'll have to look into it. The nice thing is that it
+-- removes a lot of bloat. I guess technically the error messages can differ
+-- though, which technically makes the transformation unsound.
+-- {-# RULES
+-- "error/diverge" [~]
+--   forall m. error m = diverge
 
-"undefined/diverge" [~]
-  undefined = diverge
+-- "undefined/diverge" [~]
+--   undefined = diverge
 
-"diverge x" [~]
-  forall x. diverge x = diverge
-#-}
+-- "diverge x" [~]
+--   forall x. diverge x = diverge
+-- #-}
