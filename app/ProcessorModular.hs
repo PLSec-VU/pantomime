@@ -89,14 +89,14 @@ fetch stalled rawInstr out = do
         put $ state {pc = newPc}
         return (decode rawInstr, out)
 
-execute :: MonadState State m => Word32 ->  Instruction -> Maybe Output -> Word16  -> m (Bool, Word16, Maybe Writeback, Maybe Output,  Maybe Output)
+execute :: MonadState State m => Word32 -> Instruction -> Maybe Output -> Word16 -> m (Bool, Word16, Maybe Writeback, Maybe Output,  Maybe Output)
 execute reg instr out curInst = do 
     state <- get
     --let instr = fetchInstruction state
     case instr of
         Add value ->
             -- | stalled or fast-path, execute now.
-            if stalled state || value == 0 then do -- || reg state == 0 then do
+            if stalled state || value == 0 then do 
                 let result = Just $ Write $ reg + fromIntegral value
                 return (False, curInst, result, Nothing, out)
             -- | slow-path, stall the pipeline for one tick.                        
@@ -233,13 +233,12 @@ proj s = ((), ls)
     }
 
 -- | Exec Proof
--- {-# ANN execRun UC
---   { observation = 'obsExec
---   , leakage = 'leakExec
---   , simulator = 'simExecRun
---   , projection = 'proj
--- } #-}
-
+{-# ANN execRun UC
+  { observation = 'obsExec
+  , leakage = 'leakExec
+  , simulator = 'simExecRun
+  , projection = 'proj
+} #-}
 
 execRun :: State -> (Word32, Instruction, Maybe Output, Word16) -> (State, (Bool, Word16, Maybe Writeback, Maybe Output,  Maybe Output))
 execRun s (reg, instr, out, curInst) = swap $ runState (execute reg instr out curInst) s   
@@ -250,34 +249,31 @@ obsExec (stall, rawInst, wb, wbout, out) = (stall, leakInst $ decode rawInst, is
 leakExec :: () -> (Word32, Instruction, Maybe Output, Word16) -> ((), (LeakInst, Bool, LeakInst))
 leakExec _ (reg, instr, out, curInst) = ((), (leakInst instr, isJust out, leakInst $ decode curInst))
 
-
 simExecRun :: LState -> (LeakInst, Bool, LeakInst) -> (LState, (Bool, LeakInst, Bool, Bool))
 simExecRun s (inst, out, curInst) = swap $ runState (simExec inst out curInst) s   
 
-
 simExec :: MonadState LState m => LeakInst -> Bool -> LeakInst ->  m (Bool, LeakInst, Bool, Bool)
-simExec inst out curInst = do
+simExec instr out curInst = do
     state <- get
-    let instr = lFetchInst state
     case instr of 
         -- fast path, execute now
         LAdd fast -> 
-            if fast || lstalled state then do
+            if lstalled state || fast then do
                 return (False, curInst, False, out)
             else do
                 return (True, curInst, False, out)
-        LOut ->
-                return (False, curInst, True, out)
         LClr ->
                 return (False, curInst, False, out)
+        LOut ->
+                return (False, curInst, True, out)
 
 -- | Writeback Proof
-{-# ANN wbRun UC
-  { observation = 'obsWb
-  , leakage = 'leakWb
-  , simulator = 'simWbRun
-  , projection = 'proj
-} #-}
+-- {-# ANN wbRun UC
+--   { observation = 'obsWb
+--   , leakage = 'leakWb
+--   , simulator = 'simWbRun
+--   , projection = 'proj
+-- } #-}
 
 wbRun :: State -> (Word16, (Maybe Writeback, Maybe Output)) -> (State, (Word16, Maybe Output, Word32))
 wbRun s (instr, wb) = swap $ runState (writeback instr wb) s   
