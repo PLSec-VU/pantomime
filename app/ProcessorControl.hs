@@ -2,7 +2,7 @@
 
 module ProcessorControl
     ( test
-    , check
+--    , check
     , tickRun
     , obs
     , leakRun
@@ -153,20 +153,6 @@ tick rawInst = do
 
 tickRun :: State -> Word16 -> (State, (Maybe Output, Word8))
 tickRun s i = swap $ runState (tick i) s    
-
-genInstruction :: Int -> Gen Instruction
-genInstruction len = frequency [
-    (2, Add <$> arbitrary),     -- More weight on Add as it's common
-    (1, pure Clr),              -- Simple instructions
-    (1, pure Out),
-    (2, J <$> choose (0, fromIntegral len - 1)),  -- Jump within bounds
-    (2, Beq <$> choose (0, fromIntegral len - 1)) -- Branch within bounds
-  ]
-
-genProgram :: Gen [Instruction]
-genProgram = do
-    len <- choose (1, 20)
-    sequence $ replicate len (genInstruction len)
 
 -- instance Arbitrary [Instruction] where
 --     arbitrary = genProgram
@@ -378,6 +364,21 @@ lrun maxSteps program = go maxSteps
         return $ out:os
 
 -- | Correctness Theorem
+
+-- genInstruction :: Int -> Gen Instruction
+-- genInstruction len = frequency [
+--     (2, Add <$> arbitrary),     -- More weight on Add as it's common
+--     (1, pure Clr),              -- Simple instructions
+--     (1, pure Out),
+--     (2, J <$> choose (0, fromIntegral len - 1)),  -- Jump within bounds
+--     (2, Beq <$> choose (0, fromIntegral len - 1)) -- Branch within bounds
+--   ]
+
+-- genProgram :: Gen [Instruction]
+-- genProgram = do
+--     len <- choose (1, 20)
+--     sequence $ replicate len (genInstruction len)
+
 -- theorem :: [Instruction] -> Bool
 -- theorem prog = outI == outS
 --     where
