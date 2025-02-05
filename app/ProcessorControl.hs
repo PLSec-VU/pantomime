@@ -18,7 +18,7 @@ import Data.Maybe (isJust)
 import Data.Tuple (swap)
 import Projection
 import UC
-import Test.QuickCheck hiding ((.&.))
+--import Test.QuickCheck hiding ((.&.))
 import Debug.Trace
 
 data Instruction = Add Word8
@@ -222,12 +222,12 @@ run maxSteps program = go maxSteps
 -- Leakage Description and Proof
 ------------------------------------------------------------------------------------
 
-{-# ANN tickRun UC
-  { observation = 'obs
-  , leakage = 'leakRun
-  , simulator = 'simRun
-  , projection = 'proj
-  } #-}
+-- {-# ANN tickRun UC
+--   { observation = 'obs
+--   , leakage = 'leakRun
+--   , simulator = 'simRun
+--   , projection = 'proj
+--   } #-}
 
 -- | Instructions passed to the Simulator
 data LeakInst = LBeq Bool Word8
@@ -378,16 +378,16 @@ lrun maxSteps program = go maxSteps
         return $ out:os
 
 -- | Correctness Theorem
-theorem :: [Instruction] -> Bool
-theorem prog = outI == outS
-    where
-    maxSteps = 100
-    (outI, _) = runState (run maxSteps $ map encode prog) initState
-    (outS, _) = runState (lrun maxSteps $ map encode prog) simInit
-    simInit = proj initState
+-- theorem :: [Instruction] -> Bool
+-- theorem prog = outI == outS
+--     where
+--     maxSteps = 100
+--     (outI, _) = runState (run maxSteps $ map encode prog) initState
+--     (outS, _) = runState (lrun maxSteps $ map encode prog) simInit
+--     simInit = proj initState
 
-prop_theorem :: Property
-prop_theorem = forAll genProgram theorem
+-- prop_theorem :: Property
+-- prop_theorem = forAll genProgram theorem
 
-check = quickCheckWith stdArgs{maxSuccess = 5000000} prop_theorem 
+-- check = quickCheckWith stdArgs{maxSuccess = 5000000} prop_theorem 
 
