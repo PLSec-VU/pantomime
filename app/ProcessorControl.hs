@@ -2,7 +2,7 @@
 
 module ProcessorControl
     ( test
---    , check
+    , check
     , tickRun
     , obs
     , leakRun
@@ -18,7 +18,7 @@ import Data.Maybe (isJust)
 import Data.Tuple (swap)
 import Projection
 import UC
---import Test.QuickCheck hiding ((.&.))
+import Test.QuickCheck hiding ((.&.))
 import Debug.Trace
 
 data Instruction = Add Word8
@@ -61,7 +61,7 @@ decode word = case shiftR word 8 of
     2 -> Out
     3 -> J (fromIntegral (word .&. 0xFF))
     4 -> Beq (fromIntegral (word .&. 0xFF))
-    _ -> error "Invalid instruction"
+    --_ -> error "Invalid instruction"
 
 testEncoding :: IO ()
 testEncoding = do
@@ -157,29 +157,29 @@ tickRun s i = swap $ runState (tick i) s
 -- instance Arbitrary [Instruction] where
 --     arbitrary = genProgram
 
-test :: IO ()
-test = do
-    putStrLn "Test 1: Jump"
-    runAndShow run prog initState
-    putStrLn "Simulator output"
-    runAndShow lrun prog (linit, sinit)
-   --sample (genProgram)
-   --putStrLn $ "program: " ++ (show (sample (genProgram)))
+-- test :: IO ()
+-- test = do
+--     putStrLn "Test 1: Jump"
+--     runAndShow run prog initState
+--     putStrLn "Simulator output"
+--     runAndShow lrun prog (linit, sinit)
+--    --sample (genProgram)
+--    --putStrLn $ "program: " ++ (show (sample (genProgram)))
 
-   --putStrLn "\nTest 2: Sequential with Add"
-   --runAndShow prog2
- where
-   maxSteps = 50
-   prog = [Out, Add 228, J 8, Add 11, Clr, Clr, Add 53, J 2, Beq 0, Out, Clr, Out, Out, Add 190, Beq 5, J 9, Add 155]
-   prog1 = [Out, J 3, Add 5, Add 10, Out, Out, Out, Out]  -- Should output 0, 10, 10
-   prog2 = [Add 1, Out, Clr, Out, Beq 2, Out, Add 2, Out, Out, Out, Out]  -- Should output 1, 1, 3
+--    --putStrLn "\nTest 2: Sequential with Add"
+--    --runAndShow prog2
+--  where
+--    maxSteps = 50
+--    prog = [Out, Add 228, J 8, Add 11, Clr, Clr, Add 53, J 2, Beq 0, Out, Clr, Out, Out, Add 190, Beq 5, J 9, Add 155]
+--    prog1 = [Out, J 3, Add 5, Add 10, Out, Out, Out, Out]  -- Should output 0, 10, 10
+--    prog2 = [Add 1, Out, Clr, Out, Beq 2, Out, Add 2, Out, Out, Out, Out]  -- Should output 1, 1, 3
 
-   (linit, sinit) = proj initState
+--    (linit, sinit) = proj initState
 
-   runAndShow runF prog init = do
-       (outs, s) <- runStateT (runF maxSteps $ map encode prog) init
-       putStrLn $ "State: " ++ show s
-       putStrLn $ "Outputs: " ++ show outs
+--    runAndShow runF prog init = do
+--        (outs, s) <- runStateT (runF maxSteps $ map encode prog) init
+--        putStrLn $ "State: " ++ show s
+--        putStrLn $ "Outputs: " ++ show outs
 
 initState = State { 
        pc = 0, 
@@ -234,12 +234,17 @@ leakInst (J addr) _ =  LJ addr
 leakInst (Beq offset) reg = LBeq (reg==0) offset
 leakInst _ _ = LOther
 
+wbToReg :: Word32 -> Maybe Writeback -> Word32
+wbToReg _ (Just (Write n)) = n
+wbToReg n Nothing = n
+
 -- | Projection from state to leakage and simulator state
 proj :: State -> (LeakState, SimState)
 proj state = (leakState, simState)
     where
-    leakState = LState {lreg = reg state, lbubble = bubble state}
-    simState = SimState {simPc = pc state, simBubble = bubble state, simNextPc = nextPc state, simFetchPc= fetchPC state, simFetchInstruction = leakInst (fetchInstruction state) (reg state)}
+    newreg = wbToReg (reg state) (fst $ writebackOut state)
+    leakState = LState {lreg = newreg, lbubble = bubble state}
+    simState = SimState {simPc = pc state, simBubble = bubble state, simNextPc = nextPc state, simFetchPc= fetchPC state, simFetchInstruction = leakInst (fetchInstruction state) newreg}
 
 -- | Leakage Description State
 data LeakState = LState {
@@ -365,30 +370,53 @@ lrun maxSteps program = go maxSteps
 
 -- | Correctness Theorem
 
--- genInstruction :: Int -> Gen Instruction
--- genInstruction len = frequency [
---     (2, Add <$> arbitrary),     -- More weight on Add as it's common
---     (1, pure Clr),              -- Simple instructions
---     (1, pure Out),
---     (2, J <$> choose (0, fromIntegral len - 1)),  -- Jump within bounds
---     (2, Beq <$> choose (0, fromIntegral len - 1)) -- Branch within bounds
---   ]
+genInstruction :: Int -> Gen Instruction
+genInstruction len = frequency [
+    (2, Add <$> arbitrary),     -- More weight on Add as it's common
+    (1, pure Clr),              -- Simple instructions
+    (1, pure Out),
+    (2, J <$> choose (0, fromIntegral len - 1)),  -- Jump within bounds
+    (2, Beq <$> choose (0, fromIntegral len - 1)) -- Branch within bounds
+  ]
 
--- genProgram :: Gen [Instruction]
--- genProgram = do
---     len <- choose (1, 20)
---     sequence $ replicate len (genInstruction len)
+genProgram :: Gen [Instruction]
+genProgram = do
+    len <- choose (1, 20)
+    sequence $ replicate len (genInstruction len)
 
--- theorem :: [Instruction] -> Bool
--- theorem prog = outI == outS
---     where
---     maxSteps = 100
---     (outI, _) = runState (run maxSteps $ map encode prog) initState
---     (outS, _) = runState (lrun maxSteps $ map encode prog) simInit
---     simInit = proj initState
+theorem :: [Instruction] -> Bool
+theorem prog = outI == outS
+    where
+    maxSteps = 200
+    (outI, _) = runState (run maxSteps $ map encode prog) initState
+    (outS, _) = runState (lrun maxSteps $ map encode prog) simInit
+    simInit = proj initState
 
--- prop_theorem :: Property
--- prop_theorem = forAll genProgram theorem
+prop_theorem :: Property
+prop_theorem = forAll genProgram theorem
 
--- check = quickCheckWith stdArgs{maxSuccess = 5000000} prop_theorem 
+check = quickCheckWith stdArgs{maxSuccess = 5000000} prop_theorem 
 
+diff :: (State, Word16)
+diff = (s, i)
+    where
+        s = State
+            { pc = 0
+            , reg = 0
+            , bubble = False
+            , nextPc = 1
+            , fetchPC = 0
+            , fetchInstruction = Beq 0
+            , writebackOut = (Just $ Write 10, Nothing)
+            }
+        i = encode $ Add 0
+
+test :: IO ()
+test = do
+  let (s, i) = diff
+  let imp = Projection.composeI tickRun obs proj s i
+  let sim = Projection.composeS leakRun simRun proj s i
+  print $ show $ proj s
+  print $ leakRun (fst $ proj s) i
+  print $ snd imp
+  print $ snd sim
