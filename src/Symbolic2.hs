@@ -89,9 +89,19 @@ testSymbolic expr = do
           }
         }
 
+
   liftCore . liftIO $ do
-    let f = sym "0" :: SymIntN64 -~> SymIntN64
-    result <- solve z3' $ (fmap (f #) value) .== pure (0x10)
+    -- let f = sym "0" :: ADT -~> ADT
+    let g = sym "0" :: ADT -~> SymIntN64
+    -- result <- solve z3' $ (fmap ((g #) . (f #)) value) .== pure (0x10)
+    let translate = \case
+          -- Right val -> g # (f # val) .== 0x10
+          Right val -> g # val .== 0x10
+          -- TODO: I guess we want to handle Invalid differently from the other
+          -- errors?
+          Left _ -> false
+
+    result <- solveExcept z3' translate value
     -- result <- solve z3' $ value .== throwError DivideByZero
     -- let x = sym "x" :: SymIntN64
     -- let f = sym "0" :: SymIntN64 -~> SymIntN64
@@ -197,7 +207,9 @@ data Value n where
 
 -- TODO: Somehow this split feels somewhat unnatural. I think it would be better
 -- to have Fun be part of Value. A giveaway here is that there is no sensible
--- name for this type. It is, in fact, also a value.
+-- name for this type. It is, in fact, also a value. Maybe we could do like a
+-- 'Prim n' thing for all primitive values. Then ADT, Ty And Fun can be part of
+-- value.
 data Symbolic m n where
   Val :: Value n -> Symbolic m n
   Fun :: (Symbolic m n -> m (Symbolic m n)) -> Symbolic m n
@@ -208,11 +220,11 @@ newtype SymbolicState = SymbolicState
   { nextADT :: ADT
   }
 
-freshADT :: MonadState SymbolicState m => m ADT
+freshADT :: MonadState SymbolicState m => m (RuntimeValue ADT)
 freshADT = state $ \s -> do
   let adt = nextADT s
   let s' = s { nextADT = adt + 1}
-  (adt, s')
+  (pure adt, s')
 
 -- bigNat :: RuntimeValue SymInteger -> Value' n
 -- bigNat val = do
@@ -323,20 +335,16 @@ symAlt env scrut = \case
       _ -> throwError IllTyped
 
     -- Whether the "tag" field on this ADT is equivalent to the DataCon.
-    let conditional = do
-          let tag = "tag" :: ADT -~> SymIntN64
-          adt <- scrut'
-          let dataCon' = fromIntegral $ dataConTagZ dataCon
-          mrgReturn $ tag # adt .== dataCon'
+    let conditional = adtIsDataCon scrut' dataCon
 
     -- Gather field accessors for all binders.
-    let names = dataConNames dataCon
-    let fields = zip names bndrs
-    values <- forM fields $ \(name, bndr) -> do
+    let names = dataConAccessorNames dataCon
+    let accessors = zip names bndrs
+    fields <- forM accessors $ \(name, bndr) -> do
       Val <$> accessField scrut' name (varType bndr)
 
     -- Extend the environment with field accessors for each binder.
-    let env' = foldl (flip $ uncurry insertTM) env $ zip bndrs values
+    let env' = foldl' (flip $ uncurry insertTM) env $ zip bndrs fields
 
     -- Evaluate the right-hand side with the extended environment.
     rhs' <- eval env' rhs
@@ -373,35 +381,65 @@ symDataCon
   => DataCon
   -> m (Symbolic m n)
 symDataCon dataCon = do
+  -- The root creates the actually symbolic DataCon using the given type
+  -- instantiation.
+  let root = symDataConInst dataCon
+
+  -- The number of type arguments we actually require.
+  let nUnivTys = const () <$> dataConUnivTyVars dataCon
+
+  -- Create an n-ary function accepting types, which will be used to instantiate
+  -- the data constructor.
+  final <- nArity root nUnivTys $ \_ univ -> \case
+    Val (Ty ty) -> pure $ ty : univ
+    _ -> throwError IllTyped
+
+  -- We start with an emtpy list of type instances.
+  final []
+
+symDataConInst
+  :: forall m n
+   . MonadSymbolic m
+  => KnownPos n
+  => DataCon
+  -- ^ The DataCon for which we will create a symbolic instance.
+  -> [Type]
+  -- ^ The types with which we will instantiate universal quantifiers of the
+  -- DataCon.
+  -> m (Symbolic m n)
+symDataConInst dataCon tys = do
+  -- Create a fresh identifier for the ADT.
   adt <- freshADT
-  let names = dataConNames dataCon
-  -- let tyVars = dataConUnivTyVars dataCon
-  -- TODO: The types I really want are those from 'dataConInstUniv'. I should
-  -- change symDataCon to first create a function that takes types. Uses those
-  -- types to construct the required arguments. Then does whatever we do now!
-  let tys = scaledThing <$> dataConRepArgTys dataCon
 
-  let fields = zip names tys
-  fields' <- forM fields $ \(name, ty) -> do
-    accessField (pure adt) name ty
+  -- Gather the accessor names and instantiate the universal types to create the
+  -- field accessors.
+  let names = dataConAccessorNames dataCon
+  let tys' = scaledThing <$> dataConInstArgTys dataCon tys
+  let accessors = zip names tys'
 
+  -- Gather the fields of the ADT.
+  fields <- forM accessors $ \(name, ty) -> do
+    accessField adt name ty
+
+  -- The root is an ADT that asserts the given conditional holds.
   let root cond = do
-        let tr = pure adt
-        let fl = throwError Invalid
-        let adt' = ADT $ iteRuntime cond tr fl
+        let adt' = ADT $ assertRuntime cond adt
         pure $ Val adt'
 
-  final <- nArity root fields' $ \field cond arg -> do
+  -- Accumulate a function that takes the fields' as arguments. We pass a
+  -- conditional to the root that states the field accessors are equal to the
+  -- actual arguments.
+  final <- nArity root fields $ \field cond arg -> do
     arg' <- case arg of
       Fun _ -> throwError UnsupportedExpr
       Val v -> pure v
 
+    -- Constraint the field of the ADT to be equivalent to the argument.
     extra <- cmpValue field arg'
     pure $ liftA2 (.&&) extra cond
 
-  -- FIXME: We should have an assertion that says the adt has the given tag.
-  -- This should be passed in, instead of true.
-  final (pure true)
+  -- As a final constraint, we constrain the ADT match the given DataCon.
+  final $ adtIsDataCon adt dataCon
 
 -- | Create a function with the arity of whatever we are folding over.
 --
@@ -424,6 +462,29 @@ nArity acc xs f = foldM' acc xs $ \acc' x -> do
     res <- f x y arg
     acc' res
 
+-- | Whether the given ADT matches the DataCon.
+--
+-- Note, this does not typecheck whether the ADT actually matches the DataCon.
+-- TODO: I do want this to perform a typecheck! I would need to include the
+-- type on an ADT first.
+adtIsDataCon :: RuntimeValue ADT -> DataCon -> RuntimeValue SymBool
+adtIsDataCon adt dataCon = do
+  tag <- accessTag adt
+  let dataCon' = fromIntegral $ dataConTagZ dataCon
+  mrgReturn $ tag .== dataCon'
+
+-- | Accessor for the tag of an ADT.
+accessTag
+  :: RuntimeValue ADT
+  -> RuntimeValue SymIntN64
+accessTag adt = do
+  let tag = "tag" :: ADT -~> SymIntN64
+  adt' <- adt
+  pure $ tag # adt'
+
+-- | Accessor for a field of an ADT.
+--
+-- The field is a pair of name and its result type.
 accessField
   :: forall m n
    . MonadSymbolic m
@@ -460,8 +521,8 @@ accessField adt name ty
       scrut' <- adt
       pure $ accessor # scrut'
 
-dataConNames :: DataCon -> [String]
-dataConNames dataCon = do
+dataConAccessorNames :: DataCon -> [String]
+dataConAccessorNames dataCon = do
   -- TODO: Note sure if we want to emit fields with pprUnsafe. I think we just
   -- want the plain old name as typed in Haskell.
   let names = showPprUnsafe . flSelector <$> dataConFieldLabels dataCon
@@ -489,6 +550,7 @@ cmpValue (Word32 lhs) (Word32 rhs) = pure $ cmpRuntime lhs rhs
 cmpValue (Word64 lhs) (Word64 rhs) = pure $ cmpRuntime lhs rhs
 cmpValue (Float lhs) (Float rhs) = pure $ cmpRuntime lhs rhs
 cmpValue (Double lhs) (Double rhs) = pure $ cmpRuntime lhs rhs
+cmpValue (ADT lhs) (ADT rhs) = pure $ cmpRuntime lhs rhs
 cmpValue _ _ = throwError IllTyped
 
 -- | Compare two runtime values.
@@ -527,6 +589,16 @@ iteRuntime cond tr fl =
   cond .>>= \cond' ->
   mrgIte cond' tr fl
 
+-- | Assert that the given condition holds.
+-- FIXME: This should respect lazy semantics. The current implementation forces
+-- the conditional, which is not what we want from an assert.
+assertRuntime
+  :: SimpleMergeable a
+  => RuntimeValue SymBool
+  -> RuntimeValue a
+  -> RuntimeValue a
+assertRuntime cond tr = iteRuntime cond tr $ throwError Invalid
+
 iteValue
   :: forall m n
    . KnownPos n
@@ -545,6 +617,7 @@ iteValue cond (Word8 lhs) (Word8 rhs) = pure . Word8 $ iteRuntime cond lhs rhs
 iteValue cond (Word16 lhs) (Word16 rhs) = pure . Word16 $ iteRuntime cond lhs rhs
 iteValue cond (Word32 lhs) (Word32 rhs) = pure . Word32 $ iteRuntime cond lhs rhs
 iteValue cond (Word64 lhs) (Word64 rhs) = pure . Word64 $ iteRuntime cond lhs rhs
+iteValue cond (ADT lhs) (ADT rhs) = pure . ADT $ iteRuntime cond lhs rhs
 iteValue _ _ _ = throwError IllTyped
 
 -- | Branch on a symbolic runtime boolean.
