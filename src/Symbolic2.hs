@@ -15,47 +15,38 @@ module Symbolic2
   ( testSymbolic
   ) where
 
-import Grisette hiding (PPrintType (..))
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Map.Expr (TrieMap(..), insertTM)
+import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Types.Unique.DFM (UniqDFM)
 import GHC.Platform (Platform (platformWordSize))
 import GHC.Generics (Generic)
 import GHC.Builtin.PrimOps (PrimOp (..))
+import GHC.Builtin.Types.Prim
+import GHC.Tc.Utils.TcType (eqType, tcSplitSigmaTy, substTy)
 import GHC.MonadCore
+
+import Unsafe.Coerce (unsafeCoerce)
 import GHC.TypeLits (KnownNat, type (<=), OrderingI (..))
 import GHC.TypeNats (cmpNat)
 
+import Control.Monad (forM, foldM)
 import Control.Monad.Except
+import Control.Monad.State
+import Control.Exception (ArithException)
 
--- import Data.Word (Word64)
 import Data.Data (type (:~:) (..), Proxy (..))
+import Data.Foldable (find)
+import Data.String (IsString(..))
 import Data.Type.Ord (Compare)
 
-import Unsafe.Coerce (unsafeCoerce)
-import Control.Monad (forM, foldM)
-import GHC.Tc.Utils.TcType (eqType)
-import GHC.Builtin.Types.Prim
+-- TODO: There has to be a better way to not import pretty printing stuff from
+-- grisette...
+import Grisette hiding (PPrintType (..), (<+>), nest, punctuate, comma, vcat, braces, lbrace, rbrace)
 import Grisette.Lib.Control.Monad.Except (mrgModifyError)
-import Control.Exception (ArithException)
-import Data.String (IsString(..))
-import Control.Monad.State
-import GHC.Core.TyCo.Rep (scaledThing)
--- TODO: If we don't end up needing all these imports, we should remove some
--- of the packages we used for this from the package list (though they were only
--- made visible really).
--- import Grisette.Internal.SymPrim.Prim.Internal.Term (Term, LinkedRep (..), SupportedPrim (..))
--- import Grisette.Internal.SymPrim.Prim.Term (SupportedPrimConstraint, SBVRep (..), conTerm, symTerm, SupportedNonFuncPrim (..), NonFuncSBVRep (..), pevalITEBasicTerm, pevalDefaultEqTerm, pevalNotTerm, distinctTerm)
--- import qualified Data.SBV as SBV
--- import Data.SBV (SBV, HasKind, SymVal)
--- import Language.Haskell.TH.Syntax (Lift)
-
--- import Control.DeepSeq (NFData)
--- import Data.Hashable (Hashable)
--- import Data.String (IsString (..))
--- import Grisette.Internal.SymPrim.Prim.Internal.Term (Term(..))
--- import Data.Foldable (toList)
--- import Data.List.NonEmpty (NonEmpty (..))
+import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..))
+import GHC.Core.Unify (tcMatchTy)
+import Data.Functor ((<&>))
 
 testSymbolic
   :: MonadCore m
@@ -76,9 +67,13 @@ testSymbolic expr = do
   -- value <- case intToIntFun @_ @64 expr of
   --   Right value -> pure value
   --   _ -> fail "No int to int function"
-  symbolic <- flip evalStateT s $ runExceptT $ saturated @_ @64 expr >>= asADT
-  value <- case symbolic of
-    Right value -> pure value
+  symbolic <- flip evalStateT s $ runExceptT $ do
+    (bndrs, result) <- saturated @_ @64 expr 
+    result' <- asADT result
+    pure (bndrs, result')
+
+  (args, value) <- case symbolic of
+    Right (bndrs, value) -> pure (bndrs, value)
     Left err -> fail $ "Error creating symbolic version: " <> show err
 
   dbg' $ show value
@@ -89,25 +84,124 @@ testSymbolic expr = do
           }
         }
 
-
-  liftCore . liftIO $ do
-    -- let f = sym "0" :: ADT -~> ADT
+  bndrs' <- liftCore . liftIO $ do
+    let f = sym "0" :: ADT -~> ADT
     let g = sym "0" :: ADT -~> SymIntN64
     -- result <- solve z3' $ (fmap ((g #) . (f #)) value) .== pure (0x10)
     let translate = \case
-          -- Right val -> g # (f # val) .== 0x10
-          Right val -> g # val .== 0x10
+          Right val -> g # (f # val) .== 0x10
+          -- Right val -> g # val .== 0x10
           -- TODO: I guess we want to handle Invalid differently from the other
           -- errors?
           Left _ -> false
 
     result <- solveExcept z3' translate value
+
+    case result of
+      Right model -> do
+        let bndrs = fst (collectBinders expr)
+        let bndrs' = forM @_ @(Either _) (zip args bndrs) $ \(arg, bndr) -> do
+              val <- concreteValue model (varType bndr) arg
+              pure $ ppr (occName bndr) <+> "=" <+> ppr val
+              -- pure (occName bndr, val)
+
+        pure bndrs'
+      Left _ -> undefined
+
+  dbg bndrs'
     -- result <- solve z3' $ value .== throwError DivideByZero
     -- let x = sym "x" :: SymIntN64
     -- let f = sym "0" :: SymIntN64 -~> SymIntN64
     -- let f' = sym "0" :: SymIntN32 -~> SymIntN64
     -- result <- solve z3' $ f # x ./= f' # fromInteger 0
-    print result
+    -- print result
+
+data ModelValue' where
+  Record :: DataCon -> [(String, ModelValue')] -> ModelValue'
+  Primitive :: ModelValue -> ModelValue'
+  Error :: RuntimeError -> ModelValue'
+  -- TODO: We want to give out Unknown for recursive values. I guess we'll leave
+  -- this for now...
+  -- Unknown :: ModelValue'
+
+instance Show ModelValue' where
+  show = \case
+    Record dataCon fields -> showSDocUnsafe (ppr dataCon) <> " " <> show fields
+    Primitive value -> show value
+    Error err -> show err
+
+instance Outputable ModelValue' where
+  ppr = \case
+    Record dataCon fields -> ppr dataCon $+$ nest 2 (braces' (vcat fields'))
+      where
+        braces' x = lbrace <+> x $+$ rbrace
+        fields' = punctuate (text ", ") $ fields <&> pair
+        pair (name, value) = text name <+> "=" <+> ppr value
+    -- Record dataCon fields -> ppr dataCon <+> " " <> show fields
+    Primitive value -> text $ show value
+    Error err -> ppr err
+
+concreteValue
+  :: forall m n
+   . MonadError SymbolicError m
+  => KnownPos n
+  => Model
+  -> Type
+  -- ^ TODO: This is only here for ADT. I should just track the type of an ADT
+  -- inside of it!
+  -> Value n
+  -> m ModelValue'
+concreteValue model ty = \case
+  Int value -> prim @_ @(IntN n) value
+  Int8 value -> prim @_ @IntN8 value
+  Int16 value -> prim @_ @IntN16 value
+  Int32 value -> prim @_ @IntN32 value
+  Int64 value -> prim @_ @IntN64 value
+  Word value -> prim @_ @(WordN n) value
+  Word8 value -> prim @_ @WordN8 value
+  Word16 value -> prim @_ @WordN16 value
+  Word32 value -> prim @_ @WordN32 value
+  Word64 value -> prim @_ @WordN64 value
+  Float value -> prim @_ @FP32 value
+  Double value -> prim @_ @FP64 value
+  ADT adt -> case evalSymToCon @_ @(Either RuntimeError ADT) model adt of
+    Right adt' -> do
+      let tag = evalSymToCon @_ @Tag model $ accessTag adt'
+      dataCon <- whyFail IllTyped $ tagToDataCon tag ty
+      let (_, _, funTy) = tcSplitSigmaTy $ dataConRepType dataCon
+      let (argTys, resTy) = splitFunTys funTy
+
+      -- We try to match the result type of the constructor to the case binder.
+      -- Really, this should never fail.
+      subst <- whyFail IllTyped $ tcMatchTy resTy ty
+      let argTys' = substTy subst . scaledThing <$> argTys
+      let names = dataConAccessorNames dataCon
+      let accessors = zip names argTys'
+      fields <- forM accessors $ \(name, ty') -> do
+        field <- accessField @m @n adt name ty'
+        concreteValue model ty' field
+
+      pure $ Record dataCon (zip names fields)
+
+    Left err -> pure $ Error err
+
+  -- TODO: There should be a better error to emit than this no? Maybe we should
+  -- make a new one... Maybe we should make an error for concrete lookup
+  -- failures.
+  Ty _ -> throwError IllTyped
+  where
+    prim
+      :: forall a b
+       . ToCon a b
+      => EvalSym a
+      => SupportedPrim b
+      => RuntimeValue a
+      -> m ModelValue'
+    prim value = do
+      let concrete = evalSymToCon @_ @(Either RuntimeError b) model value
+      case concrete of
+        Right value' -> pure $ Primitive (ModelValue value')
+        Left err -> pure $ Error err
 
 asIntN64 :: MonadError SymbolicError m => Value n -> m (RuntimeValue SymIntN64)
 asIntN64 = \case
@@ -123,14 +217,16 @@ saturated
   :: MonadSymbolic m
   => KnownPos n
   => CoreExpr
-  -> m (Value n)
+  -> m ([Value n], Value n)
 saturated expr = do
   symbolic <- eval emptyTM expr
   let (bndrs, _) = collectBinders expr
   symBndrs <- forM bndrs $ \bndr -> do
     symBndr <- symbolicInstance bndr
-    pure $ Val symBndr
-  saturate symBndrs symbolic
+    pure $ symBndr
+  let symBndrs' = Val <$> symBndrs
+  result <- saturate symBndrs' symbolic
+  pure (symBndrs, result)
 
 saturate
   :: MonadError SymbolicError m
@@ -172,11 +268,20 @@ data RuntimeError where
   deriving Show
   deriving Generic
   deriving Mergeable via (Default RuntimeError)
+  deriving EvalSym via (Default RuntimeError)
   deriving SymEq via (Default RuntimeError)
+
+instance Outputable RuntimeError where
+  ppr = \case
+    DivideByZero -> text "divide-by-zero"
+    Invalid -> text "invalid"
 
 type RuntimeValue a = ExceptT RuntimeError Union a
 
 type ADT = SymIntN64
+
+-- | ADT tag to distinguish between constructors.
+type Tag = SymIntN64
 
 type KnownPos n = (KnownNat n, 1 <= n)
 
@@ -185,6 +290,12 @@ data SymbolicError where
   UnsupportedExpr :: SymbolicError
   UnboundVariable :: SymbolicError
   deriving Show
+
+instance Outputable SymbolicError where
+  ppr = \case
+    IllTyped -> text "ill-typed"
+    UnsupportedExpr -> text "unsupported expression"
+    UnboundVariable -> text "unbound variable"
 
 data Value n where
   -- Char :: RuntimeValue (SymWordN 31) -> Value n
@@ -462,32 +573,49 @@ nArity acc xs f = foldM' acc xs $ \acc' x -> do
     res <- f x y arg
     acc' res
 
+-- | Get the DataCon from the Tag and Type.
+tagToDataCon
+  :: Tag
+  -> Type
+  -> Maybe DataCon
+tagToDataCon tag ty = do
+  (tyCon, _) <- splitTyConApp_maybe ty
+  dataCons <- tyConDataCons_maybe tyCon
+  let cmp dataCon = dataConToTag dataCon == tag
+  find cmp dataCons
+
+-- | Get the symbolic representation of the DataCon.
+dataConToTag :: DataCon -> Tag
+dataConToTag = fromIntegral . dataConTagZ
+
 -- | Whether the given ADT matches the DataCon.
 --
 -- Note, this does not typecheck whether the ADT actually matches the DataCon.
 -- TODO: I do want this to perform a typecheck! I would need to include the
 -- type on an ADT first.
-adtIsDataCon :: RuntimeValue ADT -> DataCon -> RuntimeValue SymBool
+adtIsDataCon
+  :: RuntimeValue ADT
+  -> DataCon
+  -> RuntimeValue SymBool
 adtIsDataCon adt dataCon = do
-  tag <- accessTag adt
-  let dataCon' = fromIntegral $ dataConTagZ dataCon
-  mrgReturn $ tag .== dataCon'
+  field <- accessTag <$> adt
+  let tag = dataConToTag dataCon
+  mrgReturn $ field .== tag
 
 -- | Accessor for the tag of an ADT.
 accessTag
-  :: RuntimeValue ADT
-  -> RuntimeValue SymIntN64
+  :: ADT
+  -> Tag
 accessTag adt = do
-  let tag = "tag" :: ADT -~> SymIntN64
-  adt' <- adt
-  pure $ tag # adt'
+  let tag = "tag" :: ADT -~> Tag
+  tag # adt
 
 -- | Accessor for a field of an ADT.
 --
 -- The field is a pair of name and its result type.
 accessField
   :: forall m n
-   . MonadSymbolic m
+   . MonadError SymbolicError m
   => KnownPos n
   => RuntimeValue ADT
   -> String
@@ -518,8 +646,8 @@ accessField adt name ty
     construct = do
       let symbol = simple . identifier . fromString $ name
       let accessor = sym symbol :: ADT -~> t
-      scrut' <- adt
-      pure $ accessor # scrut'
+      adt' <- adt
+      pure $ accessor # adt'
 
 dataConAccessorNames :: DataCon -> [String]
 dataConAccessorNames dataCon = do
