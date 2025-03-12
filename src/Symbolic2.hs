@@ -31,7 +31,6 @@ import Control.Monad (forM, unless)
 import Control.Monad.Except
 import Control.Monad.State
 import Control.Exception (ArithException)
-import Control.Applicative (Alternative (..))
 
 import Data.Foldable (find, forM_)
 import Data.String (IsString(..))
@@ -163,12 +162,12 @@ instance Outputable ModelValue' where
     Error err -> ppr err
 
 concreteValue
-  :: forall m n
+  :: forall m m' n
    . MonadError SymbolicError m
   => MonadCore m
   => KnownPos n
   => Model
-  -> Value n
+  -> Value m' n
   -> m ModelValue'
 concreteValue model = \case
   Int value -> prim @_ @(IntN n) value
@@ -229,6 +228,7 @@ concreteValue model = \case
   -- should make a new one... Maybe we should make an error for concrete lookup
   -- failures. Alternatively, I guess we could actually just return the type as
   -- is no? It is actually also a concrete version in a sense.
+  Fun _ _ -> throwError IllTyped
   Ty _ -> throwError IllTyped
   Co _ -> throwError IllTyped
   where
@@ -245,12 +245,12 @@ concreteValue model = \case
         Right value' -> pure $ Primitive (ModelValue value')
         Left err -> pure $ Error err
 
-asIntN64 :: MonadError SymbolicError m => Value n -> m (RuntimeValue SymIntN64)
+asIntN64 :: MonadError SymbolicError m => Value m n -> m (RuntimeValue SymIntN64)
 asIntN64 = \case
   Int64 value -> pure value
   _ -> throwError IllTyped
 
-asADT :: MonadError SymbolicError m => Value n -> m (RuntimeValue ADT)
+asADT :: MonadError SymbolicError m => Value m n -> m (RuntimeValue ADT)
 asADT = \case
   ADT _ value -> pure value
   Cast' _ value -> asADT value
@@ -260,32 +260,20 @@ saturated
   :: MonadSymbolic m
   => KnownPos n
   => CoreExpr
-  -> m ([Value n], Value n)
+  -> m ([Value m n], Value m n)
 saturated expr = do
-  symbolic <- eval emptyTM expr
+  value <- eval emptyTM expr
   let (bndrs, _) = collectBinders expr
   symBndrs <- forM bndrs symbolicInstance
-  let symBndrs' = Val <$> symBndrs
-  result <- saturate symBndrs' symbolic
+  result <- foldM' value symBndrs $ \value' bndr -> do
+    applyValue value' bndr
   pure (symBndrs, result)
-
-saturate
-  :: MonadError SymbolicError m
-  => KnownPos n
-  => [Symbolic m n]
-  -> Symbolic m n
-  -> m (Value n)
-saturate (arg:args) (Fun fun) = do
-  result <- fun arg
-  saturate args result 
-saturate [] (Val val) = pure val
-saturate _ _ = throwError IllTyped
 
 symbolicInstance
   :: MonadError SymbolicError m
   => KnownPos n
   => Id
-  -> m (Value n)
+  -> m (Value m n)
 symbolicInstance bndr = typedValue symbolic ty
   where
     symbolic :: Solvable c a => RuntimeValue a
@@ -336,29 +324,30 @@ instance Outputable SymbolicError where
     UnsupportedExpr -> text "unsupported expression"
     UnboundVariable -> text "unbound variable"
 
-data Value n where
-  -- Char :: RuntimeValue (SymWordN 31) -> Value n
-  -- BigNat :: RuntimeValue SymInteger -> Value n
-  Int :: RuntimeValue (SymIntN n) -> Value n
-  Int8 :: RuntimeValue SymIntN8 -> Value n
-  Int16 :: RuntimeValue SymIntN16 -> Value n
-  Int32 :: RuntimeValue SymIntN32 -> Value n
-  Int64 :: RuntimeValue SymIntN64 -> Value n
-  Word :: RuntimeValue (SymWordN n) -> Value n
-  Word8 :: RuntimeValue SymWordN8 -> Value n
-  Word16 :: RuntimeValue SymWordN16 -> Value n
-  Word32 :: RuntimeValue SymWordN32 -> Value n
-  Word64 :: RuntimeValue SymWordN64 -> Value n
-  Float :: RuntimeValue SymFP32 -> Value n
-  Double :: RuntimeValue SymFP64 -> Value n
-  ADT :: Type -> RuntimeValue ADT -> Value n
-  -- TODO: I don't really like the prime on the name here. Maybe we could co for
-  -- some other name?
-  Cast' :: Coercion -> Value n -> Value n
-  Ty :: Type -> Value n
-  Co :: Coercion -> Value n
+data Value m n where
+  -- Char :: RuntimeValue (SymWordN 31) -> Value m n
+  -- BigNat :: RuntimeValue SymInteger -> Value m n
+  Int :: RuntimeValue (SymIntN n) -> Value m n
+  Int8 :: RuntimeValue SymIntN8 -> Value m n
+  Int16 :: RuntimeValue SymIntN16 -> Value m n
+  Int32 :: RuntimeValue SymIntN32 -> Value m n
+  Int64 :: RuntimeValue SymIntN64 -> Value m n
+  Word :: RuntimeValue (SymWordN n) -> Value m n
+  Word8 :: RuntimeValue SymWordN8 -> Value m n
+  Word16 :: RuntimeValue SymWordN16 -> Value m n
+  Word32 :: RuntimeValue SymWordN32 -> Value m n
+  Word64 :: RuntimeValue SymWordN64 -> Value m n
+  Float :: RuntimeValue SymFP32 -> Value m n
+  Double :: RuntimeValue SymFP64 -> Value m n
+  ADT :: Type -> RuntimeValue ADT -> Value m n
+  -- TODO: I don't really like the prime on the name of Cast here. Maybe we
+  -- could co for some other name?
+  Cast' :: Coercion -> Value m n -> Value m n
+  Fun :: Kind -> (Value m n -> m (Value m n)) -> Value m n
+  Ty :: Type -> Value m n
+  Co :: Coercion -> Value m n
 
-mkCast' :: Coercion -> Value n -> Value n
+mkCast' :: Coercion -> Value m n -> Value m n
 mkCast' co = \case
   Cast' co' value -> go (mkTransCo co' co) value mkCast'
   value -> go co value Cast'
@@ -366,15 +355,6 @@ mkCast' co = \case
     go co' value cont
       | isReflexiveCo co' = value
       | otherwise = cont co' value
-
--- TODO: Somehow this split feels somewhat unnatural. I think it would be better
--- to have Fun be part of Value. A giveaway here is that there is no sensible
--- name for this type. It is, in fact, also a value. Maybe we could do like a
--- 'Prim n' thing for all primitive values. Then ADT, Ty And Fun can be part of
--- value.
-data Symbolic m n where
-  Val :: Value n -> Symbolic m n
-  Fun :: (Symbolic m n -> m (Symbolic m n)) -> Symbolic m n
 
 type MonadSymbolic m = (MonadError SymbolicError m, MonadState SymbolicState m, MonadCore m)
 
@@ -388,7 +368,7 @@ freshADT = state $ \s -> do
   let s' = s { nextADT = adt + 1}
   (pure adt, s')
 
-type Environment m n = UniqDFM Var (Symbolic m n)
+type Environment m n = UniqDFM Var (Value m n)
 
 eval
   :: forall m n
@@ -396,17 +376,15 @@ eval
   => KnownPos n
   => Environment m n
   -> CoreExpr
-  -> m (Symbolic m n)
+  -> m (Value m n)
 eval env = \case
   Var var | Just op <- isPrimOpId_maybe var -> symPrimOp op
   Var var | Just dataCon <- isDataConId_maybe var -> symDataCon dataCon
   Var var -> whyFail UnboundVariable $ lookupTM var env
 
-  Lit lit -> do
-    lit' <- symLiteral lit
-    pure $ Val lit'
+  Lit lit -> symLiteral lit
 
-  Lam bndr body -> pure . Fun $ \arg -> do
+  Lam bndr body -> pure . Fun (varType bndr) $ \arg -> do
     -- TODO: I think it would be good to have a check here to ensure that the
     -- argument has the correct type.
     let env' = insertTM bndr arg env
@@ -415,7 +393,7 @@ eval env = \case
   App fun arg -> do
     fun' <- eval env fun
     arg' <- eval env arg
-    applySymbolic fun' arg'
+    applyValue fun' arg'
 
   Let (NonRec bndr arg) body -> do
     arg' <- eval env arg
@@ -432,42 +410,39 @@ eval env = \case
     scrut' <- eval env scrut
     let env' = insertTM bndr scrut' env
 
-    scrut'' <- case scrut' of
-      Val scrut'' -> pure scrut''
-      Fun _ -> throwError IllTyped
+    alts' <- forM alts $ symAlt env' scrut'
 
-    alts' <- forM alts $ symAlt env' scrut''
+    invalid <- invalidValue ty
 
-    final <- invalidSymbolic ty
+    foldM' invalid alts' $ \fl (cond, rhs) -> do
+      iteValue cond rhs fl
 
-    foldM' final alts' $ \fl (cond, rhs) -> do
-      symBranch cond rhs fl
-
-  -- TODO: I think we can actually do something reasonable here.
   Cast expr co -> do
     value <- eval env expr
-    case value of
-      -- FIXME: We should just be able to support this once we merge Symbolic
-      -- and Value.
-      Fun _ -> throwError UnsupportedExpr
-      Val value' -> pure . Val $ mkCast' co value'
+    pure $ mkCast' co value
 
   -- Ticks do not affect evaluation, thus we can skip it.
   Tick _ expr -> eval env expr
 
   -- FIXME: I should substitute the type.
-  Type ty -> pure $ Val (Ty ty)
+  Type ty -> pure $ Ty ty
 
   -- FIXME: I should substitute the coercion.
-  Coercion co -> pure $ Val (Co co)
+  Coercion co -> pure $ Co co
 
-applySymbolic
+applyValue
   :: MonadError SymbolicError m
-  => Symbolic m n
-  -> Symbolic m n
-  -> m (Symbolic m n)
-applySymbolic fun arg = case fun of
-  Fun fun' -> fun' arg
+  => Value m n
+  -> Value m n
+  -> m (Value m n)
+applyValue fun arg = case fun of
+  Fun _ty fun' -> do
+    -- Ensure the types match up.
+    -- let ty' = valueType arg
+    -- unless (ty `eqType` ty') $ throwError IllTyped
+
+    -- Run the inner function.
+    fun' arg
   _ -> throwError IllTyped
 
 -- | Return the condition to run this alternative and its symbolic rhs.
@@ -479,9 +454,9 @@ symAlt
    . MonadSymbolic m
   => KnownPos n
   => Environment m n
-  -> Value n
+  -> Value m n
   -> CoreAlt
-  -> m (RuntimeValue SymBool, Symbolic m n)
+  -> m (RuntimeValue SymBool, Value m n)
 symAlt env scrut = \case
   Alt (DataAlt dataCon) bndrs rhs -> do
     -- Ensure the scrutinee is actually an ADT.
@@ -496,7 +471,7 @@ symAlt env scrut = \case
     let names = dataConAccessorNames dataCon
     let accessors = zip names bndrs
     fields <- forM accessors $ \(name, bndr) -> do
-      Val <$> accessField scrut' name (varType bndr)
+      accessField scrut' name (varType bndr)
 
     -- Extend the environment with field accessors for each binder.
     let env' = foldl' (flip $ uncurry insertTM) env $ zip bndrs fields
@@ -542,7 +517,7 @@ symDataCon
    . MonadSymbolic m
   => KnownPos n
   => DataCon
-  -> m (Symbolic m n)
+  -> m (Value m n)
 symDataCon dataCon = do
   -- The root creates the actually symbolic DataCon using the given type
   -- instantiation.
@@ -554,7 +529,7 @@ symDataCon dataCon = do
   -- Create an n-ary function accepting types, which will be used to instantiate
   -- the data constructor.
   final <- nArity root nUnivTys $ \_ univ -> \case
-    Val (Ty ty) -> pure $ ty : univ
+    Ty ty -> pure $ ty : univ
     _ -> throwError IllTyped
 
   -- We start with an emtpy list of type instances.
@@ -569,7 +544,7 @@ symDataConInst
   -> [Type]
   -- ^ The types with which we will instantiate universal quantifiers of the
   -- DataCon.
-  -> m (Symbolic m n)
+  -> m (Value m n)
 symDataConInst dataCon tys = do
   -- Create a fresh identifier for the ADT.
   adt <- freshADT
@@ -587,19 +562,15 @@ symDataConInst dataCon tys = do
   -- The root is an ADT that asserts the given conditional holds.
   let root cond = do
         let ty = mkTyConApp (dataConTyCon dataCon) tys
-        let adt' = ADT ty $ assertRuntime cond adt
-        pure $ Val adt'
+        let value = assertRuntime cond adt
+        pure $ ADT ty value
 
   -- Accumulate a function that takes the fields' as arguments. We pass a
   -- conditional to the root that states the field accessors are equal to the
   -- actual arguments.
   final <- nArity root fields $ \field cond arg -> do
-    arg' <- case arg of
-      Fun _ -> throwError UnsupportedExpr
-      Val v -> pure v
-
     -- Constraint the field of the ADT to be equivalent to the argument.
-    extra <- cmpValue field arg'
+    extra <- cmpValue field arg
     pure $ liftA2 (.&&) extra cond
 
   -- As a final constraint, the ADT tag should match the given DataCon.
@@ -614,15 +585,17 @@ nArity
   :: forall m t n a b
    . Monad m
   => Foldable t
-  => (b -> m (Symbolic m n))
+  => (b -> m (Value m n))
   -- ^ Root value and what we accumulate.
   -> t a
   -- ^ What we fold over. Decides the arity of the function.
-  -> (a -> b -> Symbolic m n -> m b)
+  -> (a -> b -> Value m n -> m b)
   -- ^ Accumulation function
-  -> m (b -> m (Symbolic m n))
+  -> m (b -> m (Value m n))
 nArity acc xs f = foldM' acc xs $ \acc' x -> do
-  pure $ \y -> pure . Fun $ \arg -> do
+  -- FIXME: I want to ensure the argument is always the actual ADT we expect.
+  -- Also, I have to pass in the types for this one with the new setup.
+  pure $ \y -> pure . Fun undefined $ \arg -> do
     res <- f x y arg
     acc' res
 
@@ -675,7 +648,7 @@ accessField
   => RuntimeValue ADT
   -> String
   -> Type
-  -> m (Value n)
+  -> m (Value m n)
 accessField adt name ty
   -- TODO: Why can we not pass 'construct' to 'typedValue'? I don't understand
   -- why it has overlapping instances... For now, we just duplicate some code...
@@ -718,8 +691,8 @@ dataConAccessorNames dataCon = do
 cmpValue
   :: MonadError SymbolicError m
   => KnownPos n
-  => Value n
-  -> Value n
+  => Value m n
+  -> Value m n
   -> m (RuntimeValue SymBool)
 cmpValue (Int lhs) (Int rhs) = pure $ cmpRuntime lhs rhs
 cmpValue (Int8 lhs) (Int8 rhs) = pure $ cmpRuntime lhs rhs
@@ -790,9 +763,9 @@ iteValue
    . KnownPos n
   => MonadError SymbolicError m
   => RuntimeValue SymBool
-  -> Value n
-  -> Value n
-  -> m (Value n)
+  -> Value m n
+  -> Value m n
+  -> m (Value m n)
 iteValue cond (Int lhs) (Int rhs) = pure . Int $ iteRuntime cond lhs rhs
 iteValue cond (Int8 lhs) (Int8 rhs) = pure . Int8 $ iteRuntime cond lhs rhs
 iteValue cond (Int16 lhs) (Int16 rhs) = pure . Int16 $ iteRuntime cond lhs rhs
@@ -810,48 +783,39 @@ iteValue cond (Cast' lco lhs) (Cast' rco rhs) = do
   unless (lco `eqCoercion` rco) $ throwError IllTyped
   result <- iteValue cond lhs rhs
   pure $ Cast' lco result
+iteValue cond (Fun lty lhs) (Fun rty rhs) = do
+  unless (lty `eqType` rty) $ throwError IllTyped
+  pure . Fun lty $ \arg -> do
+    lhs' <- lhs arg
+    rhs' <- rhs arg
+    iteValue cond lhs' rhs'
 iteValue _ _ _ = throwError IllTyped
 
--- | Branch on a symbolic runtime boolean.
-symBranch
-  :: MonadError SymbolicError m
-  => KnownPos n
-  => RuntimeValue SymBool
-  -> Symbolic m n
-  -> Symbolic m n
-  -> m (Symbolic m n)
-symBranch cond (Fun tr) (Fun fl) = pure . Fun $ \arg -> do
-  tr' <- tr arg
-  fl' <- fl arg
-  symBranch cond tr' fl'
-symBranch cond (Val tr) (Val fl) = do
-  value <- iteValue cond tr fl
-  pure $ Val value
-symBranch _ _ _ = throwError IllTyped
-
--- | Get the Haskell type corresponding to the current value.
+-- | Get the Haskell Type or Kind corresponding to the current value.
 valueType
   :: forall m n
-   . Alternative m
-  => Value n
-  -> m Type
+   . Value m n
+  -> Kind
 valueType = \case
-  Int _ -> pure intPrimTy
-  Int8 _ -> pure int8PrimTy
-  Int16 _ -> pure int16PrimTy
-  Int32 _ -> pure int32PrimTy
-  Int64 _ -> pure int64PrimTy
-  Word _ -> pure wordPrimTy
-  Word8 _ -> pure word8PrimTy
-  Word16 _ -> pure word16PrimTy
-  Word32 _ -> pure word32PrimTy
-  Word64 _ -> pure word64PrimTy
-  Float _ -> pure floatPrimTy
-  Double _ -> pure doublePrimTy
-  ADT ty _ -> pure ty
-  Cast' co _ -> pure $ coercionRKind co
-  Ty _ -> empty
-  Co _ -> empty
+  Int _ -> intPrimTy
+  Int8 _ -> int8PrimTy
+  Int16 _ -> int16PrimTy
+  Int32 _ -> int32PrimTy
+  Int64 _ -> int64PrimTy
+  Word _ -> wordPrimTy
+  Word8 _ -> word8PrimTy
+  Word16 _ -> word16PrimTy
+  Word32 _ -> word32PrimTy
+  Word64 _ -> word64PrimTy
+  Float _ -> floatPrimTy
+  Double _ -> doublePrimTy
+  ADT ty _ -> ty
+  Cast' co _ -> coercionRKind co
+  -- FIXME: The function just tracks the argument type. I guess we could have it
+  -- track the full type. Not sure what the alternative would be...
+  Fun _ty _ -> undefined
+  Ty ty -> typeKind ty
+  Co co -> coercionType co
 
 -- TODO: I guess this should just return a maybe, as there is only one reason
 -- why this would possibly fail.
@@ -861,7 +825,7 @@ typedValue
   => KnownPos n
   => (forall c a. Solvable c a => RuntimeValue a)
   -> Type
-  -> m (Value n)
+  -> m (Value m n)
 typedValue fun ty
   | ty `eqType` intPrimTy = pure $ Int fun
   | ty `eqType` int8PrimTy = pure $ Int8 fun
@@ -881,6 +845,9 @@ typedValue fun ty
     let co' = mkSymCo co
     pure $ mkCast' co' value
   | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT ty fun
+  | Just (_, _, _, res) <- splitFunTy_maybe ty = do
+    let fun' _ = typedValue fun res
+    pure $ Fun ty fun'
   | otherwise = throwError UnsupportedExpr
 
 -- | A value that should not be reachable.
@@ -891,41 +858,29 @@ invalidValue
    . MonadError SymbolicError m
   => KnownPos n
   => Type
-  -> m (Value n)
+  -> m (Value m n)
 invalidValue = typedValue $ throwError Invalid
-
--- | A symbolic for statements that cannot be reached.
---
--- It will be typed according to the given core type.
-invalidSymbolic
-  :: MonadError SymbolicError m
-  => KnownPos n
-  => Type
-  -> m (Symbolic m n)
-invalidSymbolic ty = case splitFunTy_maybe ty of
-  Just (_, _, _, res) -> pure . Fun $ \_ -> invalidSymbolic res
-  _ -> Val <$> invalidValue ty
 
 -- TODO: Add support for all primitive operations.
 symPrimOp
   :: forall m n
    . MonadError SymbolicError m
   => PrimOp
-  -> m (Symbolic m n)
+  -> m (Value m n)
 symPrimOp = \case
   Int64AddOp ->
-    pure . Fun $ \case
-      Val (Int64 lhs) -> pure . Fun $ \case
-        Val (Int64 rhs) -> pure . Val . Int64 $ do
+    pure . Fun int64PrimTy $ \case
+      Int64 lhs -> pure . Fun int64PrimTy $ \case
+        Int64 rhs -> pure . Int64 $ do
           lhs' <- lhs
           rhs' <- rhs
           mrgReturn $ lhs' + rhs'
         _ -> throwError IllTyped
       _ -> throwError IllTyped
   Int64QuotOp ->
-    pure . Fun $ \case
-      Val (Int64 lhs) -> pure . Fun $ \case
-        Val (Int64 rhs) -> pure . Val . Int64 $ do
+    pure . Fun int64PrimTy $ \case
+      Int64 lhs -> pure . Fun int64PrimTy $ \case
+        Int64 rhs -> pure . Int64 $ do
           lhs' <- lhs
           rhs' <- rhs
           mrgModifyError (const DivideByZero) $ do
@@ -940,7 +895,7 @@ symLiteral
    . MonadError SymbolicError m
   => KnownPos n
   => Literal
-  -> m (Value n)
+  -> m (Value m n)
 symLiteral = \case
   LitNumber ty num -> case ty of
     LitNumInt -> pure $ Int num'
