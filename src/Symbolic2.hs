@@ -18,6 +18,7 @@ module Symbolic2
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Map.Expr (TrieMap(..), insertTM)
 import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Core.Unify (tcMatchTy)
 import GHC.Types.Unique.DFM (UniqDFM)
 import GHC.Platform (Platform (platformWordSize))
 import GHC.Generics (Generic)
@@ -26,28 +27,51 @@ import GHC.Builtin.Types.Prim
 import GHC.Tc.Utils.TcType (eqType, tcSplitSigmaTy, substTy)
 import GHC.MonadCore
 
-import Unsafe.Coerce (unsafeCoerce)
-import GHC.TypeLits (KnownNat, type (<=), OrderingI (..))
-import GHC.TypeNats (cmpNat)
-
-import Control.Monad (forM, foldM)
+import Control.Monad (forM, unless)
 import Control.Monad.Except
 import Control.Monad.State
 import Control.Exception (ArithException)
+import Control.Applicative (Alternative (..))
 
-import Data.Data (type (:~:) (..), Proxy (..))
-import Data.Foldable (find)
+import Data.Foldable (find, forM_)
 import Data.String (IsString(..))
-import Data.Type.Ord (Compare)
+import Data.Functor ((<&>))
 
 -- TODO: There has to be a better way to not import pretty printing stuff from
 -- grisette...
-import Grisette hiding (PPrintType (..), (<+>), nest, punctuate, comma, vcat, braces, lbrace, rbrace)
+import Grisette hiding (PPrintType (..), (<>), (<+>), nest, punctuate, comma, vcat, braces, lbrace, rbrace)
 import Grisette.Lib.Control.Monad.Except (mrgModifyError)
 import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..))
-import GHC.Core.Unify (tcMatchTy)
-import Data.Functor ((<&>))
 
+import SymUtil
+
+-- TODO: Importantant things to do right now
+-- - 'Symbolic' and 'Value' kind of feel like they should be merged. We should
+-- just have one 'Value' data type.
+--
+-- - We should add support for casts and coercions. I guess this requires at
+-- least a Coercion to be added as possible 'Value'. Other than that, I guess it
+-- depends on whatever we should do for Cast statements.
+--   - It works now, but is still very messy. I'm wondering if I really should
+--     track the full coercion or just the current result type.
+--
+-- - We should attach type signatures to ADT in Value so we can re-construct a
+-- concrete version.
+--   - First part done. Now we should actually use it!
+--   - I think it makes sense to do this for functions as well btw!
+--
+-- - Support for more primitive operations! I guess I want to encaspulate how to
+-- gather arguments to minimize code duplication.
+
+-- TODO: Some ideas:
+-- - Should we also attach a type signature to functions? Then we could actually
+--   print a symbolic function. It would also help with saturating it...
+--
+-- - How about supporting the function primitive from grisette. It seems to me
+--   that it should be preferred wherever possible, as grisette probably has
+--   some optimisations for it.
+
+-- TODO: All this testing stuff is super ugly...
 testSymbolic
   :: MonadCore m
   => HasDynFlags m
@@ -55,7 +79,9 @@ testSymbolic
   => CoreExpr
   -> m ()
 testSymbolic expr = do
+  dbg expr
   dflags <- getDynFlags
+  -- TODO: Pass in the actual platform wordsize for the solver.
   let _wordSize = platformWordSize $ targetPlatform dflags
   -- let config = Config
   --       { wordSize = toWordSize . platformWordSize $ targetPlatform dflags
@@ -64,9 +90,7 @@ testSymbolic expr = do
   let s = SymbolicState
         { nextADT = 0
         }
-  -- value <- case intToIntFun @_ @64 expr of
-  --   Right value -> pure value
-  --   _ -> fail "No int to int function"
+
   symbolic <- flip evalStateT s $ runExceptT $ do
     (bndrs, result) <- saturated @_ @64 expr 
     result' <- asADT result
@@ -74,7 +98,12 @@ testSymbolic expr = do
 
   (args, value) <- case symbolic of
     Right (bndrs, value) -> pure (bndrs, value)
-    Left err -> fail $ "Error creating symbolic version: " <> show err
+    Left err -> fail $ "Error creating symbolic version: " ++ show err
+
+  forM_ args $ \case
+    Cast' co _ -> dbg co
+    ADT ty _ -> dbg ty
+    _ -> dbg' "whut?"
 
   dbg' $ show value
 
@@ -84,38 +113,35 @@ testSymbolic expr = do
           }
         }
 
-  bndrs' <- liftCore . liftIO $ do
-    let f = sym "0" :: ADT -~> ADT
+  result <- liftCore . liftIO $ do
+    -- let f = sym "0" :: ADT -~> ADT
     let g = sym "0" :: ADT -~> SymIntN64
     -- result <- solve z3' $ (fmap ((g #) . (f #)) value) .== pure (0x10)
     let translate = \case
-          Right val -> g # (f # val) .== 0x10
-          -- Right val -> g # val .== 0x10
+          -- Right val -> g # (f # val) .== 0x10
+          Right val -> g # val .== 0x10
           -- TODO: I guess we want to handle Invalid differently from the other
           -- errors?
           Left _ -> false
 
-    result <- solveExcept z3' translate value
+    solveExcept z3' translate value
 
-    case result of
-      Right model -> do
-        let bndrs = fst (collectBinders expr)
-        let bndrs' = forM @_ @(Either _) (zip args bndrs) $ \(arg, bndr) -> do
-              val <- concreteValue model (varType bndr) arg
-              pure $ ppr (occName bndr) <+> "=" <+> ppr val
-              -- pure (occName bndr, val)
+  result' <- case result of
+    Right model -> do
+      let bndrs = fst (collectBinders expr)
+      bndrs' <- runExceptT $ forM (zip args bndrs) $ \(arg, bndr) -> do
+        val <- concreteValue model arg
+        pure $ ppr (occName bndr) <+> "=" <+> ppr val
 
-        pure bndrs'
-      Left _ -> undefined
+      pure bndrs'
+    Left _ -> undefined
 
-  dbg bndrs'
-    -- result <- solve z3' $ value .== throwError DivideByZero
-    -- let x = sym "x" :: SymIntN64
-    -- let f = sym "0" :: SymIntN64 -~> SymIntN64
-    -- let f' = sym "0" :: SymIntN32 -~> SymIntN64
-    -- result <- solve z3' $ f # x ./= f' # fromInteger 0
-    -- print result
+  case result' of
+    Right bndrs -> forM_ bndrs dbg
+    Left err -> dbg err
 
+-- TODO: I think this is not the cleanest representation. We should make this
+-- a bit better.
 data ModelValue' where
   Record :: DataCon -> [(String, ModelValue')] -> ModelValue'
   Primitive :: ModelValue -> ModelValue'
@@ -124,34 +150,27 @@ data ModelValue' where
   -- this for now...
   -- Unknown :: ModelValue'
 
-instance Show ModelValue' where
-  show = \case
-    Record dataCon fields -> showSDocUnsafe (ppr dataCon) <> " " <> show fields
-    Primitive value -> show value
-    Error err -> show err
-
+-- TODO: The indentation is a bit off because we vertically nest only the
+-- DataCon, while we should nest it with the assignment 'value = DataCon'.
 instance Outputable ModelValue' where
   ppr = \case
-    Record dataCon fields -> ppr dataCon $+$ nest 2 (braces' (vcat fields'))
+    Record dataCon fields -> ppr dataCon $+$ (nest 2 . braces' . vcat $ fields')
       where
         braces' x = lbrace <+> x $+$ rbrace
         fields' = punctuate (text ", ") $ fields <&> pair
         pair (name, value) = text name <+> "=" <+> ppr value
-    -- Record dataCon fields -> ppr dataCon <+> " " <> show fields
     Primitive value -> text $ show value
     Error err -> ppr err
 
 concreteValue
   :: forall m n
    . MonadError SymbolicError m
+  => MonadCore m
   => KnownPos n
   => Model
-  -> Type
-  -- ^ TODO: This is only here for ADT. I should just track the type of an ADT
-  -- inside of it!
   -> Value n
   -> m ModelValue'
-concreteValue model ty = \case
+concreteValue model = \case
   Int value -> prim @_ @(IntN n) value
   Int8 value -> prim @_ @IntN8 value
   Int16 value -> prim @_ @IntN16 value
@@ -164,9 +183,17 @@ concreteValue model ty = \case
   Word64 value -> prim @_ @WordN64 value
   Float value -> prim @_ @FP32 value
   Double value -> prim @_ @FP64 value
-  ADT adt -> case evalSymToCon @_ @(Either RuntimeError ADT) model adt of
+  ADT ty adt -> case evalSymToCon @_ @(Either RuntimeError ADT) model adt of
     Right adt' -> do
+      let x = do
+            (tyCon, _) <- splitTyConApp_maybe ty
+            tyConDataCons_maybe tyCon
+      dbg' "==========="
+      dbg ty
+      dbg x
       let tag = evalSymToCon @_ @Tag model $ accessTag adt'
+      -- TODO: I guess this could also just mean that the value is irrelevant
+      -- no? This perhaps should return Unknown on failure.
       dataCon <- whyFail IllTyped $ tagToDataCon tag ty
       let (_, _, funTy) = tcSplitSigmaTy $ dataConRepType dataCon
       let (argTys, resTy) = splitFunTys funTy
@@ -179,16 +206,31 @@ concreteValue model ty = \case
       let accessors = zip names argTys'
       fields <- forM accessors $ \(name, ty') -> do
         field <- accessField @m @n adt name ty'
-        concreteValue model ty' field
+        concreteValue model field
 
       pure $ Record dataCon (zip names fields)
 
     Left err -> pure $ Error err
 
-  -- TODO: There should be a better error to emit than this no? Maybe we should
-  -- make a new one... Maybe we should make an error for concrete lookup
-  -- failures.
+  -- TODO: I don't think this is a nice way to implement this...
+  Cast' co value' -> go value' $ coercionRKind co
+    where
+      go value ty | not $ ty `eqType` coercionLKind co = do
+        (tyCon, tys) <- whyFail IllTyped $ splitTyConApp_maybe ty
+        dataCon <- whyFail undefined $ tyConSingleDataCon_maybe tyCon
+        argTy <- case dataConInstArgTys dataCon tys of
+          [argTy] -> pure $ scaledThing argTy
+          _ -> throwError IllTyped
+        arg' <- go value argTy
+        pure $ Record dataCon [("0", arg')]
+      go value _ = concreteValue model value
+
+  -- TODO: There should be a better error to emit than this no? Maybe we
+  -- should make a new one... Maybe we should make an error for concrete lookup
+  -- failures. Alternatively, I guess we could actually just return the type as
+  -- is no? It is actually also a concrete version in a sense.
   Ty _ -> throwError IllTyped
+  Co _ -> throwError IllTyped
   where
     prim
       :: forall a b
@@ -208,9 +250,10 @@ asIntN64 = \case
   Int64 value -> pure value
   _ -> throwError IllTyped
 
-asADT :: MonadError SymbolicError m => Value n -> m (RuntimeValue SymIntN64)
+asADT :: MonadError SymbolicError m => Value n -> m (RuntimeValue ADT)
 asADT = \case
-  ADT value -> pure value
+  ADT _ value -> pure value
+  Cast' _ value -> asADT value
   _ -> throwError IllTyped
 
 saturated
@@ -221,9 +264,7 @@ saturated
 saturated expr = do
   symbolic <- eval emptyTM expr
   let (bndrs, _) = collectBinders expr
-  symBndrs <- forM bndrs $ \bndr -> do
-    symBndr <- symbolicInstance bndr
-    pure $ symBndr
+  symBndrs <- forM bndrs symbolicInstance
   let symBndrs' = Val <$> symBndrs
   result <- saturate symBndrs' symbolic
   pure (symBndrs, result)
@@ -281,9 +322,7 @@ type RuntimeValue a = ExceptT RuntimeError Union a
 type ADT = SymIntN64
 
 -- | ADT tag to distinguish between constructors.
-type Tag = SymIntN64
-
-type KnownPos n = (KnownNat n, 1 <= n)
+type Tag = SymWordN64
 
 data SymbolicError where
   IllTyped :: SymbolicError
@@ -312,9 +351,21 @@ data Value n where
   Word64 :: RuntimeValue SymWordN64 -> Value n
   Float :: RuntimeValue SymFP32 -> Value n
   Double :: RuntimeValue SymFP64 -> Value n
-  -- TODO: Do we not maybe want to attach a Type to this?
-  ADT :: RuntimeValue ADT -> Value n
+  ADT :: Type -> RuntimeValue ADT -> Value n
+  -- TODO: I don't really like the prime on the name here. Maybe we could co for
+  -- some other name?
+  Cast' :: Coercion -> Value n -> Value n
   Ty :: Type -> Value n
+  Co :: Coercion -> Value n
+
+mkCast' :: Coercion -> Value n -> Value n
+mkCast' co = \case
+  Cast' co' value -> go (mkTransCo co' co) value mkCast'
+  value -> go co value Cast'
+  where
+    go co' value cont
+      | isReflexiveCo co' = value
+      | otherwise = cont co' value
 
 -- TODO: Somehow this split feels somewhat unnatural. I think it would be better
 -- to have Fun be part of Value. A giveaway here is that there is no sensible
@@ -336,19 +387,6 @@ freshADT = state $ \s -> do
   let adt = nextADT s
   let s' = s { nextADT = adt + 1}
   (pure adt, s')
-
--- bigNat :: RuntimeValue SymInteger -> Value' n
--- bigNat val = do
---   let conditional = val .>= 0
---   let err = throwError Invalid
---   BigNat' $ mrgIte conditional val err
-
--- char :: Char -> Value' n
--- char val = do
---   let conditional = val .>= 0
---   let val' = pure $ fromInteger val
---   let err = throwError Invalid
---   BigNat' $ mrgIte conditional val' err
 
 type Environment m n = UniqDFM Var (Symbolic m n)
 
@@ -406,16 +444,22 @@ eval env = \case
       symBranch cond rhs fl
 
   -- TODO: I think we can actually do something reasonable here.
-  Cast _expr _coercion -> throwError UnsupportedExpr
+  Cast expr co -> do
+    value <- eval env expr
+    case value of
+      -- FIXME: We should just be able to support this once we merge Symbolic
+      -- and Value.
+      Fun _ -> throwError UnsupportedExpr
+      Val value' -> pure . Val $ mkCast' co value'
 
   -- Ticks do not affect evaluation, thus we can skip it.
   Tick _ expr -> eval env expr
 
+  -- FIXME: I should substitute the type.
   Type ty -> pure $ Val (Ty ty)
 
-  -- TODO: Should we do anything with this. I think we do, but I'll have to
-  -- figure out the normal cast first...
-  Coercion _ -> throwError UnsupportedExpr
+  -- FIXME: I should substitute the coercion.
+  Coercion co -> pure $ Val (Co co)
 
 applySymbolic
   :: MonadError SymbolicError m
@@ -442,7 +486,7 @@ symAlt env scrut = \case
   Alt (DataAlt dataCon) bndrs rhs -> do
     -- Ensure the scrutinee is actually an ADT.
     scrut' <- case scrut of
-      ADT adt -> pure adt
+      ADT _ adt -> pure adt
       _ -> throwError IllTyped
 
     -- Whether the "tag" field on this ADT is equivalent to the DataCon.
@@ -474,12 +518,20 @@ symAlt env scrut = \case
     -- Return the condition to take this branch and the branch itself.
     pure (conditional, rhs')
 
-  -- FIXME: We should have an Invalid ite for defaults on data-alts, as we do
-  -- want to capture the range of alternatives (important for translating it
-  -- back to a readable result). I.e. the default should only be constructors
-  -- that exists for the given scrutinee.
   Alt DEFAULT [] rhs -> do
-    let conditional = pure true
+    let conditional = case scrut of
+          ADT ty adt -> do
+            -- Ensure that the tag is at least in range.
+            -- TODO: Should this not be a prerequisite for any ADT? I.e. that
+            -- whenever we create a symbolic ADT value this should be already
+            -- constrained? Not sure which is better, so I'll leave it here for
+            -- now.
+            let (tyCon, _) = splitTyConApp ty
+            let amount = length $ tyConDataCons tyCon
+            tag <- accessTag <$> adt
+            mrgReturn $ 0 .<= tag .&& tag .< fromIntegral amount
+          _ -> pure true
+            
     rhs' <- eval env rhs
     pure (conditional, rhs')
 
@@ -534,7 +586,8 @@ symDataConInst dataCon tys = do
 
   -- The root is an ADT that asserts the given conditional holds.
   let root cond = do
-        let adt' = ADT $ assertRuntime cond adt
+        let ty = mkTyConApp (dataConTyCon dataCon) tys
+        let adt' = ADT ty $ assertRuntime cond adt
         pure $ Val adt'
 
   -- Accumulate a function that takes the fields' as arguments. We pass a
@@ -549,7 +602,7 @@ symDataConInst dataCon tys = do
     extra <- cmpValue field arg'
     pure $ liftA2 (.&&) extra cond
 
-  -- As a final constraint, we constrain the ADT match the given DataCon.
+  -- As a final constraint, the ADT tag should match the given DataCon.
   final $ adtIsDataCon adt dataCon
 
 -- | Create a function with the arity of whatever we are folding over.
@@ -613,6 +666,8 @@ accessTag adt = do
 -- | Accessor for a field of an ADT.
 --
 -- The field is a pair of name and its result type.
+-- TODO: We should create a Field data structure as they're kind of
+-- interconnected. It would make the calls of this function a bit cleaner.
 accessField
   :: forall m n
    . MonadError SymbolicError m
@@ -636,7 +691,7 @@ accessField adt name ty
   | ty `eqType` word64PrimTy = pure $ Word64 construct
   | ty `eqType` floatPrimTy = pure $ Float construct
   | ty `eqType` doublePrimTy = pure $ Double construct
-  | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT construct
+  | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT ty construct
   | otherwise = throwError UnsupportedExpr
   where
     construct
@@ -678,7 +733,12 @@ cmpValue (Word32 lhs) (Word32 rhs) = pure $ cmpRuntime lhs rhs
 cmpValue (Word64 lhs) (Word64 rhs) = pure $ cmpRuntime lhs rhs
 cmpValue (Float lhs) (Float rhs) = pure $ cmpRuntime lhs rhs
 cmpValue (Double lhs) (Double rhs) = pure $ cmpRuntime lhs rhs
-cmpValue (ADT lhs) (ADT rhs) = pure $ cmpRuntime lhs rhs
+cmpValue (ADT lty lhs) (ADT rty rhs) = do
+  unless (lty `eqType` rty) $ throwError IllTyped
+  pure $ cmpRuntime lhs rhs
+cmpValue (Cast' lco lhs) (Cast' rco rhs) = do
+  unless (lco `eqCoercion` rco) $ throwError IllTyped
+  cmpValue lhs rhs
 cmpValue _ _ = throwError IllTyped
 
 -- | Compare two runtime values.
@@ -702,11 +762,6 @@ cmpRuntime lhs rhs =
 --
 -- If the conditional of an if statement can fail, we first wish to check this
 -- before proceeding to choose either branch. This function captures that idea.
--- TODO: We should make a lazy iteRuntime. This one is useful for case
--- expressions, but not for assertions. Assertions should not force evaluation,
--- but just restrict computation given no failure occurred. Maybe the problem
--- is in the comparison function cmpRuntime btw. I'll have to think about it
--- once I add support for bottom values.
 iteRuntime
   :: SimpleMergeable a
   => RuntimeValue SymBool
@@ -718,8 +773,11 @@ iteRuntime cond tr fl =
   mrgIte cond' tr fl
 
 -- | Assert that the given condition holds.
--- FIXME: This should respect lazy semantics. The current implementation forces
--- the conditional, which is not what we want from an assert.
+-- FIXME: This should respect lazy semantics. The current implementation
+-- forces the conditional, which is not what we want from an assert. Assertions
+-- should not force evaluation, but just restrict computation given no failure
+-- occurred. Maybe the problem is in the comparison function cmpRuntime btw.
+-- I'll have to think about it once I add support for bottom values.
 assertRuntime
   :: SimpleMergeable a
   => RuntimeValue SymBool
@@ -745,7 +803,13 @@ iteValue cond (Word8 lhs) (Word8 rhs) = pure . Word8 $ iteRuntime cond lhs rhs
 iteValue cond (Word16 lhs) (Word16 rhs) = pure . Word16 $ iteRuntime cond lhs rhs
 iteValue cond (Word32 lhs) (Word32 rhs) = pure . Word32 $ iteRuntime cond lhs rhs
 iteValue cond (Word64 lhs) (Word64 rhs) = pure . Word64 $ iteRuntime cond lhs rhs
-iteValue cond (ADT lhs) (ADT rhs) = pure . ADT $ iteRuntime cond lhs rhs
+iteValue cond (ADT lty lhs) (ADT rty rhs) = do
+  unless (lty `eqType` rty) $ throwError IllTyped
+  pure . ADT lty $ iteRuntime cond lhs rhs
+iteValue cond (Cast' lco lhs) (Cast' rco rhs) = do
+  unless (lco `eqCoercion` rco) $ throwError IllTyped
+  result <- iteValue cond lhs rhs
+  pure $ Cast' lco result
 iteValue _ _ _ = throwError IllTyped
 
 -- | Branch on a symbolic runtime boolean.
@@ -765,18 +829,32 @@ symBranch cond (Val tr) (Val fl) = do
   pure $ Val value
 symBranch _ _ _ = throwError IllTyped
 
--- | A symbolic for statements that cannot be reached.
---
--- It will be typed according to the given core type.
-invalidSymbolic
-  :: MonadError SymbolicError m
-  => KnownPos n
-  => Type
-  -> m (Symbolic m n)
-invalidSymbolic ty = case splitFunTy_maybe ty of
-  Just (_, _, _, res) -> pure . Fun $ \_ -> invalidSymbolic res
-  _ -> Val <$> invalidValue ty
+-- | Get the Haskell type corresponding to the current value.
+valueType
+  :: forall m n
+   . Alternative m
+  => Value n
+  -> m Type
+valueType = \case
+  Int _ -> pure intPrimTy
+  Int8 _ -> pure int8PrimTy
+  Int16 _ -> pure int16PrimTy
+  Int32 _ -> pure int32PrimTy
+  Int64 _ -> pure int64PrimTy
+  Word _ -> pure wordPrimTy
+  Word8 _ -> pure word8PrimTy
+  Word16 _ -> pure word16PrimTy
+  Word32 _ -> pure word32PrimTy
+  Word64 _ -> pure word64PrimTy
+  Float _ -> pure floatPrimTy
+  Double _ -> pure doublePrimTy
+  ADT ty _ -> pure ty
+  Cast' co _ -> pure $ coercionRKind co
+  Ty _ -> empty
+  Co _ -> empty
 
+-- TODO: I guess this should just return a maybe, as there is only one reason
+-- why this would possibly fail.
 typedValue
   :: forall m n
    . MonadError SymbolicError m
@@ -797,7 +875,12 @@ typedValue fun ty
   | ty `eqType` word64PrimTy = pure $ Word64 fun
   | ty `eqType` floatPrimTy = pure $ Float fun
   | ty `eqType` doublePrimTy = pure $ Double fun
-  | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT fun
+  | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
+  , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
+    value <- typedValue fun ty'
+    let co' = mkSymCo co
+    pure $ mkCast' co' value
+  | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT ty fun
   | otherwise = throwError UnsupportedExpr
 
 -- | A value that should not be reachable.
@@ -811,9 +894,17 @@ invalidValue
   -> m (Value n)
 invalidValue = typedValue $ throwError Invalid
 
--- | Annotate why there was no result.
-whyFail :: MonadError e m => e -> Maybe a -> m a
-whyFail err = maybe (throwError err) pure
+-- | A symbolic for statements that cannot be reached.
+--
+-- It will be typed according to the given core type.
+invalidSymbolic
+  :: MonadError SymbolicError m
+  => KnownPos n
+  => Type
+  -> m (Symbolic m n)
+invalidSymbolic ty = case splitFunTy_maybe ty of
+  Just (_, _, _, res) -> pure . Fun $ \_ -> invalidSymbolic res
+  _ -> Val <$> invalidValue ty
 
 -- TODO: Add support for all primitive operations.
 symPrimOp
@@ -879,118 +970,3 @@ symLiteral = \case
     pure $ Double num'
 
   _ -> throwError UnsupportedExpr
-
--- | Symbolic Shift Right Arithmetic.
---
--- This will use a conversion into a signed bitvector, as the symbolic executor
--- does not distinguish between arithmetic and logical shift per type.
-symShiftRA
-  :: forall bv n i
-   . SymFromIntegral (SymIntN n) (bv n)
-  => SymFromIntegral (bv n) (SymIntN n)
-  => KnownPos n
-  => KnownPos i
-  => bv n
-  -> SymIntN i
-  -> bv n
-symShiftRA val idx = do
-  let idx' = sizedBVResize idx :: SymIntN n
-  let idx'' = symFromIntegral idx'
-
-  let val' = symFromIntegral val :: SymIntN n
-  -- TODO: Same thing as with symShiftL (i.e. non-total function)
-  let result = symShiftNegated val' idx''
-  symFromIntegral result
-
--- | Symbolic Shift Right Logical.
---
--- This will use a conversion into a signed bitvector, as the symbolic executor
--- does not distinguish between arithmetic and logical shift per type.
-symShiftRL
-  :: forall bv n i
-   . SymFromIntegral (SymWordN n) (bv n)
-  => SymFromIntegral (bv n) (SymWordN n)
-  => KnownPos n
-  => KnownPos i
-  => bv n
-  -> SymIntN i
-  -> bv n
-symShiftRL val idx = do
-  let idx' = sizedBVResize idx :: SymIntN n
-  let idx'' = symFromIntegral idx'
-
-  let val' = symFromIntegral val :: SymWordN n
-  -- TODO: Same thing as with symShiftL (i.e. non-total function)
-  let result = symShiftNegated val' idx''
-  symFromIntegral result
-
--- | Symbolic Shift Left
---
--- Symbolic shifts in Haskell all use the platform-sized int for the index (i.e.
--- the amount to shift by). This function performs the necessary conversions in
--- order to be compatible with the symbolic shift.
-symShiftL
-  :: forall bv n i
-   . SymFromIntegral (SymIntN n) (bv n)
-  => SymShift (bv n)
-  => KnownPos n
-  => KnownPos i
-  => bv n
-  -> SymIntN i
-  -> bv n
-symShiftL val idx = do
-  let idx' = sizedBVResize idx :: SymIntN n
-  let idx'' = symFromIntegral idx'
-  -- TODO: Haskell doesn't really define what to do with the shift if the index
-  -- is larger than the word size. It is considered unsafe. We should do
-  -- something with this? Not sure what exactly that would be though... How
-  -- would we ever model UB? Just for comparison btw, the safe version of the
-  -- primitive shifts just masks the value to 0 if it excedes the size. Other
-  -- implementations (like Word8) actually throw an error...
-  --
-  -- In any case, they  all do something to wrap the UB into non-UB. There is
-  -- no direct way to model the UB I guess... Maybe it is okay to assume that
-  -- only safe uses exist? I.e. with non-UB behaviour at the top level. Then it
-  -- doens't matter what we do for those  cases anyway, as they're wrapped into
-  -- something that is always defined.
-  --
-  -- One thing we do need to account for is failure. Currently we do not track
-  -- failure of functions anywhere, but I guess we techinically should?
-  --
-  -- Now that I think about it btw, I don't think a shift will ever actually
-  -- occur in hardware? Maybe I've been caring slightly too much about them?
-  symShift val idx''
-
--- | Resize the given bitvector.
---
--- Whether the bitvector is sign extended or not depends on its implementation
--- of 'sizedBVExt'.
-sizedBVResize
-  :: forall bv l r
-   . SizedBV bv
-  => KnownNat l
-  => KnownNat r
-  => 1 <= l
-  => 1 <= r
-  => bv l
-  -> bv r
-sizedBVResize = case cmpNat (Proxy @l) (Proxy @r) of
-  LTI -> sizedBVExt $ Proxy @r
-  EQI -> id
-  -- SAFETY: The unsafe coerce is just to have 'r <= l' as Haskell cannot figure
-  -- this out given the 'l >= r' that is already in context. Theoretically we
-  -- should be able to do this without unsafeCoerce, but I'm not sure how.
-  -- I'm not keen on importing the type level nat plugin for just one function.
-  GTI -> case unsafeCoerce Refl :: (Compare r l :~: 'LT) of
-    Refl -> sizedBVSelect (Proxy @0) (Proxy @r)
-
--- | The usual 'foldM', but with its arguments switched.
---
--- The use for this is that one may use this to write an expression in the
--- following shape:
--- ```
--- res <- foldM' acc xs $ \acc' x -> do
---   ...
--- ```
-foldM' :: (Foldable t, Monad m) => b -> t a -> (b -> a -> m b) -> m b
-foldM' acc xs f = foldM f acc xs
