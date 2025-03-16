@@ -10,9 +10,12 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DeriveLift #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
 module Symbolic2
   ( testSymbolic
+  , exprSymEq
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
@@ -20,7 +23,7 @@ import GHC.Core.Map.Expr (TrieMap(..), insertTM)
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.Unify (tcMatchTy)
 import GHC.Types.Unique.DFM (UniqDFM)
-import GHC.Platform (Platform (platformWordSize))
+import GHC.Platform (Platform (platformWordSize), PlatformWordSize (..))
 import GHC.Generics (Generic)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
@@ -30,23 +33,32 @@ import GHC.MonadCore
 import Control.Monad (forM, unless)
 import Control.Monad.Except
 import Control.Monad.State
-import Control.Exception (ArithException)
 
 import Data.Foldable (find, forM_)
 import Data.String (IsString(..))
 import Data.Functor ((<&>))
+import Data.Bits (Bits(..), (.^.))
 
 -- TODO: There has to be a better way to not import pretty printing stuff from
 -- grisette...
 import Grisette hiding (PPrintType (..), (<>), (<+>), nest, punctuate, comma, vcat, braces, lbrace, rbrace)
-import Grisette.Lib.Control.Monad.Except (mrgModifyError)
 import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..))
 
 import SymUtil
+import BitVec
+import Debug.Trace (trace)
+import Data.Composition ((.:))
 
 -- TODO: Importantant things to do right now
 -- - 'Symbolic' and 'Value' kind of feel like they should be merged. We should
 -- just have one 'Value' data type.
+--   - Done. What I think would be good is if Function now have some sort of
+--     type attached. The current thing with Type + function that takes any
+--     value doesn't seem super nice though. Ideally, I would somehow reuse the
+--     Value structure for arguments. That is, we have a function that takes any
+--     type of value, but then actually typed as such.
+--   - Since we removed the Symbolic, should we rename some stuff from symX to
+--     evalX?
 --
 -- - We should add support for casts and coercions. I guess this requires at
 -- least a Coercion to be added as possible 'Value'. Other than that, I guess it
@@ -87,7 +99,8 @@ testSymbolic expr = do
   --       }
 
   let s = SymbolicState
-        { nextADT = 0
+        -- { nextADT = 0
+        { nextIdx = 0
         }
 
   symbolic <- flip evalStateT s $ runExceptT $ do
@@ -99,16 +112,12 @@ testSymbolic expr = do
     Right (bndrs, value) -> pure (bndrs, value)
     Left err -> fail $ "Error creating symbolic version: " ++ show err
 
-  forM_ args $ \case
-    Cast' co _ -> dbg co
-    ADT ty _ -> dbg ty
-    _ -> dbg' "whut?"
-
   dbg' $ show value
 
   let z3' = z3
         { sbvConfig = (sbvConfig z3)
           { verbose = True
+          , timing = PrintTiming
           }
         }
 
@@ -139,6 +148,254 @@ testSymbolic expr = do
     Right bndrs -> forM_ bndrs dbg
     Left err -> dbg err
 
+exprSymEq
+  :: forall m
+   . MonadFail m
+  => MonadCore m
+  => HasDynFlags m
+  => CoreExpr
+  -> CoreExpr
+  -> m (Either NonEq ())
+exprSymEq lhs rhs = do
+  -- Get the target platform word size.
+  dflags <- getDynFlags
+  let pwsize = platformWordSize $ targetPlatform dflags
+
+  -- We run the comparison with the word size of the target platform.
+  case pwsize of
+    PW4 -> exprSymEq' @m @32 lhs rhs
+    PW8 -> exprSymEq' @m @64 lhs rhs
+
+data NonEq
+  = Counterexample [ModelValue']
+  | EvalError SymbolicError
+  | SolveError
+
+instance Outputable NonEq where
+  ppr = \case
+    Counterexample values -> vcat $ values <&> ppr
+    EvalError err -> text "eval-error: " <+> ppr err
+    -- TODO: More details what failed for the solver!
+    SolveError -> text "solver error"
+
+exprSymEq'
+  :: forall m n
+   . MonadFail m
+  => MonadCore m
+  => KnownPos n
+  => CoreExpr
+  -> CoreExpr
+  -> m (Either NonEq ())
+exprSymEq' lhs rhs = runExceptT $ do
+  let st = SymbolicState
+        { nextIdx = 0
+        }
+
+  (bndrs, lres, rres, eq) <- flip evalStateT st . modifyError EvalError $ do
+    (bndrs, lresult) <- saturated @_ @n lhs
+    rhs' <- eval @_ @n emptyTM rhs
+    rresult <- foldM' rhs' bndrs $ \value bndr -> do
+      applyValue value bndr
+
+    dbg lhs
+    case lresult of
+      ADT ty val -> do
+        dbg ty
+        dbg' $ show val
+      _ -> pure ()
+
+    dbg rhs
+    case rresult of
+      ADT ty val -> do
+        dbg ty
+        dbg' $ show val
+      _ -> pure ()
+
+    eq <- assertEq lresult rresult
+    pure (bndrs, lresult, rresult, eq)
+
+  dbg' $ show eq
+
+  -- TODO: We could let the user decide which solver no?
+  let z3' = z3
+        { sbvConfig = (sbvConfig z3)
+          { verbose = True
+          , timing = PrintTiming
+          }
+        }
+
+  -- TODO: We should translate the model to our version!
+  -- result <- liftCore . liftIO $ solve z3' eq
+  let translate = \case
+        Left Invalid -> false
+        Right val -> symNot val
+        _ -> false
+
+  result <- liftCore . liftIO $ solveExcept z3' translate eq
+  case result of
+    Right model -> do
+      let concreteValue' = modifyError EvalError . concreteValue model
+      bndrs' <- forM bndrs concreteValue'
+      lres' <- concreteValue' lres
+      rres' <- concreteValue' rres
+      dbg' "============="
+      dbg' $ show model
+      dbg' "-------------"
+      dbg bndrs'
+      dbg' "*************"
+      dbg lres'
+      dbg' "@@@@@@@@@@@@@"
+      dbg rres'
+      dbg' "ignore after this for now!"
+
+
+      throwError $ Counterexample bndrs'
+    Left Unsat -> pure ()
+    Left _ -> throwError $ SolveError
+
+-- FIXME: I don't think this works for divide by zero. I.e. if only one of the
+-- two expressions fail, it should be non-equal.
+assertEq
+  :: forall m n
+   . MonadError SymbolicError m
+  => KnownPos n
+  => Value m n
+  -> Value m n
+  -> m (RuntimeValue SymBool)
+assertEq (Int lhs) (Int rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Int8 lhs) (Int8 rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Int16 lhs) (Int16 rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Int32 lhs) (Int32 rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Int64 lhs) (Int64 rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Word lhs) (Word rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Word8 lhs) (Word8 rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Word16 lhs) (Word16 rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Word32 lhs) (Word32 rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Word64 lhs) (Word64 rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Float lhs) (Float rhs) = pure $ cmpRuntime lhs rhs
+assertEq (Double lhs) (Double rhs) = pure $ cmpRuntime lhs rhs
+assertEq (ADT lty lhs) (ADT rty rhs) = do
+  unless (lty `eqType` rty) $ throwError IllTyped
+  (tyCon, tyArgs) <- whyFail IllTyped $ splitTyConApp_maybe lty
+  let dataCons = tyConDataCons tyCon
+
+  branches <- forM dataCons $ \dataCon -> do
+    -- Ensure that we are in
+    let inBranch adt = adtIsDataCon @n adt dataCon
+    let eqBranch = cmpRuntime (inBranch lhs) (inBranch rhs)
+
+    -- Gather the field names.
+    let names = dataConAccessorNames dataCon
+    let tys = scaledThing <$> dataConInstArgTys dataCon tyArgs
+    let accessors = zip names tys
+
+    -- Check that every field is the same.
+    assertions <- forM accessors $ \(name, ty) -> do
+      lfield <- accessField @m @n lhs name ty
+      rfield <- accessField rhs name ty
+      assertEq lfield rfield
+
+    let assertions' = foldl' (liftA2 (.&&)) (pure true) assertions
+
+    pure $ (eqBranch, assertions')
+
+
+  let invalid = throwError Invalid
+
+  foldM' invalid branches $ \fl (cond, rhs') -> do
+    pure $ iteRuntime cond rhs' fl
+assertEq (Cast' lco lhs) (Cast' rco rhs) = do
+  unless (lco `eqCoercion` rco) $ throwError IllTyped
+  assertEq lhs rhs
+assertEq _ _ = throwError IllTyped
+
+-- (! (ite 
+--   (||
+--     (distinct (apply tag x) 0x0000000000000000) 
+--     (! (&&
+--       (=
+--         (apply 0 !ADT@0)
+--         (+ 0x0000000000000001 (apply 0 x)))
+--       (= (apply tag !ADT@0) 0x0000000000000000))))
+--   (||
+--     (distinct (apply tag x) 0x0000000000000000)
+--     (! (&&
+--       (=
+--         (apply 0 !ADT@1)
+--         (+ 0x0000000000000001 (apply 0 x)))
+--       (= (apply tag !ADT@1) 0x0000000000000000))))
+--   (&&
+--     (&&
+--       (= (apply tag x) 0x0000000000000000)
+--       (&&
+--         (=
+--           (apply 0 !ADT@1)
+--           (+ 0x0000000000000001 (apply 0 x)))
+--         (= (apply tag !ADT@1) 0x0000000000000000)))
+--     (= !ADT@0 !ADT@1))))
+--
+-- Model
+--   { !ADT@0 -> 0x0000000000000000 :: WordN 64
+--   , !ADT@1 -> 0x0000000000000002 :: WordN 64
+--   , 0 -> \(arg@1 :: WordN 64) ->
+--       (ite
+--         (= arg@1 0x0000000000000002)
+--         0x000004a42200830b
+--         (ite
+--           (= arg@1 0x0000000000000000)
+--           0x000004a42200830a
+--           0x0000000000000000))
+--     :: (-->) (WordN 64) (IntN 64)
+--   , tag -> \(arg@0 :: WordN 64) ->
+--       0x0000000000000000
+--     :: (-->) (WordN 64) (IntN 64)
+--   , x -> 0x0000000000000000 :: WordN 64
+--   }
+
+-- -- | Compares two values whether they always give the same result.
+-- --
+-- -- Note that this will also check equivalence for assignments that produce
+-- -- runtime errors. In these cases, equivalence is only held if both values
+-- -- crash.
+-- cmpSymbolic
+--   :: MonadError SymbolicError m
+--   => KnownPos n
+--   => Value m n
+--   -> Value m n
+--   -> m SymBool
+-- cmpSymbolic lhs' rhs' = case (lhs', rhs') of
+--   (Int lhs, Int rhs) -> pure $ lhs .== rhs
+--   (Int8 lhs, Int8 rhs) -> pure $ lhs .== rhs
+--   (Int16 lhs, Int16 rhs) -> pure $ lhs .== rhs
+--   (Int32 lhs, Int32 rhs) -> pure $ lhs .== rhs
+--   (Int64 lhs, Int64 rhs) -> pure $ lhs .== rhs
+--   (Word lhs, Word rhs) -> pure $ lhs .== rhs
+--   (Word8 lhs, Word8 rhs) -> pure $ lhs .== rhs
+--   (Word16 lhs, Word16 rhs) -> pure $ lhs .== rhs
+--   (Word32 lhs, Word32 rhs) -> pure $ lhs .== rhs
+--   (Word64 lhs, Word64 rhs) -> pure $ lhs .== rhs
+--   (Float lhs, Float rhs) -> pure $ lhs .== rhs
+--   (Double lhs, Double rhs) -> pure $ lhs .== rhs
+--   (ADT lty lhs, ADT rty rhs) -> do
+--     unless (lty `eqType` rty) $ throwError IllTyped
+--     pure $ lhs .== rhs
+--   (Cast' lco lhs, Cast' rco rhs) -> do
+--     unless (lco `eqCoercion` rco) $ throwError IllTyped
+--     cmpSymbolic lhs rhs
+--   _ -> throwError IllTyped
+--   where
+    -- FIXME: Something is terminally wrong in this comparison. Both expressions
+    -- generate the correct thing (and actually the same thing), but still I
+    -- can find a saturating example to their non-equivalence.
+    -- cmp :: SymEq a => Show a => RuntimeValue a -> RuntimeValue a -> SymBool
+    -- cmp lhs rhs = onUnion id $ do
+    --   lhs' <- runExceptT lhs
+    --   rhs' <- runExceptT rhs
+    --   case (lhs', rhs') of
+    --     (Right lhs'', Right rhs'') -> trace ("LHS: " <> show lhs'') . pure $ lhs'' .== rhs''
+    --     (Left lerr, Left rerr) -> pure $ con (lerr == rerr)
+    --     _ -> pure false
+
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.
 data ModelValue' where
@@ -147,7 +404,7 @@ data ModelValue' where
   Error :: RuntimeError -> ModelValue'
   -- TODO: We want to give out Unknown for recursive values. I guess we'll leave
   -- this for now...
-  -- Unknown :: ModelValue'
+  Unknown :: ModelValue'
 
 -- TODO: The indentation is a bit off because we vertically nest only the
 -- DataCon, while we should nest it with the assignment 'value = DataCon'.
@@ -159,7 +416,8 @@ instance Outputable ModelValue' where
         fields' = punctuate (text ", ") $ fields <&> pair
         pair (name, value) = text name <+> "=" <+> ppr value
     Primitive value -> text $ show value
-    Error err -> ppr err
+    Error err -> "error value: " <+> ppr err
+    Unknown -> text "???"
 
 concreteValue
   :: forall m m' n
@@ -182,36 +440,32 @@ concreteValue model = \case
   Word64 value -> prim @_ @WordN64 value
   Float value -> prim @_ @FP32 value
   Double value -> prim @_ @FP64 value
+  -- TODO: Clean this horrible piece of code up!
   ADT ty adt -> case evalSymToCon @_ @(Either RuntimeError ADT) model adt of
     Right adt' -> do
-      let x = do
-            (tyCon, _) <- splitTyConApp_maybe ty
-            tyConDataCons_maybe tyCon
-      dbg' "==========="
-      dbg ty
-      dbg x
-      let tag = evalSymToCon @_ @Tag model $ accessTag adt'
-      -- TODO: I guess this could also just mean that the value is irrelevant
-      -- no? This perhaps should return Unknown on failure.
-      dataCon <- whyFail IllTyped $ tagToDataCon tag ty
-      let (_, _, funTy) = tcSplitSigmaTy $ dataConRepType dataCon
-      let (argTys, resTy) = splitFunTys funTy
+      let tag = evalSymToCon @_ @(Tag n) model $ accessTag @n adt'
+      dbg' $ show tag
+      case tagToDataCon tag ty of
+        Just dataCon -> do
+          let (_, _, funTy) = tcSplitSigmaTy $ dataConRepType dataCon
+          let (argTys, resTy) = splitFunTys funTy
 
-      -- We try to match the result type of the constructor to the case binder.
-      -- Really, this should never fail.
-      subst <- whyFail IllTyped $ tcMatchTy resTy ty
-      let argTys' = substTy subst . scaledThing <$> argTys
-      let names = dataConAccessorNames dataCon
-      let accessors = zip names argTys'
-      fields <- forM accessors $ \(name, ty') -> do
-        field <- accessField @m @n adt name ty'
-        concreteValue model field
+          -- We try to match the result type of the constructor to the case binder.
+          -- Really, this should never fail.
+          subst <- whyFail IllTyped $ tcMatchTy resTy ty
+          let argTys' = substTy subst . scaledThing <$> argTys
+          let names = dataConAccessorNames dataCon
+          let accessors = zip names argTys'
+          fields <- forM accessors $ \(name, ty') -> do
+            field <- accessField @m @n adt name ty'
+            concreteValue model field
 
-      pure $ Record dataCon (zip names fields)
+          pure $ Record dataCon (zip names fields)
+        Nothing -> pure Unknown
 
     Left err -> pure $ Error err
 
-  -- TODO: I don't think this is a nice way to implement this...
+  -- TODO: Clean this horrible piece of code up!
   Cast' co value' -> go value' $ coercionRKind co
     where
       go value ty | not $ ty `eqType` coercionLKind co = do
@@ -228,7 +482,7 @@ concreteValue model = \case
   -- should make a new one... Maybe we should make an error for concrete lookup
   -- failures. Alternatively, I guess we could actually just return the type as
   -- is no? It is actually also a concrete version in a sense.
-  Fun _ _ -> throwError IllTyped
+  Fun _ -> throwError IllTyped
   Ty _ -> throwError IllTyped
   Co _ -> throwError IllTyped
   where
@@ -296,6 +550,7 @@ data RuntimeError where
   Invalid :: RuntimeError
   deriving Show
   deriving Generic
+  deriving Eq
   deriving Mergeable via (Default RuntimeError)
   deriving EvalSym via (Default RuntimeError)
   deriving SymEq via (Default RuntimeError)
@@ -307,10 +562,10 @@ instance Outputable RuntimeError where
 
 type RuntimeValue a = ExceptT RuntimeError Union a
 
-type ADT = SymIntN64
+type ADT = SymWordN64
 
 -- | ADT tag to distinguish between constructors.
-type Tag = SymWordN64
+type Tag n = SymIntN n
 
 data SymbolicError where
   IllTyped :: SymbolicError
@@ -343,7 +598,7 @@ data Value m n where
   -- TODO: I don't really like the prime on the name of Cast here. Maybe we
   -- could co for some other name?
   Cast' :: Coercion -> Value m n -> Value m n
-  Fun :: Kind -> (Value m n -> m (Value m n)) -> Value m n
+  Fun :: (Value m n -> m (Value m n)) -> Value m n
   Ty :: Type -> Value m n
   Co :: Coercion -> Value m n
 
@@ -359,13 +614,15 @@ mkCast' co = \case
 type MonadSymbolic m = (MonadError SymbolicError m, MonadState SymbolicState m, MonadCore m)
 
 newtype SymbolicState = SymbolicState
-  { nextADT :: ADT
+  -- { nextADT :: ADT
+  { nextIdx :: Int
   }
 
 freshADT :: MonadState SymbolicState m => m (RuntimeValue ADT)
 freshADT = state $ \s -> do
-  let adt = nextADT s
-  let s' = s { nextADT = adt + 1}
+  let idx = nextIdx s
+  let s' = s { nextIdx = idx + 1}
+  let adt = sym $ indexed "!ADT" idx
   (pure adt, s')
 
 type Environment m n = UniqDFM Var (Value m n)
@@ -384,7 +641,7 @@ eval env = \case
 
   Lit lit -> symLiteral lit
 
-  Lam bndr body -> pure . Fun (varType bndr) $ \arg -> do
+  Lam bndr body -> pure . Fun $ \arg -> do
     -- TODO: I think it would be good to have a check here to ensure that the
     -- argument has the correct type.
     let env' = insertTM bndr arg env
@@ -436,13 +693,7 @@ applyValue
   -> Value m n
   -> m (Value m n)
 applyValue fun arg = case fun of
-  Fun _ty fun' -> do
-    -- Ensure the types match up.
-    -- let ty' = valueType arg
-    -- unless (ty `eqType` ty') $ throwError IllTyped
-
-    -- Run the inner function.
-    fun' arg
+  Fun fun' -> fun' arg
   _ -> throwError IllTyped
 
 -- | Return the condition to run this alternative and its symbolic rhs.
@@ -465,7 +716,7 @@ symAlt env scrut = \case
       _ -> throwError IllTyped
 
     -- Whether the "tag" field on this ADT is equivalent to the DataCon.
-    let conditional = adtIsDataCon scrut' dataCon
+    let conditional = adtIsDataCon @n scrut' dataCon
 
     -- Gather field accessors for all binders.
     let names = dataConAccessorNames dataCon
@@ -474,7 +725,8 @@ symAlt env scrut = \case
       accessField scrut' name (varType bndr)
 
     -- Extend the environment with field accessors for each binder.
-    let env' = foldl' (flip $ uncurry insertTM) env $ zip bndrs fields
+    let insertManyTM = foldl' . flip . uncurry $ insertTM
+    let env' = insertManyTM env $ zip bndrs fields
 
     -- Evaluate the right-hand side with the extended environment.
     rhs' <- eval env' rhs
@@ -503,7 +755,7 @@ symAlt env scrut = \case
             -- now.
             let (tyCon, _) = splitTyConApp ty
             let amount = length $ tyConDataCons tyCon
-            tag <- accessTag <$> adt
+            tag <- accessTag @n <$> adt
             mrgReturn $ 0 .<= tag .&& tag .< fromIntegral amount
           _ -> pure true
             
@@ -535,6 +787,9 @@ symDataCon dataCon = do
   -- We start with an emtpy list of type instances.
   final []
 
+-- | Evaluate a DataCon with the given types as its instantiation.
+--
+-- This will 
 symDataConInst
   :: forall m n
    . MonadSymbolic m
@@ -565,7 +820,7 @@ symDataConInst dataCon tys = do
         let value = assertRuntime cond adt
         pure $ ADT ty value
 
-  -- Accumulate a function that takes the fields' as arguments. We pass a
+  -- Accumulate a function that takes the fields as arguments. We pass a
   -- conditional to the root that states the field accessors are equal to the
   -- actual arguments.
   final <- nArity root fields $ \field cond arg -> do
@@ -574,7 +829,7 @@ symDataConInst dataCon tys = do
     pure $ liftA2 (.&&) extra cond
 
   -- As a final constraint, the ADT tag should match the given DataCon.
-  final $ adtIsDataCon adt dataCon
+  final $ adtIsDataCon @n adt dataCon
 
 -- | Create a function with the arity of whatever we are folding over.
 --
@@ -595,23 +850,25 @@ nArity
 nArity acc xs f = foldM' acc xs $ \acc' x -> do
   -- FIXME: I want to ensure the argument is always the actual ADT we expect.
   -- Also, I have to pass in the types for this one with the new setup.
-  pure $ \y -> pure . Fun undefined $ \arg -> do
+  pure $ \y -> pure . Fun $ \arg -> do
     res <- f x y arg
     acc' res
 
 -- | Get the DataCon from the Tag and Type.
 tagToDataCon
-  :: Tag
+  :: forall n
+   . KnownPos n
+  => Tag n
   -> Type
   -> Maybe DataCon
 tagToDataCon tag ty = do
   (tyCon, _) <- splitTyConApp_maybe ty
   dataCons <- tyConDataCons_maybe tyCon
-  let cmp dataCon = dataConToTag dataCon == tag
+  let cmp dataCon = dataConToTag @n dataCon == tag
   find cmp dataCons
 
 -- | Get the symbolic representation of the DataCon.
-dataConToTag :: DataCon -> Tag
+dataConToTag :: KnownPos n => DataCon -> Tag n
 dataConToTag = fromIntegral . dataConTagZ
 
 -- | Whether the given ADT matches the DataCon.
@@ -620,20 +877,24 @@ dataConToTag = fromIntegral . dataConTagZ
 -- TODO: I do want this to perform a typecheck! I would need to include the
 -- type on an ADT first.
 adtIsDataCon
-  :: RuntimeValue ADT
+  :: forall n
+   . KnownPos n
+  => RuntimeValue ADT
   -> DataCon
   -> RuntimeValue SymBool
 adtIsDataCon adt dataCon = do
   field <- accessTag <$> adt
-  let tag = dataConToTag dataCon
+  let tag = dataConToTag @n dataCon
   mrgReturn $ field .== tag
 
 -- | Accessor for the tag of an ADT.
 accessTag
-  :: ADT
-  -> Tag
+  :: forall n
+   . KnownPos n
+  => ADT
+  -> Tag n
 accessTag adt = do
-  let tag = "tag" :: ADT -~> Tag
+  let tag = "tag" :: ADT -~> Tag n
   tag # adt
 
 -- | Accessor for a field of an ADT.
@@ -664,12 +925,17 @@ accessField adt name ty
   | ty `eqType` word64PrimTy = pure $ Word64 construct
   | ty `eqType` floatPrimTy = pure $ Float construct
   | ty `eqType` doublePrimTy = pure $ Double construct
+  | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
+  , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
+    value <- accessField adt name ty'
+    let co' = mkSymCo co
+    pure $ mkCast' co' value
   | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT ty construct
   | otherwise = throwError UnsupportedExpr
   where
     construct
       :: forall c t
-       . Solvable (IntN64 --> c) (ADT -~> t)
+       . Solvable (WordN64 --> c) (ADT -~> t)
       => RuntimeValue t
     construct = do
       let symbol = simple . identifier . fromString $ name
@@ -783,9 +1049,8 @@ iteValue cond (Cast' lco lhs) (Cast' rco rhs) = do
   unless (lco `eqCoercion` rco) $ throwError IllTyped
   result <- iteValue cond lhs rhs
   pure $ Cast' lco result
-iteValue cond (Fun lty lhs) (Fun rty rhs) = do
-  unless (lty `eqType` rty) $ throwError IllTyped
-  pure . Fun lty $ \arg -> do
+iteValue cond (Fun lhs) (Fun rhs) = do
+  pure . Fun $ \arg -> do
     lhs' <- lhs arg
     rhs' <- rhs arg
     iteValue cond lhs' rhs'
@@ -813,7 +1078,7 @@ valueType = \case
   Cast' co _ -> coercionRKind co
   -- FIXME: The function just tracks the argument type. I guess we could have it
   -- track the full type. Not sure what the alternative would be...
-  Fun _ty _ -> undefined
+  Fun _ -> undefined
   Ty ty -> typeKind ty
   Co co -> coercionType co
 
@@ -826,28 +1091,28 @@ typedValue
   => (forall c a. Solvable c a => RuntimeValue a)
   -> Type
   -> m (Value m n)
-typedValue fun ty
-  | ty `eqType` intPrimTy = pure $ Int fun
-  | ty `eqType` int8PrimTy = pure $ Int8 fun
-  | ty `eqType` int16PrimTy = pure $ Int16 fun
-  | ty `eqType` int32PrimTy = pure $ Int32 fun
-  | ty `eqType` int64PrimTy = pure $ Int64 fun
-  | ty `eqType` wordPrimTy = pure $ Word fun
-  | ty `eqType` word8PrimTy = pure $ Word8 fun
-  | ty `eqType` word16PrimTy = pure $ Word16 fun
-  | ty `eqType` word32PrimTy = pure $ Word32 fun
-  | ty `eqType` word64PrimTy = pure $ Word64 fun
-  | ty `eqType` floatPrimTy = pure $ Float fun
-  | ty `eqType` doublePrimTy = pure $ Double fun
+typedValue value ty
+  | ty `eqType` intPrimTy = pure $ Int value
+  | ty `eqType` int8PrimTy = pure $ Int8 value
+  | ty `eqType` int16PrimTy = pure $ Int16 value
+  | ty `eqType` int32PrimTy = pure $ Int32 value
+  | ty `eqType` int64PrimTy = pure $ Int64 value
+  | ty `eqType` wordPrimTy = pure $ Word value
+  | ty `eqType` word8PrimTy = pure $ Word8 value
+  | ty `eqType` word16PrimTy = pure $ Word16 value
+  | ty `eqType` word32PrimTy = pure $ Word32 value
+  | ty `eqType` word64PrimTy = pure $ Word64 value
+  | ty `eqType` floatPrimTy = pure $ Float value
+  | ty `eqType` doublePrimTy = pure $ Double value
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
   , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
-    value <- typedValue fun ty'
+    value' <- typedValue value ty'
     let co' = mkSymCo co
-    pure $ mkCast' co' value
-  | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT ty fun
+    pure $ mkCast' co' value'
+  | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT ty value
   | Just (_, _, _, res) <- splitFunTy_maybe ty = do
-    let fun' _ = typedValue fun res
-    pure $ Fun ty fun'
+    let fun _ = typedValue value res
+    pure $ Fun fun
   | otherwise = throwError UnsupportedExpr
 
 -- | A value that should not be reachable.
@@ -861,33 +1126,467 @@ invalidValue
   -> m (Value m n)
 invalidValue = typedValue $ throwError Invalid
 
--- TODO: Add support for all primitive operations.
+-- -- TODO: Add support for all primitive operations.
+-- symPrimOp
+--   :: forall m n
+--    . MonadError SymbolicError m
+--   => PrimOp
+--   -> m (Value m n)
+-- symPrimOp = \case
+--   Int64AddOp ->
+--     pure . Fun $ \case
+--       Int64 lhs -> pure . Fun $ \case
+--         Int64 rhs -> pure . Int64 $ do
+--           lhs' <- lhs
+--           rhs' <- rhs
+--           mrgReturn $ lhs' + rhs'
+--         _ -> throwError IllTyped
+--       _ -> throwError IllTyped
+--   Int64QuotOp ->
+--     pure . Fun $ \case
+--       Int64 lhs -> pure . Fun $ \case
+--         Int64 rhs -> pure . Int64 $ do
+--           lhs' <- lhs
+--           rhs' <- rhs
+--           mrgModifyError (const DivideByZero) $ do
+--             safeQuot @ArithException lhs' rhs'
+--         _ -> throwError IllTyped
+--       _ -> throwError IllTyped
+--   _ -> throwError UnsupportedExpr
+
+-- | Get the dynamically typed, symbolic function for a primitive operation.
 symPrimOp
   :: forall m n
-   . MonadError SymbolicError m
+   . MonadSymbolic m
+  => KnownPos n
   => PrimOp
   -> m (Value m n)
 symPrimOp = \case
-  Int64AddOp ->
-    pure . Fun int64PrimTy $ \case
-      Int64 lhs -> pure . Fun int64PrimTy $ \case
-        Int64 rhs -> pure . Int64 $ do
-          lhs' <- lhs
-          rhs' <- rhs
-          mrgReturn $ lhs' + rhs'
-        _ -> throwError IllTyped
+  CharGtOp -> throwError UnsupportedExpr
+  CharGeOp -> throwError UnsupportedExpr
+  CharEqOp -> throwError UnsupportedExpr
+  CharNeOp -> throwError UnsupportedExpr
+  CharLtOp -> throwError UnsupportedExpr
+  CharLeOp -> throwError UnsupportedExpr
+  OrdOp -> throwError UnsupportedExpr
+  Int8ToIntOp -> unary $ toIntArch @8
+  IntToInt8Op -> unary $ toIntSized @8
+  Int8NegOp -> unary $ negate @SymIntN8
+  Int8AddOp -> binary $ (+) @SymIntN8
+  Int8SubOp -> binary $ (-) @SymIntN8
+  Int8MulOp -> binary $ (*) @SymIntN8
+  Int8QuotOp -> throwError UnsupportedExpr
+  Int8RemOp -> throwError UnsupportedExpr
+  Int8QuotRemOp -> throwError UnsupportedExpr
+  Int8SllOp -> binary $ symShiftL' @SymIntN @8
+  Int8SraOp -> binary $ symShiftRA' @SymIntN @8
+  Int8SrlOp -> binary $ symShiftRL' @SymIntN @8
+  Int8ToWord8Op -> unary $ toUnsigned @SymWordN8 @SymIntN8
+  Int8EqOp -> binary $ symEq @SymIntN8
+  Int8GeOp -> binary $ symGe @SymIntN8
+  Int8GtOp -> binary $ symGt @SymIntN8
+  Int8LeOp -> binary $ symLe @SymIntN8
+  Int8LtOp -> binary $ symLt @SymIntN8
+  Int8NeOp -> binary $ symNe @SymIntN8
+  Word8ToWordOp -> unary $ toWordArch @8
+  WordToWord8Op -> unary $ toWordSized @8
+  Word8AddOp -> binary $ (+) @SymWordN8
+  Word8SubOp -> binary $ (-) @SymWordN8
+  Word8MulOp -> binary $ (*) @SymWordN8
+  Word8QuotOp -> throwError UnsupportedExpr
+  Word8RemOp -> throwError UnsupportedExpr
+  Word8QuotRemOp -> throwError UnsupportedExpr
+  Word8AndOp -> binary $ (.&.) @SymWordN8
+  Word8OrOp -> binary $ (.|.) @SymWordN8
+  Word8XorOp -> binary $ (.^.) @SymWordN8
+  Word8NotOp -> unary $ complement @SymWordN8
+  Word8SllOp -> binary $ symShiftL' @SymWordN @8
+  Word8SrlOp -> binary $ symShiftRL' @SymWordN @8
+  Word8ToInt8Op -> unary $ toSigned @SymWordN8 @SymIntN8
+  Word8EqOp -> binary $ symEq @SymWordN8
+  Word8GeOp -> binary $ symGe @SymWordN8
+  Word8GtOp -> binary $ symGt @SymWordN8
+  Word8LeOp -> binary $ symLe @SymWordN8
+  Word8LtOp -> binary $ symLt @SymWordN8
+  Word8NeOp -> binary $ symNe @SymWordN8
+  Int16ToIntOp -> unary $ toIntArch @16
+  IntToInt16Op -> unary $ toIntSized @16
+  Int16NegOp -> unary $ negate @SymIntN16
+  Int16AddOp -> binary $ (+) @SymIntN16
+  Int16SubOp -> binary $ (-) @SymIntN16
+  Int16MulOp -> binary $ (*) @SymIntN16
+  Int16QuotOp -> throwError UnsupportedExpr
+  Int16RemOp -> throwError UnsupportedExpr
+  Int16QuotRemOp -> throwError UnsupportedExpr
+  Int16SllOp -> binary $ symShiftL' @SymIntN @16
+  Int16SraOp -> binary $ symShiftRA' @SymIntN @16
+  Int16SrlOp -> binary $ symShiftRL' @SymIntN @16
+  Int16ToWord16Op -> unary $ toUnsigned @SymWordN16 @SymIntN16
+  Int16EqOp -> binary $ symEq @SymIntN16
+  Int16GeOp -> binary $ symGe @SymIntN16
+  Int16GtOp -> binary $ symGt @SymIntN16
+  Int16LeOp -> binary $ symLe @SymIntN16
+  Int16LtOp -> binary $ symLt @SymIntN16
+  Int16NeOp -> binary $ symNe @SymIntN16
+  Word16ToWordOp -> unary $ toWordArch @16
+  WordToWord16Op -> unary $ toWordSized @16
+  Word16AddOp -> binary $ (+) @SymWordN16
+  Word16SubOp -> binary $ (-) @SymWordN16
+  Word16MulOp -> binary $ (*) @SymWordN16
+  Word16QuotOp -> throwError UnsupportedExpr
+  Word16RemOp -> throwError UnsupportedExpr
+  Word16QuotRemOp -> throwError UnsupportedExpr
+  Word16AndOp -> binary $ (.&.) @SymWordN16
+  Word16OrOp -> binary $ (.|.) @SymWordN16
+  Word16XorOp -> binary $ (.^.) @SymWordN16
+  Word16NotOp -> unary $ complement @SymWordN16
+  Word16SllOp -> binary $ symShiftL' @SymWordN @16
+  Word16SrlOp -> binary $ symShiftRL' @SymWordN @16
+  Word16ToInt16Op -> unary $ toSigned @SymWordN16 @SymIntN16
+  Word16EqOp -> binary $ symEq @SymWordN16
+  Word16GeOp -> binary $ symGe @SymWordN16
+  Word16GtOp -> binary $ symGt @SymWordN16
+  Word16LeOp -> binary $ symLe @SymWordN16
+  Word16LtOp -> binary $ symLt @SymWordN16
+  Word16NeOp -> binary $ symNe @SymWordN16
+  Int32ToIntOp -> unary $ toIntArch @32
+  IntToInt32Op -> unary $ toIntSized @32
+  Int32NegOp -> unary $ negate @SymIntN32
+  Int32AddOp -> binary $ (+) @SymIntN32
+  Int32SubOp -> binary $ (-) @SymIntN32
+  Int32MulOp -> binary $ (*) @SymIntN32
+  Int32QuotOp -> throwError UnsupportedExpr
+  Int32RemOp -> throwError UnsupportedExpr
+  Int32QuotRemOp -> throwError UnsupportedExpr
+  Int32SllOp -> binary $ symShiftL' @SymIntN @32
+  Int32SraOp -> binary $ symShiftRA' @SymIntN @32
+  Int32SrlOp -> binary $ symShiftRL' @SymIntN @32
+  Int32ToWord32Op -> unary $ toUnsigned @SymWordN32 @SymIntN32
+  Int32EqOp -> binary $ symEq @SymIntN32
+  Int32GeOp -> binary $ symGe @SymIntN32
+  Int32GtOp -> binary $ symGt @SymIntN32
+  Int32LeOp -> binary $ symLe @SymIntN32
+  Int32LtOp -> binary $ symLt @SymIntN32
+  Int32NeOp -> binary $ symNe @SymIntN32
+  Word32ToWordOp -> unary $ toWordArch @32
+  WordToWord32Op -> unary $ toWordSized @32
+  Word32AddOp -> binary $ (+) @SymWordN32
+  Word32SubOp -> binary $ (-) @SymWordN32
+  Word32MulOp -> binary $ (*) @SymWordN32
+  Word32QuotOp -> throwError UnsupportedExpr
+  Word32RemOp -> throwError UnsupportedExpr
+  Word32QuotRemOp -> throwError UnsupportedExpr
+  Word32AndOp -> binary $ (.&.) @SymWordN32
+  Word32OrOp -> binary $ (.|.) @SymWordN32
+  Word32XorOp -> binary $ (.^.) @SymWordN32
+  Word32NotOp -> unary $ complement @SymWordN32
+  Word32SllOp -> binary $ symShiftL' @SymWordN @32
+  Word32SrlOp -> binary $ symShiftRL' @SymWordN @32
+  Word32ToInt32Op -> unary $ toSigned @SymWordN32 @SymIntN32
+  Word32EqOp -> binary $ symEq @SymWordN32
+  Word32GeOp -> binary $ symGe @SymWordN32
+  Word32GtOp -> binary $ symGt @SymWordN32
+  Word32LeOp -> binary $ symLe @SymWordN32
+  Word32LtOp -> binary $ symLt @SymWordN32
+  Word32NeOp -> binary $ symNe @SymWordN32
+  Int64ToIntOp -> unary $ toIntArch @64
+  IntToInt64Op -> unary $ toIntSized @64
+  Int64NegOp -> unary $ negate @SymIntN64
+  Int64AddOp -> binary $ (+) @SymIntN64
+  Int64SubOp -> binary $ (-) @SymIntN64
+  Int64MulOp -> binary $ (*) @SymIntN64
+  Int64QuotOp -> throwError UnsupportedExpr
+  Int64RemOp -> throwError UnsupportedExpr
+  Int64SllOp -> binary $ symShiftL' @SymIntN @64
+  Int64SraOp -> binary $ symShiftRA' @SymIntN @64
+  Int64SrlOp -> binary $ symShiftRL' @SymIntN @64
+  Int64ToWord64Op -> unary $ toUnsigned @SymWordN64 @SymIntN64
+  Int64EqOp -> binary $ symEq @SymIntN64
+  Int64GeOp -> binary $ symGe @SymIntN64
+  Int64GtOp -> binary $ symGt @SymIntN64
+  Int64LeOp -> binary $ symLe @SymIntN64
+  Int64LtOp -> binary $ symLt @SymIntN64
+  Int64NeOp -> binary $ symNe @SymIntN64
+  Word64ToWordOp -> unary $ toWordArch @64
+  WordToWord64Op -> unary $ toWordSized @64
+  Word64AddOp -> binary $ (+) @SymWordN64
+  Word64SubOp -> binary $ (-) @SymWordN64
+  Word64MulOp -> binary $ (*) @SymWordN64
+  Word64QuotOp -> throwError UnsupportedExpr
+  Word64RemOp -> throwError UnsupportedExpr
+  Word64AndOp -> binary $ (.&.) @SymWordN64
+  Word64OrOp -> binary $ (.|.) @SymWordN64
+  Word64XorOp -> binary $ (.^.) @SymWordN64
+  Word64NotOp -> unary $ complement @SymWordN64
+  Word64SllOp -> binary $ symShiftL' @SymWordN @64
+  Word64SrlOp -> binary $ symShiftRL' @SymWordN @64
+  Word64ToInt64Op -> unary $ toSigned @SymWordN64 @SymIntN64
+  Word64EqOp -> binary $ symEq @SymWordN64
+  Word64GeOp -> binary $ symGe @SymWordN64
+  Word64GtOp -> binary $ symGt @SymWordN64
+  Word64LeOp -> binary $ symLe @SymWordN64
+  Word64LtOp -> binary $ symLt @SymWordN64
+  Word64NeOp -> binary $ symNe @SymWordN64
+  IntAddOp -> binary $ (+) @(SymIntArch n)
+  IntSubOp -> binary $ (-) @(SymIntArch n)
+  IntMulOp -> binary $ (*) @(SymIntArch n)
+  IntMul2Op -> throwError UnsupportedExpr
+  IntMulMayOfloOp -> throwError UnsupportedExpr
+  IntQuotOp -> throwError UnsupportedExpr
+  IntRemOp -> throwError UnsupportedExpr
+  IntQuotRemOp -> throwError UnsupportedExpr
+  IntAndOp -> binary $ (.&.) @(SymIntArch n)
+  IntOrOp -> binary $ (.|.) @(SymIntArch n)
+  IntXorOp -> binary $ (.^.) @(SymIntArch n)
+  IntNotOp -> unary $ complement @(SymIntArch n)
+  IntNegOp -> unary $ negate @(SymIntArch n)
+  IntAddCOp -> throwError UnsupportedExpr
+  IntSubCOp -> throwError UnsupportedExpr
+  IntGtOp -> binary $ symGt @(SymWordArch n)
+  IntGeOp -> binary $ symGe @(SymWordArch n)
+  IntEqOp -> binary $ symEq @(SymWordArch n)
+  IntNeOp -> binary $ symNe @(SymWordArch n)
+  IntLtOp -> binary $ symLt @(SymWordArch n)
+  IntLeOp -> binary $ symLe @(SymWordArch n)
+  ChrOp -> throwError UnsupportedExpr
+  IntToWordOp -> unary $ toUnsigned @(SymWordArch n) @(SymIntArch n)
+  IntToFloatOp -> throwError UnsupportedExpr
+  IntToDoubleOp -> throwError UnsupportedExpr
+  WordToFloatOp -> throwError UnsupportedExpr
+  WordToDoubleOp -> throwError UnsupportedExpr
+  IntSllOp -> binary $ symShiftL' @SymIntArch @n
+  IntSraOp -> binary $ symShiftRA' @SymIntArch @n
+  IntSrlOp -> binary $ symShiftRL' @SymIntArch @n
+  WordAddOp -> binary $ (+) @(SymWordArch n)
+  WordAddCOp -> throwError UnsupportedExpr
+  WordSubCOp -> throwError UnsupportedExpr
+  WordAdd2Op -> throwError UnsupportedExpr
+  WordSubOp -> binary $ (-) @(SymWordArch n)
+  WordMulOp -> binary $ (*) @(SymWordArch n)
+  WordMul2Op -> throwError UnsupportedExpr
+  WordQuotOp -> throwError UnsupportedExpr
+  WordRemOp -> throwError UnsupportedExpr
+  WordQuotRemOp -> throwError UnsupportedExpr
+  WordQuotRem2Op -> throwError UnsupportedExpr
+  WordAndOp -> binary $ (.&.) @(SymWordArch n)
+  WordOrOp -> binary $ (.|.) @(SymWordArch n)
+  WordXorOp -> binary $ (.^.) @(SymWordArch n)
+  WordNotOp -> unary $ complement @(SymWordArch n)
+  WordSllOp -> binary $ symShiftL' @SymWordArch @n
+  WordSrlOp -> binary $ symShiftRL' @SymWordArch @n
+  WordToIntOp -> unary $ toSigned @(SymWordArch n) @(SymIntArch n)
+  WordGtOp -> binary $ symGt @(SymWordArch n)
+  WordGeOp -> binary $ symGe @(SymWordArch n)
+  WordEqOp -> binary $ symEq @(SymWordArch n)
+  WordNeOp -> binary $ symNe @(SymWordArch n)
+  WordLtOp -> binary $ symLt @(SymWordArch n)
+  WordLeOp -> binary $ symLe @(SymWordArch n)
+  TagToEnumOp -> pure . Fun $ \case
+    Ty ty -> pure . Fun $ \case
+      Int tag -> do
+        adt <- freshADT
+        let cond = do
+              adt' <- adt
+              tag' <- tag
+              pure $ accessTag adt' .== tag'
+        pure . ADT ty $ assertRuntime cond adt
       _ -> throwError IllTyped
-  Int64QuotOp ->
-    pure . Fun int64PrimTy $ \case
-      Int64 lhs -> pure . Fun int64PrimTy $ \case
-        Int64 rhs -> pure . Int64 $ do
-          lhs' <- lhs
-          rhs' <- rhs
-          mrgModifyError (const DivideByZero) $ do
-            safeQuot @ArithException lhs' rhs'
-        _ -> throwError IllTyped
-      _ -> throwError IllTyped
+    _ -> throwError IllTyped
   _ -> throwError UnsupportedExpr
+  where
+    symShiftRL'
+      :: forall bv i
+       . SymFromIntegral (SymWordN i) (bv i)
+      => SymFromIntegral (bv i) (SymWordN i)
+      => KnownPos i
+      => bv i
+      -> SymIntArch n
+      -> bv i
+    symShiftRL' lhs rhs = symShiftRL lhs $ unSymIntArch rhs
+
+    symShiftRA'
+      :: forall bv i
+       . SymFromIntegral (SymIntN i) (bv i)
+      => SymFromIntegral (bv i) (SymIntN i)
+      => KnownPos i
+      => bv i
+      -> SymIntArch n
+      -> bv i
+    symShiftRA' lhs rhs = symShiftRA lhs $ unSymIntArch rhs
+
+    symShiftL'
+      :: forall bv i
+       . SymFromIntegral (SymIntN i) (bv i)
+      => SymShift (bv i)
+      => KnownPos i
+      => bv i
+      -> SymIntArch n
+      -> bv i
+    symShiftL' lhs rhs = symShiftL lhs $ unSymIntArch rhs
+
+    toIntArch :: KnownPos i => SymIntN i -> SymIntArch n
+    toIntArch = SymIntArch . sizedBVResize
+
+    toIntSized :: KnownPos i => SymIntArch n -> SymIntN i
+    toIntSized = sizedBVResize . unSymIntArch
+
+    toWordArch :: KnownPos i => SymWordN i -> SymWordArch n
+    toWordArch = SymWordArch . sizedBVResize
+
+    toWordSized :: KnownPos i => SymWordArch n -> SymWordN i
+    toWordSized = sizedBVResize . unSymWordArch
+
+    symGe :: SymOrd a => a -> a -> SymIntArch n
+    symGe lhs rhs = SymIntArch $ symIte (lhs .>= rhs) 1 0
+
+    symGt :: SymOrd a => a -> a -> SymIntArch n
+    symGt lhs rhs = SymIntArch $ symIte (lhs .> rhs) 1 0
+
+    symEq :: SymEq a => a -> a -> SymIntArch n
+    symEq lhs rhs = SymIntArch $ symIte (lhs .== rhs) 1 0
+
+    symNe :: SymEq a => a -> a -> SymIntArch n
+    symNe lhs rhs = SymIntArch $ symIte (lhs ./= rhs) 1 0
+
+    symLt :: SymOrd a => a -> a -> SymIntArch n
+    symLt lhs rhs = SymIntArch $ symIte (lhs .< rhs) 1 0
+
+    symLe :: SymOrd a => a -> a -> SymIntArch n
+    symLe lhs rhs = SymIntArch $ symIte (lhs .<= rhs) 1 0
+
+binary
+  :: Wrap m n (RuntimeValue a -> RuntimeValue b -> RuntimeValue c)
+  => (a -> b -> c)
+  -> m (Value m n)
+binary = pure . wrap . liftA2 @(ExceptT RuntimeError Union)
+
+unary
+  :: Wrap m n (RuntimeValue a -> RuntimeValue b)
+  => (a -> b)
+  -> m (Value m n)
+unary = pure . wrap . fmap @(ExceptT RuntimeError Union)
+
+-- TODO: This stuff is probably better suited in a separate file.
+class MonadSymbolic m => Wrap m n a where
+  wrap :: a -> Value m n
+
+newtype SymIntArch n where
+  SymIntArch :: SymIntN n -> SymIntArch n
+
+unSymIntArch :: SymIntArch n -> SymIntN n
+unSymIntArch (SymIntArch val) = val
+
+deriving via SymIntN n instance KnownPos n => Num (SymIntArch n)
+deriving via SymIntN n instance KnownPos n => Eq (SymIntArch n)
+deriving via SymIntN n instance KnownPos n => Bits (SymIntArch n)
+deriving via SymIntN n instance KnownPos n => SymOrd (SymIntArch n)
+deriving via SymIntN n instance KnownPos n => SymEq (SymIntArch n)
+deriving via SymIntN n instance KnownPos n => SymShift (SymIntArch n)
+deriving via SymIntN n instance KnownPos n => SymFromIntegral (SymIntN n) (SymIntArch n)
+deriving via SymIntN n instance KnownPos n => SymFromIntegral (SymWordN n) (SymIntArch n)
+deriving via SymIntN n instance KnownPos n => SymFromIntegral (SymIntArch n) (SymIntN n)
+deriving via SymIntN n instance KnownPos n => SymFromIntegral (SymWordArch n) (SymIntN n)
+
+newtype SymWordArch n where
+  SymWordArch :: SymWordN n -> SymWordArch n
+
+unSymWordArch :: SymWordArch n -> SymWordN n
+unSymWordArch (SymWordArch val) = val
+
+deriving via SymWordN n instance KnownPos n => Num (SymWordArch n)
+deriving via SymWordN n instance KnownPos n => Eq (SymWordArch n)
+deriving via SymWordN n instance KnownPos n => Bits (SymWordArch n)
+deriving via SymWordN n instance KnownPos n => SymOrd (SymWordArch n)
+deriving via SymWordN n instance KnownPos n => SymEq (SymWordArch n)
+deriving via SymWordN n instance KnownPos n => SymShift (SymWordArch n)
+deriving via SymWordN n instance KnownPos n => SymFromIntegral (SymIntN n) (SymWordArch n)
+deriving via SymWordN n instance KnownPos n => SymFromIntegral (SymWordN n) (SymWordArch n)
+deriving via SymWordN n instance KnownPos n => SymFromIntegral (SymWordArch n) (SymWordN n)
+deriving via SymWordN n instance KnownPos n => SymFromIntegral (SymIntArch n) (SymWordN n)
+
+instance KnownPos n => SignConversion (SymWordArch n) (SymIntArch n) where
+  toUnsigned = SymWordArch . toUnsigned . unSymIntArch
+  toSigned = SymIntArch . toSigned . unSymWordArch
+
+instance (MonadSymbolic m, KnownPos n) => Wrap m n (RuntimeValue (SymIntArch n)) where
+  wrap = Int . fmap unSymIntArch
+
+instance MonadSymbolic m => Wrap m n (RuntimeValue SymIntN8) where
+  wrap = Int8
+
+instance MonadSymbolic m => Wrap m n (RuntimeValue SymIntN16) where
+  wrap = Int16
+
+instance MonadSymbolic m => Wrap m n (RuntimeValue SymIntN32) where
+  wrap = Int32
+
+instance MonadSymbolic m => Wrap m n (RuntimeValue SymIntN64) where
+  wrap = Int64
+
+instance (MonadSymbolic m, KnownPos n) => Wrap m n (RuntimeValue (SymWordArch n)) where
+  wrap = Word . fmap unSymWordArch
+
+instance MonadSymbolic m => Wrap m n (RuntimeValue SymWordN8) where
+  wrap = Word8
+
+instance MonadSymbolic m => Wrap m n (RuntimeValue SymWordN16) where
+  wrap = Word16
+
+instance MonadSymbolic m => Wrap m n (RuntimeValue SymWordN32) where
+  wrap = Word32
+
+instance MonadSymbolic m => Wrap m n (RuntimeValue SymWordN64) where
+  wrap = Word64
+
+instance (MonadSymbolic m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymIntArch n) -> b) where
+  wrap f = Fun $ \case
+    Int arg -> pure $ wrap @m @n (f $ arg <&> SymIntArch)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN8 -> b) where
+  wrap f = Fun $ \case
+    Int8 arg -> pure $ wrap @m @n (f arg)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN16 -> b) where
+  wrap f = Fun $ \case
+    Int16 arg -> pure $ wrap @m @n (f arg)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN32 -> b) where
+  wrap f = Fun $ \case
+    Int32 arg -> pure $ wrap @m @n (f arg)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN64 -> b) where
+  wrap f = Fun $ \case
+    Int64 arg -> pure $ wrap @m @n (f arg)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymWordArch n) -> b) where
+  wrap f = Fun $ \case
+    Word arg -> pure $ wrap @m @n (f $ arg <&> SymWordArch)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN8 -> b) where
+  wrap f = Fun $ \case
+    Word8 arg -> pure $ wrap @m @n (f arg)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN16 -> b) where
+  wrap f = Fun $ \case
+    Word16 arg -> pure $ wrap @m @n (f arg)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN32 -> b) where
+  wrap f = Fun $ \case
+    Word32 arg -> pure $ wrap @m @n (f arg)
+    _ -> throwError IllTyped
+
+instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN64 -> b) where
+  wrap f = Fun $ \case
+    Word64 arg -> pure $ wrap @m @n (f arg)
+    _ -> throwError IllTyped
 
 -- | Get the dynamically typed, symbolic value for a literal.
 symLiteral
