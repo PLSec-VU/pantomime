@@ -198,43 +198,25 @@ wbToReg :: Word32 -> Maybe Writeback -> Word32
 wbToReg _ (Just (Write n)) = n
 wbToReg n Nothing = n
 
--- | Leakage Description State
-data LeakState = LState {
-    lreg :: Word32,
-    lbubble :: Bool
-} deriving (Eq, Show)
 
-leak :: MonadState LeakState m => Word16 -> m LeakInst
--- ^ Leak needs to keep track of the register state to know whether to branch or not.
-leak rawInst = do
-    lstate <- get
-    let inst = if lbubble lstate 
-               then Add 0  -- No-op
-               else decode rawInst
-    put $ lstate {lbubble = False}
-    lstate <- get
-    -- ^ state updates and instruction
-    case inst of 
-        Add value -> do
-            let result = lreg lstate + fromIntegral value
-            put $ lstate {lreg = result}
-            return LOther
-        Clr -> do
-            put $ lstate {lreg = 0}
-            return LOther
-        J addr -> do
-            put $ lstate {lbubble = True}
-            return $ LJ addr
-        Beq offset ->
-            if lreg lstate == 0 
-            then do 
-                put $ lstate {lbubble = True}
-                return $ LBeq True offset
-            else return $ LBeq False offset
-        Out -> return LOther
+------------------------------------------------------------------------
+--                              Lemmas                                --
+------------------------------------------------------------------------
 
-leakRun :: LeakState -> Word16 -> (LeakState, LeakInst)
-leakRun s i = swap $ runState (leak i) s    
+-----------------
+--    Fetch    --
+-----------------
+
+-- -- -- | Pipeline Stages
+-- fetch :: MonadState State m => Word8 -> Word8 -> Bool -> Word16 -> Maybe Output -> m (Word8, Instruction, Word8, Maybe Output)
+-- fetch pc nextPc bubble rawInstr out = do
+--     --(pc, fetchInstruction, fetchPC, out)
+--     let inst = if bubble 
+--                then Add 0  -- No-op
+--                else decode rawInstr
+--     pure $ (nextPc, inst, pc, out)
+-- (newPc, fetchInst, newFetchPC, out) <- fetch newPc nextPc bubble rawInst out
+
 
 -- | Simulation State
 data SimState = SimState {
@@ -243,13 +225,147 @@ data SimState = SimState {
     simFetchInstruction :: LeakInst
 } deriving (Eq, Show)
 
-simFetch :: MonadState State m => Word8 -> Word8 -> Bool -> LeakInst -> m (Word8, LeakInst, Word8)
-simFetch pc nextPc bubble leakInst = do
-    let inst = if bubble 
-               then LOther  -- Simulator No-op
-               else leakInst
-    pure $ (nextPc, inst, pc)
+--  J Word8        
+-- -- ^ Jump to target address
+-- | Beq Word8      
 
+isJmp :: Instruction -> Word32 -> Bool
+isJmp (J _) _ = True
+isJmp (Beq _) reg = (reg == 0)
+isJmp _ _ = False
+
+-- obsFetch :: Bool -> (Word32, Word8, Instruction, Word8, Maybe Output) -> (Bool, Bool)
+-- obsFetch (wasJmp,(reg, _, inst, _, _)) = (isJmp reg inst, wasJmp)
+
+-- simFetch :: MonadState SimState m => Word8 -> Word8 -> Bool -> LeakInst -> m (Word8, LeakInst, Word8)
+-- simFetch pc nextPc _ leakInst = do
+--     pure $ (nextPc, leakInst, pc)
+
+
+
+
+-------------------
+--    Execute    --
+-------------------
+
+-- execute :: MonadState State m => Word32 -> Word16 -> Maybe Output -> Word8 -> Instruction -> Word8 -> m ((Maybe Writeback, Maybe Output), Word8, Word8, Bool, Word16, Maybe Output)
+-- execute reg rawInst out pc inst fetchPc = do 
+--     case inst of
+--         Add value -> 
+--             let result = reg + fromIntegral value in
+--             return ((Just $ Write result, Nothing), pc, pc+1, False, rawInst, out)
+--         Clr ->
+--             return ((Just (Write 0), Nothing), pc, pc+1, False, rawInst, out)
+--         Out ->
+--             return ((Nothing, Just $ Val reg), pc, pc+1, False, rawInst, out)
+--         J addr ->
+--             return ((Nothing, Nothing), pc, addr, True, rawInst, out)
+--         Beq offset ->
+--             if reg == 0 
+--             then pure ((Nothing, Nothing), pc, fetchPc + offset, True, rawInst, out) 
+--             else pure ((Nothing, Nothing), pc, pc + 1, False, rawInst, out)
+-- (wbOut, newPc, nextPc, bubble, rawInst, out) <- execute (reg state) rawInst out (pc state) (fetchInstruction state) (fetchPC state)
+
+-- | Leakage Description State
+-- data LeakState = LState {
+--     lreg :: Word32,
+--     lbubble :: Bool
+-- } deriving (Eq, Show)
+
+-- leak :: MonadState LeakState m => Word16 -> m LeakInst
+-- -- ^ Leak needs to keep track of the register state to know whether to branch or not.
+-- leak rawInst = do
+--     lstate <- get
+--     let inst = if lbubble lstate 
+--                then Add 0  -- No-op
+--                else decode rawInst
+--     put $ lstate {lbubble = False}
+--     lstate <- get
+--     -- ^ state updates and instruction
+--     case inst of 
+--         Add value -> do
+--             let result = lreg lstate + fromIntegral value
+--             put $ lstate {lreg = result}
+--             return LOther
+--         Clr -> do
+--             put $ lstate {lreg = 0}
+--             return LOther
+--         J addr -> do
+--             put $ lstate {lbubble = True}
+--             return $ LJ addr
+--         Beq offset ->
+--             if lreg lstate == 0 
+--             then do 
+--                 put $ lstate {lbubble = True}
+--                 return $ LBeq True offset
+--             else return $ LBeq False offset
+--         Out -> return LOther
+
+-- | Leakage Description State
+data LeakState = LState {
+    lreg :: Word32,
+    lfetchInstruction :: Instruction
+} deriving (Eq, Show)
+
+leakExec :: MonadState LeakState m => Instruction -> m (LeakInst, Bool)
+-- ^ Leak needs to keep track of the register state to know whether to branch or not.
+leakExec inst = do
+    lstate <- get
+    -- ^ state updates and instruction
+    case inst of 
+        Add value -> do
+            let result = lreg lstate + fromIntegral value
+            put $ lstate {lreg = result}
+            return (LOther, False)
+        Clr -> do
+            put $ lstate {lreg = 0}
+            return (LOther, False)
+        J addr -> do
+            return (LJ addr, True)
+        Beq offset ->
+            if lreg lstate == 0 
+            then do 
+                return (LBeq True offset, True)
+            else return (LBeq False offset, False)
+        Out -> return (LOther, False)
+
+leakFetch :: MonadState LeakState m => Word16 -> Bool -> m ()
+leakFetch rawInst bubble = do
+    lstate <- get   
+    let inst = if bubble 
+               then Add 0  -- No-op
+               else decode rawInst
+    put lstate {lfetchInstruction = inst}
+    -- ^ returning leakage instruction 
+    --let lInst = leakInst inst (lreg lstate)
+    --return lInst
+    --trace ("inst: " ++ (show inst) ++ " leak inst: " ++ show lInst) $ return lInst
+
+leak :: MonadState LeakState m => Word16 -> m LeakInst
+leak rawInst = do
+    lstate <- get
+    (leakInst, bubble) <- leakExec (lfetchInstruction lstate) 
+    leakFetch rawInst bubble
+    return $ leakInst
+
+
+-- leakExec :: () -> (Word32, Word16, Word8, Instruction, Word8) -> ((), (LeakInst, Word32, Bool))
+-- -- ^ Leak needs to keep track of the register state to know whether to branch or not.
+-- leakExec reg rawInst pc inst fetchPC = do
+--     -- ^ state updates and instruction
+--     case inst of 
+--         Add value -> do
+--             let result = reg + fromIntegral value
+--             return (LOther, result, False)
+--         Clr -> return $ (LOther, 0, False)
+--         J addr -> do
+--             return $ (LJ addr, reg, True)
+--         Beq offset ->
+--             if reg == 0 
+--             then do 
+--                 return $ (LBeq True offset, reg, True)
+--             else return $ (LBeq False offset, reg, False)
+--         Out -> return $ (LOther, reg, False)
 
 simExecute :: MonadState State m => LeakInst -> Word8 -> LeakInst -> Word8 -> m (Word8, Word8, Bool, LeakInst)
 simExecute fetchInst pc inst fetchPc = do 
@@ -261,8 +377,12 @@ simExecute fetchInst pc inst fetchPc = do
         LBeq taken offset ->
             if taken 
             then pure (pc, fetchPc + offset, True, fetchInst) 
-            else pure (pc, pc + 1, False, fetchInst)    
+            else pure (pc, pc + 1, False, fetchInst)
 
+
+
+-- leakRun :: LeakState -> Word16 -> (LeakState, LeakInst)
+-- leakRun s i = swap $ runState (leakExec i) s    
 
 
 simWriteback :: MonadState State m => LeakInst -> m LeakInst
