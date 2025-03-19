@@ -21,8 +21,7 @@ module Symbolic.Solve
 import GHC.Plugins
 import GHC.Platform (PlatformWordSize (..), Platform (..))
 import GHC.Core.TyCo.Rep (scaledThing)
-import GHC.Core.Map.Expr (TrieMap(..))
-import GHC.Tc.Utils.TcType (eqType)
+import GHC.Tc.Utils.TcType (eqType, tcSplitSigmaTy)
 import GHC.MonadCore
 
 import Grisette
@@ -35,14 +34,16 @@ import Grisette
   , SolvingFailure (..)
   , z3
   , solveExcept
+  , mrgLiftA2
+  , indexed
   )
 
 import Control.Monad.Except (MonadError (..), modifyError, runExceptT)
-import Control.Monad.State (evalStateT)
+import Control.Monad.State (evalStateT, MonadState (..))
+import Control.Monad.Trans (MonadTrans(..))
 import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
-import Data.String (IsString(..))
 
 import Symbolic.KnownPos
 import Symbolic.Evaluate
@@ -57,7 +58,9 @@ data NonEq
   -- TODO: It would be nice if the counterexample also included the final
   -- result. Even if just for checking whether the output is actually correct!
   = Counterexample [Concrete]
-  | EvalError SymbolicError
+  | EvalError EvalError
+  -- TODO: Add in the actualy solver error. We don't want to directly copy the
+  -- solver result, as Unsat shows validity on our case.
   | SolveError
 
 instance Outputable NonEq where
@@ -69,8 +72,7 @@ instance Outputable NonEq where
 
 exprSymEq
   :: forall m
-   . MonadFail m
-  => MonadCore m
+   . MonadCore m
   => HasDynFlags m
   => CoreExpr
   -> CoreExpr
@@ -87,45 +89,29 @@ exprSymEq lhs rhs = do
 
 exprSymEq'
   :: forall m n
-   . MonadFail m
-  => MonadCore m
+   . MonadCore m
   => KnownPos n
   => CoreExpr
   -> CoreExpr
   -> m (Either NonEq ())
 exprSymEq' lhs rhs = runExceptT $ do
+  unless (exprType lhs `eqType` exprType rhs) $ throwError (EvalError IllTyped)
+
   let st = SymbolicState
         { nextIdx = 0
         }
 
   (bndrs, lres, rres, eq) <- flip evalStateT st . modifyError EvalError $ do
-    bndrs <- symbolicBndrs lhs
+    bndrs <- symbolicBndrs $ exprType lhs
 
     let saturate expr = do
-          value <- evaluate @_ @n emptyTM expr
+          value <- evaluate @_ @n emptyEnv expr
           applyValues @_ @n value bndrs
 
     lresult <- saturate lhs
     rresult <- saturate rhs
-
-    dbg lhs
-    case lresult of
-      ADT ty val -> do
-        dbg ty
-        dbg' $ show val
-      _ -> pure ()
-
-    dbg rhs
-    case rresult of
-      ADT ty val -> do
-        dbg ty
-        dbg' $ show val
-      _ -> pure ()
-
     eq <- assertEq lresult rresult
     pure (bndrs, lresult, rresult, eq)
-
-  dbg' $ show eq
 
   -- TODO: We could let the user decide which solver no?
   let z3' = z3
@@ -145,20 +131,17 @@ exprSymEq' lhs rhs = runExceptT $ do
   result <- liftCore . liftIO $ solveExcept z3' translate eq
   case result of
     Right model -> do
-      let concreteValue' = modifyError EvalError . concretize model
-      bndrs' <- forM bndrs concreteValue'
-      lres' <- concreteValue' lres
-      rres' <- concreteValue' rres
+      let concretize' = modifyError EvalError . concretize model
+      bndrs' <- forM bndrs concretize'
+      lres' <- concretize' lres
+      rres' <- concretize' rres
       dbg' "============="
-      dbg' $ show model
-      dbg' "-------------"
       dbg bndrs'
-      dbg' "*************"
+      dbg' "-------------"
       dbg lres'
-      dbg' "@@@@@@@@@@@@@"
+      dbg' "=/=/=/=/=/=/="
       dbg rres'
-      dbg' "ignore after this for now!"
-
+      _ <- error "We crash on non-equal for now."
 
       throwError $ Counterexample bndrs'
     Left Unsat -> pure ()
@@ -166,77 +149,101 @@ exprSymEq' lhs rhs = runExceptT $ do
 
 -- FIXME: I don't think this works for divide by zero. I.e. if only one of the
 -- two expressions fail, it should be non-equal.
--- TODO: Write this using 'curry $ \case {..}'
 assertEq
   :: forall m n
-   . MonadError SymbolicError m
+   . MonadError EvalError m
+  => MonadCore m
   => KnownPos n
   => Value m n
   -> Value m n
   -> m (RuntimeValue SymBool)
-assertEq (Int lhs) (Int rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Int8 lhs) (Int8 rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Int16 lhs) (Int16 rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Int32 lhs) (Int32 rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Int64 lhs) (Int64 rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Word lhs) (Word rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Word8 lhs) (Word8 rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Word16 lhs) (Word16 rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Word32 lhs) (Word32 rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Word64 lhs) (Word64 rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Float lhs) (Float rhs) = pure $ cmpRuntime lhs rhs
-assertEq (Double lhs) (Double rhs) = pure $ cmpRuntime lhs rhs
-assertEq (ADT lty lhs) (ADT rty rhs) = do
-  unless (lty `eqType` rty) $ throwError IllTyped
-  (tyCon, tyArgs) <- whyFail IllTyped $ splitTyConApp_maybe lty
-  let dataCons = tyConDataCons tyCon
+assertEq = curry $ \case
+  (Int lhs, Int rhs) -> pure $ cmpRuntime lhs rhs
+  (Int8 lhs, Int8 rhs) -> pure $ cmpRuntime lhs rhs
+  (Int16 lhs, Int16 rhs) -> pure $ cmpRuntime lhs rhs
+  (Int32 lhs, Int32 rhs) -> pure $ cmpRuntime lhs rhs
+  (Int64 lhs, Int64 rhs) -> pure $ cmpRuntime lhs rhs
+  (Word lhs, Word rhs) -> pure $ cmpRuntime lhs rhs
+  (Word8 lhs, Word8 rhs) -> pure $ cmpRuntime lhs rhs
+  (Word16 lhs, Word16 rhs) -> pure $ cmpRuntime lhs rhs
+  (Word32 lhs, Word32 rhs) -> pure $ cmpRuntime lhs rhs
+  (Word64 lhs, Word64 rhs) -> pure $ cmpRuntime lhs rhs
+  (Float lhs, Float rhs) -> pure $ cmpRuntime lhs rhs
+  (Double lhs, Double rhs) -> pure $ cmpRuntime lhs rhs
+  (ADT lty lhs, ADT rty rhs) -> do
+    -- Ensure the equality is sound.
+    unless (lty `eqType` rty) $ throwError IllTyped
 
-  branches <- forM dataCons $ \dataCon -> do
-    -- Ensure that we are in
-    let inBranch adt = adtIsDataCon @n adt dataCon
-    let eqBranch = cmpRuntime (inBranch lhs) (inBranch rhs)
+    -- Gather type info.
+    (tyCon, tyArgs) <- whyFail IllTyped $ splitTyConApp_maybe lty
+    let dataCons = tyConDataCons tyCon
 
-    -- Gather the field names.
-    let names = dataConAccessorNames dataCon
-    let tys = scaledThing <$> dataConInstArgTys dataCon tyArgs
-    let accessors = zip names tys
+    -- Gather the branches for each DataCon this ADT could be. This is a pair of
+    -- conditional (i.e. the DataCon matches) and the inner assertion.
+    branches <- forM dataCons $ \dataCon -> do
+      -- Ensure that both ADTs match the current DataCon.
+      let inBranch adt = adtIsDataCon @n adt dataCon
+      let conditional = mrgLiftA2 (.&&) (inBranch lhs) (inBranch rhs)
 
-    -- Check that every field is the same.
-    assertions <- forM accessors $ \(name, ty) -> do
-      lfield <- accessField' @m @n lhs name ty
-      rfield <- accessField' rhs name ty
-      assertEq lfield rfield
+      -- Gather the field names.
+      let names = dataConAccessorNames dataCon
+      let tys = scaledThing <$> dataConInstArgTys dataCon tyArgs
+      let accessors = zip names tys
 
-    let assertions' = foldl' (liftA2 (.&&)) (pure true) assertions
+      -- Assertion for every field that they are equal.
+      assertions <- forM accessors $ \(name, ty) -> do
+        lfield <- accessField' @_ @n lhs name ty
+        rfield <- accessField' rhs name ty
+        assertEq lfield rfield
 
-    pure $ (eqBranch, assertions')
+      -- Fold the assertions per-field into a single conjunct.
+      let assertion = foldl' (mrgLiftA2 (.&&)) (pure true) assertions
 
-  let invalid = throwError Invalid
+      -- TODO: Maybe this should go somewhere else? Is there not a standard
+      -- function for this?
+      let implies x y = symNot x .|| y
 
-  foldM' invalid branches $ \fl (cond, rhs') -> do
-    pure $ iteRuntime cond rhs' fl
-assertEq (Cast' lco lhs) (Cast' rco rhs) = do
-  unless (lco `eqCoercion` rco) $ throwError IllTyped
-  assertEq lhs rhs
-assertEq _ _ = throwError IllTyped
+      -- If the tags match, then the fields should also match.
+      pure $ mrgLiftA2 implies conditional assertion
+
+    -- Ensure the tags are actually equal.
+    let eqTag = cmpRuntime (accessTag @n lhs) (accessTag rhs)
+
+    -- Merge the branches as a large if-then-else.
+    pure $ foldl' (mrgLiftA2 (.&&)) eqTag branches
+
+  (Cast' lco lhs, Cast' rco rhs) -> do
+    unless (lco `eqCoercion` rco) $ throwError IllTyped
+    assertEq lhs rhs
+
+  (Ty lhs, Ty rhs) -> pure . pure . con $ lhs `eqType` rhs
+  (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
+  _ -> throwError IllTyped
 
 symbolicBndrs
-  :: MonadError SymbolicError m
+  :: forall m n
+   . MonadError EvalError m
   => KnownPos n
-  => CoreExpr
+  => Type
   -> m [Value m n]
-symbolicBndrs expr = do
-  let (bndrs, _) = collectBinders expr
-  forM bndrs symbolicInstance
+symbolicBndrs ty = do
+  ty' <- case tcSplitSigmaTy ty of
+    ([], [], ty') -> pure ty'
+    -- TODO: Support polymorphism.
+    -- For now, we don't support polymorphism or dictionaries at the top level.
+    _ -> throwError UnsupportedExpr
 
-symbolicInstance
-  :: MonadError SymbolicError m
-  => KnownPos n
-  => Id
-  -> m (Value m n)
-symbolicInstance bndr = typedValue symbolic ty
-  where
-    symbolic :: Solvable c a => RuntimeValue a
-    symbolic = pure . sym . fromString $ name
-    name = occNameString $ occName bndr
-    ty = varType bndr
+  let (argTys, _) = splitFunTys ty'
+
+  -- Use state monad to track unique identifier for arguments.
+  flip evalStateT 0 . forM argTys $ \argTy -> do
+    -- Get next identifier.
+    idx <- state (\s -> let s' = s + 1 in (s, s'))
+
+    -- Create symbolic variable.
+    let symbolic :: Solvable c t => RuntimeValue t
+        symbolic = pure . sym $ indexed "!arg" idx
+
+    -- Type the symbolic variable according to the argument type.
+    let argTy' = scaledThing argTy
+    lift $ typedValue symbolic argTy'

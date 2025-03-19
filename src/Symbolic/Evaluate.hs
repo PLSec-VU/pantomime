@@ -16,18 +16,23 @@
 module Symbolic.Evaluate
   ( evaluate
   , SymbolicState (..)
+
+  , Environment (..)
+  , emptyEnv
+  , extendEnv
+  , extendManyEnv
+  , lookupEnv
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
-import GHC.Core.Map.Expr (TrieMap(..), insertTM)
 import GHC.Core.TyCo.Rep (scaledThing)
-import GHC.Types.Unique.DFM (UniqDFM)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.MonadCore
 
-import Control.Monad (forM)
+import Control.Monad (forM, foldM)
 import Control.Monad.Except
 import Control.Monad.State
+import Control.Applicative (Alternative(..))
 
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
@@ -42,8 +47,9 @@ import Symbolic.Runtime
 import Symbolic.ADT
 import Symbolic.Value
 import BitVec
+import GHC.Core.TyCo.Subst (substTy)
 
-type MonadSymbolic m = (MonadError SymbolicError m, MonadState SymbolicState m, MonadCore m)
+type MonadSymbolic m = (MonadError EvalError m, MonadState SymbolicState m, MonadCore m)
 
 newtype SymbolicState = SymbolicState
   { nextIdx :: Int
@@ -56,7 +62,55 @@ freshADT = state $ \s -> do
   let adt = sym $ indexed "!ADT" idx
   (pure adt, s')
 
-type Environment m n = UniqDFM Var (Value m n)
+data Environment m n = Environment
+  { idSubst :: IdEnv (Value m n)
+  , tvSubst :: TvSubstEnv
+  , cvSubst :: CvSubstEnv
+  }
+
+emptyEnv :: Environment m n
+emptyEnv = Environment
+  { idSubst = emptyVarEnv
+  , tvSubst = emptyVarEnv
+  , cvSubst = emptyVarEnv
+  }
+
+lookupEnv
+  :: MonadError EvalError m
+  => Environment m n
+  -> Var
+  -> m (Value m n)
+lookupEnv env var = whyFail UnboundVariable $ if
+  | isTyVar var -> Ty <$> lookupVarEnv (tvSubst env) var
+  | isCoVar var -> Co <$> lookupVarEnv (cvSubst env) var
+  | isNonCoVarId var -> lookupVarEnv (idSubst env) var
+  | otherwise -> empty
+
+extendEnv
+  :: MonadError EvalError m
+  => Environment m n
+  -> Var
+  -> Value m n
+  -> m (Environment m n)
+extendEnv env var = \case
+  Ty ty | isTyVar var -> pure $ env
+    { tvSubst = extendVarEnv (tvSubst env) var ty
+    }
+  Co co | isCoVar var -> pure $ env
+    { cvSubst = extendVarEnv (cvSubst env) var co
+    }
+  value | isNonCoVarId var -> pure $ env
+    { idSubst = extendVarEnv (idSubst env) var value
+    }
+  _ -> throwError IllTyped
+
+extendManyEnv
+  :: MonadError EvalError m
+  => Foldable t
+  => Environment m n
+  -> t (Var, Value m n)
+  -> m (Environment m n)
+extendManyEnv = foldM $ \env (var, value) -> extendEnv env var value
 
 evaluate
   :: forall m n
@@ -69,14 +123,14 @@ evaluate env = \case
   -- TODO: Add support for CoreUnfolding and DFunUnfolding.
   Var var | Just op <- isPrimOpId_maybe var -> evalPrimOp op
   Var var | Just dataCon <- isDataConId_maybe var -> evalDataCon dataCon
-  Var var -> whyFail UnboundVariable $ lookupTM var env
+  Var var -> lookupEnv env var
 
   Lit lit -> evalLiteral lit
 
   Lam bndr body -> pure . Fun $ \arg -> do
     -- TODO: I think it would be good to have a check here to ensure that the
     -- argument has the correct type.
-    let env' = insertTM bndr arg env
+    env' <- extendEnv env bndr arg
     evaluate env' body
 
   App fun arg -> do
@@ -86,7 +140,7 @@ evaluate env = \case
 
   Let (NonRec bndr arg) body -> do
     arg' <- evaluate env arg
-    let env' = insertTM bndr arg' env
+    env' <- extendEnv env bndr arg'
     evaluate env' body
 
   -- Perhaps we could handle these by allowing a Tick annotation to specify an
@@ -97,7 +151,7 @@ evaluate env = \case
 
   Case scrut bndr ty alts -> do
     scrut' <- evaluate env scrut
-    let env' = insertTM bndr scrut' env
+    env' <- extendEnv env bndr scrut'
 
     alts' <- forM alts $ evalAlt env' scrut'
 
@@ -113,11 +167,15 @@ evaluate env = \case
   -- Ticks do not affect evaluation, thus we can skip it.
   Tick _ expr -> evaluate env expr
 
-  -- FIXME: I should substitute the type.
-  Type ty -> pure $ Ty ty
+  Type ty -> do
+    let subst = Subst emptyInScopeSet emptyVarEnv (tvSubst env) (cvSubst env)
+    let ty' = substTy subst ty
+    pure $ Ty ty'
 
-  -- FIXME: I should substitute the coercion.
-  Coercion co -> pure $ Co co
+  Coercion co -> do
+    let subst = Subst emptyInScopeSet emptyVarEnv (tvSubst env) (cvSubst env)
+    let co' = substCo subst co
+    pure $ Co co'
 
 -- | Return the condition to run this alternative and its symbolic rhs.
 --
@@ -148,8 +206,7 @@ evalAlt env scrut = \case
       accessField' scrut' name (varType bndr)
 
     -- Extend the environment with field accessors for each binder.
-    let insertManyTM = foldl' . flip . uncurry $ insertTM
-    let env' = insertManyTM env $ zip bndrs fields
+    env' <- extendManyEnv env $ zip bndrs fields
 
     -- Evaluate the right-hand side with the extended environment.
     rhs' <- evaluate env' rhs
@@ -203,8 +260,8 @@ evalDataCon dataCon = do
 
   -- Create an n-ary function accepting types, which will be used to instantiate
   -- the data constructor.
-  final <- nArity root nUnivTys $ \_ univ -> \case
-    Ty ty -> pure $ ty : univ
+  final <- nArity root nUnivTys $ \univ _ -> \case
+    Ty ty -> pure $ univ <> [ty]
     _ -> throwError IllTyped
 
   -- We start with an emtpy list of type instances.
@@ -240,22 +297,59 @@ evalDataConInst dataCon tys = do
   fields <- forM accessors $ \(name, ty) -> do
     accessField' adt name ty
 
-  -- The root is an ADT that asserts the given conditional holds.
+  -- The root is an ADT that assumes the given conditional holds.
   let root cond = do
         let ty = mkTyConApp (dataConTyCon dataCon) tys
-        let value = assertRuntime cond adt
+        let value = assumeRuntime cond adt
         pure $ ADT ty value
 
   -- Accumulate a function that takes the fields as arguments. We pass a
   -- conditional to the root that states the field accessors are equal to the
   -- actual arguments.
-  final <- nArity root fields $ \field cond arg -> do
+  final <- nArity root fields $ \cond field arg -> do
     -- Constraint the field of the ADT to be equivalent to the argument.
     extra <- cmpValue field arg
     pure $ liftA2 (.&&) extra cond
 
   -- As a final constraint, the ADT tag should match the given DataCon.
   final $ adtIsDataCon @n adt dataCon
+
+-- | Get the dynamically typed, symbolic value for a literal.
+evalLiteral
+  :: forall m n
+   . MonadError EvalError m
+  => KnownPos n
+  => Literal
+  -> m (Value m n)
+evalLiteral = \case
+  LitNumber ty num -> case ty of
+    LitNumInt -> pure $ Int num'
+    LitNumInt8 -> pure $ Int8 num'
+    LitNumInt16 -> pure $ Int16 num'
+    LitNumInt32 -> pure $ Int32 num'
+    LitNumInt64 -> pure $ Int64 num'
+    LitNumWord -> pure $ Word num'
+    LitNumWord8 -> pure $ Word8 num'
+    LitNumWord16 -> pure $ Word16 num'
+    LitNumWord32 -> pure $ Word32 num'
+    LitNumWord64 -> pure $ Word64 num'
+    -- TODO: The BigNat primitive operations are kind of "hidden". Somehow, we
+    -- want to wrap the behaviour!
+    -- LitNumBigNat -> throwError ()
+    _ -> throwError UnsupportedExpr
+    where
+      num' :: Num a => RuntimeValue a
+      num' = pure $ fromInteger num
+
+  LitFloat num -> do
+    let num' = pure $ fromRational num
+    pure $ Float num'
+
+  LitDouble num -> do
+    let num' = pure $ fromRational num
+    pure $ Double num'
+
+  _ -> throwError UnsupportedExpr
 
 -- | Get the dynamically typed, symbolic function for a primitive operation.
 -- TODO: I want to add support for rem and quot.
@@ -490,7 +584,8 @@ evalPrimOp = \case
       Int tag -> do
         adt <- freshADT
         let cond = cmpRuntime tag $ accessTag @n adt
-        pure . ADT ty $ assertRuntime cond adt
+        -- Assume that the ADT tag matches the given tag. Return the ADT.
+        pure . ADT ty $ assumeRuntime cond adt
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError UnsupportedExpr
@@ -567,7 +662,7 @@ unary
   -> m (Value m n)
 unary = pure . wrap . fmap @(ExceptT RuntimeError Union)
 
--- TODO: This stuff is probably better suited in a separate file.
+-- TODO: This wrap stuff is probably better suited in a separate file.
 class MonadSymbolic m => Wrap m n a where
   wrap :: a -> Value m n
 
@@ -688,40 +783,3 @@ instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN64 -> b
   wrap f = Fun $ \case
     Word64 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
-
--- | Get the dynamically typed, symbolic value for a literal.
-evalLiteral
-  :: forall m n
-   . MonadError SymbolicError m
-  => KnownPos n
-  => Literal
-  -> m (Value m n)
-evalLiteral = \case
-  LitNumber ty num -> case ty of
-    LitNumInt -> pure $ Int num'
-    LitNumInt8 -> pure $ Int8 num'
-    LitNumInt16 -> pure $ Int16 num'
-    LitNumInt32 -> pure $ Int32 num'
-    LitNumInt64 -> pure $ Int64 num'
-    LitNumWord -> pure $ Word num'
-    LitNumWord8 -> pure $ Word8 num'
-    LitNumWord16 -> pure $ Word16 num'
-    LitNumWord32 -> pure $ Word32 num'
-    LitNumWord64 -> pure $ Word64 num'
-    -- TODO: The BigNat primitive operations are kind of "hidden". Somehow, we
-    -- want to wrap the behaviour!
-    -- LitNumBigNat -> throwError ()
-    _ -> throwError UnsupportedExpr
-    where
-      num' :: Num a => RuntimeValue a
-      num' = pure $ fromInteger num
-
-  LitFloat num -> do
-    let num' = pure $ fromRational num
-    pure $ Float num'
-
-  LitDouble num -> do
-    let num' = pure $ fromRational num
-    pure $ Double num'
-
-  _ -> throwError UnsupportedExpr

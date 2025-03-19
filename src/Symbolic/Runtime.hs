@@ -18,7 +18,7 @@ module Symbolic.Runtime
   , RuntimeError (..)
   , cmpRuntime
   , iteRuntime
-  , assertRuntime
+  , assumeRuntime
   ) where
 
 import GHC.Utils.Outputable (Outputable (..), text)
@@ -92,15 +92,15 @@ iteRuntime cond tr fl = do
   cond' <- cond
   mrgIte cond' tr fl
 
--- | Assert that the given condition holds.
+-- | Assume that the given condition holds.
 -- FIXME: This should respect lazy semantics. The current implementation
 -- forces the conditional, which is not what we want from an assert. Assertions
 -- should not force evaluation, but just restrict computation given no failure
 -- occurred. Maybe the problem is in the comparison function cmpRuntime btw.
 -- I'll have to think about it once I add support for bottom values.
-assertRuntime
+assumeRuntime
   :: SimpleMergeable a
   => RuntimeValue SymBool
   -> RuntimeValue a
   -> RuntimeValue a
-assertRuntime cond tr = iteRuntime cond tr $ throwError Invalid
+assumeRuntime cond tr = iteRuntime cond tr $ throwError Invalid

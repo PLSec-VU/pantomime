@@ -62,7 +62,7 @@ instance Outputable Concrete where
 
 concretize
   :: forall m m' n
-   . MonadError SymbolicError m
+   . MonadError EvalError m
   => KnownPos n
   => Model
   -> Value m' n

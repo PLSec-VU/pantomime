@@ -15,7 +15,7 @@
 
 module Symbolic.Value
   ( Value (..)
-  , SymbolicError (..)
+  , EvalError (..)
   , mkCast'
   , accessField'
   , typedValue
@@ -46,6 +46,10 @@ import Symbolic.ADT
 -- TODO: I think the Int and Word stuff should go under one constructor: Prim.
 -- They all function pretty much the same anyway.
 data Value m n where
+  -- TODO: Add support for Char
+  -- TODO: Add support for ByteArray (as this is how big integers are
+  -- TODO: Add support for symbolic (higher order) functions.
+  -- implemented under the hood).
   -- Char :: RuntimeValue (SymWordN 31) -> Value m n
   -- BigNat :: RuntimeValue SymInteger -> Value m n
   Int :: RuntimeValue (SymIntN n) -> Value m n
@@ -69,15 +73,35 @@ data Value m n where
   Ty :: Type -> Value m n
   Co :: Coercion -> Value m n
 
+instance KnownPos n => Outputable (Value m n) where
+  ppr = \case
+    Int val -> text "Int# =>" <+> text (show val)
+    Int8 val -> text "Int8# =>" <+> text (show val)
+    Int16 val -> text "Int16# =>" <+> text (show val)
+    Int32 val -> text "Int32# =>" <+> text (show val)
+    Int64 val -> text "Int64# =>" <+> text (show val)
+    Word val -> text "Word# =>" <+> text (show val)
+    Word8 val -> text "Word8# =>" <+> text (show val)
+    Word16 val -> text "Word16# =>" <+> text (show val)
+    Word32 val -> text "Word32# =>" <+> text (show val)
+    Word64 val -> text "Word64# =>" <+> text (show val)
+    Float val -> text "Float# =>" <+> text (show val)
+    Double val -> text "Double# =>" <+> text (show val)
+    ADT ty val -> ppr ty <+> "=>" <+> text (show val)
+    Cast' co val -> ppr co <+> "=>" <+> ppr val
+    Fun _ -> text "Fun ??"
+    Ty ty -> text "@" <+> ppr ty
+    Co co -> ppr co
+
 -- TODO: These errors give very little information on what went actually wrong.
 -- I should allow some information to be tagged onto them...
-data SymbolicError where
-  IllTyped :: SymbolicError
-  UnsupportedExpr :: SymbolicError
-  UnboundVariable :: SymbolicError
+data EvalError where
+  IllTyped :: EvalError
+  UnsupportedExpr :: EvalError
+  UnboundVariable :: EvalError
   deriving Show
 
-instance Outputable SymbolicError where
+instance Outputable EvalError where
   ppr = \case
     IllTyped -> text "ill-typed"
     UnsupportedExpr -> text "unsupported expression"
@@ -100,7 +124,7 @@ mkCast' co = \case
 -- why this would possibly fail.
 typedValue
   :: forall m n
-   . MonadError SymbolicError m
+   . MonadError EvalError m
   => KnownPos n
   => (forall c t. Solvable c t => LinkedRep c t => RuntimeValue t)
   -> Type
@@ -134,7 +158,7 @@ typedValue value ty
 -- It will be typed according to the given core type.
 invalidValue 
   :: forall m n
-   . MonadError SymbolicError m
+   . MonadError EvalError m
   => KnownPos n
   => Type
   -> m (Value m n)
@@ -149,7 +173,7 @@ invalidValue = typedValue $ throwError Invalid
 -- of the normal accessField function.
 accessField'
   :: forall m n
-   . MonadError SymbolicError m
+   . MonadError EvalError m
   => KnownPos n
   => RuntimeValue SymADT
   -> String
@@ -197,12 +221,12 @@ nArity
   -- ^ Root value and what we accumulate.
   -> t a
   -- ^ What we fold over. Decides the arity of the function.
-  -> (a -> b -> Value m n -> m b)
+  -> (b -> a -> Value m n -> m b)
   -- ^ Accumulation function
   -> m (b -> m (Value m n))
-nArity acc xs f = foldM' acc xs $ \acc' x -> do
+nArity acc xs f = foldrM' acc xs $ \x acc' -> do
   pure $ \y -> pure . Fun $ \arg -> do
-    res <- f x y arg
+    res <- f y x arg
     acc' res
 
 -- | Apply a function to a value.
@@ -210,7 +234,7 @@ nArity acc xs f = foldM' acc xs $ \acc' x -> do
 -- This will fail if the first value is not a function, or if the inner function
 -- throws upon receiving the argument.
 applyValue
-  :: MonadError SymbolicError m
+  :: MonadError EvalError m
   => Value m n
   -> Value m n
   -> m (Value m n)
@@ -222,7 +246,7 @@ applyValue fun arg = case fun of
 --
 -- A foldM over a call of 'applyValue'.
 applyValues
-  :: MonadError SymbolicError m
+  :: MonadError EvalError m
   => Value m n
   -> [Value m n]
   -> m (Value m n)
@@ -234,8 +258,10 @@ applyValues = foldM applyValue
 -- an ADT match the fields of another ADT. Instead, we return an equality of the
 -- ADT identifiers. This is a stronger property than just matching fields. Thus,
 -- this is only fit as an assumption and not as a final assertion.
+-- TODO: I guess this should be like 'strongCmpValue' (as the property we are
+-- checking for is strong, i.e. ADT identifier equivalence)
 cmpValue
-  :: MonadError SymbolicError m
+  :: MonadError EvalError m
   => KnownPos n
   => Value m' n
   -> Value m' n
@@ -254,7 +280,7 @@ cmpValue = curry $ \case
   (Float lhs, Float rhs) -> pure $ cmpRuntime lhs rhs
   (Double lhs, Double rhs) -> pure $ cmpRuntime lhs rhs
   (ADT lty lhs, ADT rty rhs) -> do
-    unless (lty `eqType` rty) $ throwError IllTyped
+    unless (lty `eqType` rty) $ throwError $ IllTyped
     pure $ cmpRuntime lhs rhs
   (Cast' lco lhs, Cast' rco rhs) -> do
     unless (lco `eqCoercion` rco) $ throwError IllTyped
@@ -269,7 +295,7 @@ cmpValue = curry $ \case
 -- not work for these. As Haskell does not have dependent types, this should not
 -- be a problem.
 iteValue
-  :: MonadError SymbolicError m
+  :: MonadError EvalError m
   => KnownPos n
   => RuntimeValue SymBool
   -> Value m n
