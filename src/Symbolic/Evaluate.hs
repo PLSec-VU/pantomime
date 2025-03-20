@@ -15,24 +15,19 @@
 
 module Symbolic.Evaluate
   ( evaluate
+  , MonadEval
   , SymbolicState (..)
-
-  , Environment (..)
-  , emptyEnv
-  , extendEnv
-  , extendManyEnv
-  , lookupEnv
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Core.TyCo.Subst (substTy)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.MonadCore
 
-import Control.Monad (forM, foldM)
+import Control.Monad (forM)
 import Control.Monad.Except
 import Control.Monad.State
-import Control.Applicative (Alternative(..))
 
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
@@ -46,75 +41,43 @@ import Symbolic.KnownPos
 import Symbolic.Runtime
 import Symbolic.ADT
 import Symbolic.Value
+import Symbolic.Environment
 import BitVec
-import GHC.Core.TyCo.Subst (substTy)
 
-type MonadSymbolic m = (MonadError EvalError m, MonadState SymbolicState m, MonadCore m)
+-- TODO: Remove MonadCore from the requirements.
+type MonadEval m = (MonadError EvalError m, MonadState SymbolicState m, MonadCore m)
 
+-- | State to track the next unique index for a symbolic identifier.
 newtype SymbolicState = SymbolicState
   { nextIdx :: Int
   }
 
-freshADT :: MonadState SymbolicState m => m (RuntimeValue SymADT)
-freshADT = state $ \s -> do
+-- | Get a fresh ADT identifier.
+freshADT
+  :: forall m n
+   . MonadState SymbolicState m
+  => KnownPos n
+  => Type
+  -> m (RuntimeValue SymADT)
+freshADT ty = state $ \s -> do
+  -- Fetch index for identifier.
   let idx = nextIdx s
   let s' = s { nextIdx = idx + 1 }
-  let adt = sym $ indexed "!ADT" idx
-  (pure adt, s')
 
-data Environment m n = Environment
-  { idSubst :: IdEnv (Value m n)
-  , tvSubst :: TvSubstEnv
-  , cvSubst :: CvSubstEnv
-  }
+  -- Create a fresh ADT.
+  let symbol = indexed "!ADT" idx
+  let adt = pure $ sym symbol
 
-emptyEnv :: Environment m n
-emptyEnv = Environment
-  { idSubst = emptyVarEnv
-  , tvSubst = emptyVarEnv
-  , cvSubst = emptyVarEnv
-  }
+  -- Ensure that the tag is within bounds.
+  let adt' = assumeRuntime (tagInRange @n ty adt) adt
 
-lookupEnv
-  :: MonadError EvalError m
-  => Environment m n
-  -> Var
-  -> m (Value m n)
-lookupEnv env var = whyFail UnboundVariable $ if
-  | isTyVar var -> Ty <$> lookupVarEnv (tvSubst env) var
-  | isCoVar var -> Co <$> lookupVarEnv (cvSubst env) var
-  | isNonCoVarId var -> lookupVarEnv (idSubst env) var
-  | otherwise -> empty
+  -- Return fresh ADT and the next index.
+  (adt', s')
 
-extendEnv
-  :: MonadError EvalError m
-  => Environment m n
-  -> Var
-  -> Value m n
-  -> m (Environment m n)
-extendEnv env var = \case
-  Ty ty | isTyVar var -> pure $ env
-    { tvSubst = extendVarEnv (tvSubst env) var ty
-    }
-  Co co | isCoVar var -> pure $ env
-    { cvSubst = extendVarEnv (cvSubst env) var co
-    }
-  value | isNonCoVarId var -> pure $ env
-    { idSubst = extendVarEnv (idSubst env) var value
-    }
-  _ -> throwError IllTyped
-
-extendManyEnv
-  :: MonadError EvalError m
-  => Foldable t
-  => Environment m n
-  -> t (Var, Value m n)
-  -> m (Environment m n)
-extendManyEnv = foldM $ \env (var, value) -> extendEnv env var value
-
+-- | Evaluate an expression into a symbolic Value.
 evaluate
   :: forall m n
-   . MonadSymbolic m
+   . MonadEval m
   => KnownPos n
   => Environment m n
   -> CoreExpr
@@ -183,7 +146,7 @@ evaluate env = \case
 -- environment.
 evalAlt
   :: forall m n
-   . MonadSymbolic m
+   . MonadEval m
   => KnownPos n
   => Environment m n
   -> Value m n
@@ -196,10 +159,16 @@ evalAlt env scrut = \case
       ADT _ adt -> pure adt
       _ -> throwError IllTyped
 
-    -- Whether the "tag" field on this ADT is equivalent to the DataCon.
+    -- Whether the tag of this ADT is equivalent to the DataCon.
     let conditional = adtIsDataCon @n scrut' dataCon
 
     -- Gather field accessors for all binders.
+    -- FIXME: I think the accessor names are returned in the same order as
+    -- dataConOrigArgTys. I'm not sure if this actually matches the types we
+    -- get here. I think they may be reordered. We should probably use
+    -- dataConFieldType_maybe to extract the matching type for each of the
+    -- arguments? I'll have to look into this. It's kind of important to not
+    -- mess this up!
     let names = dataConAccessorNames dataCon
     let accessors = zip names bndrs
     fields <- forM accessors $ \(name, bndr) -> do
@@ -226,27 +195,14 @@ evalAlt env scrut = \case
     pure (conditional, rhs')
 
   Alt DEFAULT [] rhs -> do
-    let conditional = case scrut of
-          ADT ty adt -> do
-            -- Ensure that the tag is at least in range.
-            -- TODO: Should this not be a prerequisite for any ADT? I.e. that
-            -- whenever we create a symbolic ADT value this should be already
-            -- constrained? Not sure which is better, so I'll leave it here for
-            -- now.
-            let (tyCon, _) = splitTyConApp ty
-            let amount = length $ tyConDataCons tyCon
-            tag <- accessTag @n adt
-            mrgReturn $ 0 .<= tag .&& tag .< fromIntegral amount
-          _ -> pure true
-            
     rhs' <- evaluate env rhs
-    pure (conditional, rhs')
+    pure (pure true, rhs')
 
   _ -> throwError UnsupportedExpr
 
 evalDataCon
   :: forall m n
-   . MonadSymbolic m
+   . MonadEval m
   => KnownPos n
   => DataCon
   -> m (Value m n)
@@ -275,7 +231,7 @@ evalDataCon dataCon = do
 -- should be those applied to the TyCon when constructing the final type.
 evalDataConInst
   :: forall m n
-   . MonadSymbolic m
+   . MonadEval m
   => KnownPos n
   => DataCon
   -- ^ The DataCon for which we will create a symbolic instance.
@@ -285,7 +241,8 @@ evalDataConInst
   -> m (Value m n)
 evalDataConInst dataCon tys = do
   -- Create a fresh identifier for the ADT.
-  adt <- freshADT
+  let ty = mkTyConApp (dataConTyCon dataCon) tys
+  adt <- freshADT @m @n ty
 
   -- Gather the accessor names and instantiate the universal types to create the
   -- field accessors.
@@ -294,12 +251,11 @@ evalDataConInst dataCon tys = do
   let accessors = zip names tys'
 
   -- Gather the fields of the ADT.
-  fields <- forM accessors $ \(name, ty) -> do
-    accessField' adt name ty
+  fields <- forM accessors $ \(name, fty) -> do
+    accessField' adt name fty
 
   -- The root is an ADT that assumes the given conditional holds.
   let root cond = do
-        let ty = mkTyConApp (dataConTyCon dataCon) tys
         let value = assumeRuntime cond adt
         pure $ ADT ty value
 
@@ -314,7 +270,7 @@ evalDataConInst dataCon tys = do
   -- As a final constraint, the ADT tag should match the given DataCon.
   final $ adtIsDataCon @n adt dataCon
 
--- | Get the dynamically typed, symbolic value for a literal.
+-- | Get the value corresponding to a literal.
 evalLiteral
   :: forall m n
    . MonadError EvalError m
@@ -351,11 +307,11 @@ evalLiteral = \case
 
   _ -> throwError UnsupportedExpr
 
--- | Get the dynamically typed, symbolic function for a primitive operation.
+-- | Get the value corresponding to a primitive operation.
 -- TODO: I want to add support for rem and quot.
 evalPrimOp
   :: forall m n
-   . MonadSymbolic m
+   . MonadEval m
   => KnownPos n
   => PrimOp
   -> m (Value m n)
@@ -582,7 +538,7 @@ evalPrimOp = \case
   TagToEnumOp -> pure . Fun $ \case
     Ty ty -> pure . Fun $ \case
       Int tag -> do
-        adt <- freshADT
+        adt <- freshADT @m @n ty
         let cond = cmpRuntime tag $ accessTag @n adt
         -- Assume that the ADT tag matches the given tag. Return the ADT.
         pure . ADT ty $ assumeRuntime cond adt
@@ -663,7 +619,7 @@ unary
 unary = pure . wrap . fmap @(ExceptT RuntimeError Union)
 
 -- TODO: This wrap stuff is probably better suited in a separate file.
-class MonadSymbolic m => Wrap m n a where
+class MonadEval m => Wrap m n a where
   wrap :: a -> Value m n
 
 newtype SymIntArch n where
@@ -704,82 +660,82 @@ instance KnownPos n => SignConversion (SymWordArch n) (SymIntArch n) where
   toUnsigned = SymWordArch . toUnsigned . unSymIntArch
   toSigned = SymIntArch . toSigned . unSymWordArch
 
-instance (MonadSymbolic m, KnownPos n) => Wrap m n (RuntimeValue (SymIntArch n)) where
+instance (MonadEval m, KnownPos n) => Wrap m n (RuntimeValue (SymIntArch n)) where
   wrap = Int . fmap unSymIntArch
 
-instance MonadSymbolic m => Wrap m n (RuntimeValue SymIntN8) where
+instance MonadEval m => Wrap m n (RuntimeValue SymIntN8) where
   wrap = Int8
 
-instance MonadSymbolic m => Wrap m n (RuntimeValue SymIntN16) where
+instance MonadEval m => Wrap m n (RuntimeValue SymIntN16) where
   wrap = Int16
 
-instance MonadSymbolic m => Wrap m n (RuntimeValue SymIntN32) where
+instance MonadEval m => Wrap m n (RuntimeValue SymIntN32) where
   wrap = Int32
 
-instance MonadSymbolic m => Wrap m n (RuntimeValue SymIntN64) where
+instance MonadEval m => Wrap m n (RuntimeValue SymIntN64) where
   wrap = Int64
 
-instance (MonadSymbolic m, KnownPos n) => Wrap m n (RuntimeValue (SymWordArch n)) where
+instance (MonadEval m, KnownPos n) => Wrap m n (RuntimeValue (SymWordArch n)) where
   wrap = Word . fmap unSymWordArch
 
-instance MonadSymbolic m => Wrap m n (RuntimeValue SymWordN8) where
+instance MonadEval m => Wrap m n (RuntimeValue SymWordN8) where
   wrap = Word8
 
-instance MonadSymbolic m => Wrap m n (RuntimeValue SymWordN16) where
+instance MonadEval m => Wrap m n (RuntimeValue SymWordN16) where
   wrap = Word16
 
-instance MonadSymbolic m => Wrap m n (RuntimeValue SymWordN32) where
+instance MonadEval m => Wrap m n (RuntimeValue SymWordN32) where
   wrap = Word32
 
-instance MonadSymbolic m => Wrap m n (RuntimeValue SymWordN64) where
+instance MonadEval m => Wrap m n (RuntimeValue SymWordN64) where
   wrap = Word64
 
-instance (MonadSymbolic m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymIntArch n) -> b) where
+instance (MonadEval m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymIntArch n) -> b) where
   wrap f = Fun $ \case
     Int arg -> pure $ wrap @m @n (f $ arg <&> SymIntArch)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN8 -> b) where
+instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN8 -> b) where
   wrap f = Fun $ \case
     Int8 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN16 -> b) where
+instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN16 -> b) where
   wrap f = Fun $ \case
     Int16 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN32 -> b) where
+instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN32 -> b) where
   wrap f = Fun $ \case
     Int32 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN64 -> b) where
+instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN64 -> b) where
   wrap f = Fun $ \case
     Int64 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymWordArch n) -> b) where
+instance (MonadEval m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymWordArch n) -> b) where
   wrap f = Fun $ \case
     Word arg -> pure $ wrap @m @n (f $ arg <&> SymWordArch)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN8 -> b) where
+instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN8 -> b) where
   wrap f = Fun $ \case
     Word8 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN16 -> b) where
+instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN16 -> b) where
   wrap f = Fun $ \case
     Word16 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN32 -> b) where
+instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN32 -> b) where
   wrap f = Fun $ \case
     Word32 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
-instance (MonadSymbolic m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN64 -> b) where
+instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN64 -> b) where
   wrap f = Fun $ \case
     Word64 arg -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped

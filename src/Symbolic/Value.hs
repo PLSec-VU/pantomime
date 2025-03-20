@@ -48,8 +48,8 @@ import Symbolic.ADT
 data Value m n where
   -- TODO: Add support for Char
   -- TODO: Add support for ByteArray (as this is how big integers are
-  -- TODO: Add support for symbolic (higher order) functions.
   -- implemented under the hood).
+  -- TODO: Add support for symbolic (higher order) functions.
   -- Char :: RuntimeValue (SymWordN 31) -> Value m n
   -- BigNat :: RuntimeValue SymInteger -> Value m n
   Int :: RuntimeValue (SymIntN n) -> Value m n
@@ -147,7 +147,9 @@ typedValue value ty
     value' <- typedValue value ty'
     let co' = mkSymCo co
     pure $ mkCast' co' value'
-  | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT ty value
+  | Just _ <- tcSplitTyConApp_maybe ty = do
+    let adt = assumeRuntime (tagInRange @n ty value) value
+    pure $ ADT ty adt
   | Just (_, _, _, res) <- splitFunTy_maybe ty = do
     let fun _ = typedValue value res
     pure $ Fun fun

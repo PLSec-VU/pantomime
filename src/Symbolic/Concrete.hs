@@ -18,47 +18,78 @@ module Symbolic.Concrete
   , concretize
   ) where
 
-import GHC.Plugins
+import Prelude hiding ((<>))
 
-import Grisette (ToCon (..), EvalSym (..))
+import GHC.Plugins
+import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy, eqType)
+import GHC.Core.Unify (tcMatchTy)
+
+import Grisette (ToCon (..), EvalSym (..), evalSymToCon)
 import Grisette.SymPrim
 import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..))
 
 import Control.Monad.Except (MonadError (..))
-
-import Data.Functor ((<&>))
+import Control.Monad (forM)
 
 import Symbolic.KnownPos
 import Symbolic.Value
 import Symbolic.Runtime
 import Symbolic.ADT
-import Grisette.Core (evalSymToCon)
-import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy, eqType)
-import GHC.Core.Unify (tcMatchTy)
 import Symbolic.Util
-import GHC.Core.TyCo.Rep (scaledThing)
-import Control.Monad (forM)
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.
 data Concrete where
-  Record :: DataCon -> [(String, Concrete)] -> Concrete
+  Record :: DataCon -> [Concrete] -> Concrete
   Primitive :: ModelValue -> Concrete
   Error :: RuntimeError -> Concrete
   Unknown :: Concrete
 
--- TODO: The indentation is a bit off because we vertically nest only the
--- DataCon, while we should nest it with the assignment 'value = DataCon'.
+-- TODO: This isn't the nicest outputable instance. I think we want a concrete
+-- to have a name, such that we can use pprConcrete to output the actual name
+-- instead of a bunch of question marks.
 instance Outputable Concrete where
-  ppr = \case
-    Record dataCon fields -> ppr dataCon $+$ (nest 2 . braces' . vcat $ fields')
-      where
-        braces' x = lbrace <+> x $+$ rbrace
-        fields' = punctuate (text ", ") $ fields <&> pair
-        pair (name, value) = text name <+> "=" <+> ppr value
-    Primitive value -> text $ show value
-    Error err -> "error value: " <+> ppr err
-    Unknown -> text "???"
+  ppr = pprConcrete ("??? =" <+>) id
+
+pprConcrete
+  :: (SDoc -> SDoc)
+  -> (SDoc -> SDoc)
+  -> Concrete
+  -> SDoc
+pprConcrete addHeader addParens = \case
+  Record dataCon fields
+    -- Is saturated tuple?
+    | Just sort <- tyConTuple_maybe $ dataConTyCon dataCon
+    , length fields == dataConSourceArity dataCon -> do
+      let fields' = fsep $ punctuate comma (pprConcrete id id <$> fields)
+      addHeader $ tupleParens sort fields'
+
+    -- Is record?
+    | labels <- dataConFieldLabels dataCon
+    , length labels == dataConSourceArity dataCon -> do
+      let header = addHeader $ ppr dataCon
+
+      let prepend pre (name, value) = do
+            pprConcrete (pre <+> ppr name <+> equals <+>) id value
+
+      let fields' = vcat $ case zip labels fields of
+            -- Add braces on the first and last line. The remaining ones start with
+            -- a comma.
+            x:xs -> prepend lbrace x : fmap (prepend comma) xs ++ [rbrace]
+            -- Skip braces if we don't have fields
+            [] -> []
+
+      hang header 2 fields'
+
+    | otherwise -> do
+      let header = addHeader $ ppr dataCon
+      let fields' = sep $ pprConcrete id parens <$> fields
+      addParens $ hang header 2 fields'
+
+  Primitive value -> addHeader $ text (show value)
+  Error err -> addHeader $ "RUNTIME ERROR" <+> ppr err
+  Unknown -> addHeader $ text "???"
 
 concretize
   :: forall m m' n
@@ -98,7 +129,7 @@ concretize model = \case
             field <- accessField' @m @n adt name ty'
             concretize model field
 
-          pure $ Record dataCon (zip names fields)
+          pure $ Record dataCon fields
         Nothing -> pure Unknown
 
     Left err -> pure $ Error err
@@ -113,7 +144,7 @@ concretize model = \case
           [argTy] -> pure $ scaledThing argTy
           _ -> throwError IllTyped
         arg' <- go value argTy
-        pure $ Record dataCon [("0", arg')]
+        pure $ Record dataCon [arg']
       go value _ = concretize model value
 
   -- TODO: There should be a better error to emit than this no? Maybe we

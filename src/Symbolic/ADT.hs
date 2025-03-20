@@ -27,6 +27,7 @@ module Symbolic.ADT
   , adtIsDataCon
   , accessTag
   , accessField
+  , tagInRange
 
   , dataConAccessorNames
   ) where
@@ -109,12 +110,29 @@ accessField
   => LinkedRep c t
   => RuntimeValue SymADT
   -> String
+  -- TODO: I think this input string should really be Text...
   -> RuntimeValue t
 accessField adt name = do
   let symbol = simple . identifier . fromString $ name
   let accessor = sym @(ADT --> c) @(SymADT -~> t) symbol :: SymADT -~> t
   adt' <- adt
   pure $ accessor # adt'
+
+-- | Boolean denoting when an ADT has a tag that is in-range.
+--
+-- This may, for example, be used to assume that an ADT represents any valid
+-- DataCon.
+tagInRange
+  :: forall n
+   . KnownPos n
+  => Type
+  -> RuntimeValue SymADT
+  -> RuntimeValue SymBool
+tagInRange ty adt = do
+  let (tyCon, _) = splitTyConApp ty
+  let amount = length $ tyConDataCons tyCon
+  tag <- accessTag @n adt
+  mrgPure $ 0 .<= tag .&& tag .< fromIntegral amount
 
 -- | Get the accessor names of this DataCon.
 --

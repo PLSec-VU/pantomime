@@ -12,6 +12,10 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
+-- TODO: I want to remove many of these pragmas, also for the other files. Most
+-- of them should just be included in the top-level flags. There also seems to
+-- be a lot of obsolete stuff. Perhaps its good to first find out which flags
+-- are actually used.
 
 module Symbolic.Solve
   ( NonEq (..)
@@ -47,11 +51,13 @@ import Data.Functor ((<&>))
 
 import Symbolic.KnownPos
 import Symbolic.Evaluate
+import Symbolic.Environment
 import Symbolic.ADT
 import Symbolic.Util
 import Symbolic.Value
 import Symbolic.Concrete
 import Symbolic.Runtime
+import Data.Foldable (forM_)
 
 -- TODO: Rename this thing.
 data NonEq
@@ -95,7 +101,9 @@ exprSymEq'
   -> CoreExpr
   -> m (Either NonEq ())
 exprSymEq' lhs rhs = runExceptT $ do
-  unless (exprType lhs `eqType` exprType rhs) $ throwError (EvalError IllTyped)
+  dbg lhs
+  unless (exprType lhs `eqType` exprType rhs) $ do
+    throwError $ EvalError IllTyped
 
   let st = SymbolicState
         { nextIdx = 0
@@ -121,7 +129,6 @@ exprSymEq' lhs rhs = runExceptT $ do
           }
         }
 
-  -- TODO: We should translate the model to our version!
   -- result <- liftCore . liftIO $ solve z3' eq
   let translate = \case
         Left Invalid -> false
@@ -135,8 +142,7 @@ exprSymEq' lhs rhs = runExceptT $ do
       bndrs' <- forM bndrs concretize'
       lres' <- concretize' lres
       rres' <- concretize' rres
-      dbg' "============="
-      dbg bndrs'
+      forM_ bndrs' dbg
       dbg' "-------------"
       dbg lres'
       dbg' "=/=/=/=/=/=/="
@@ -220,6 +226,7 @@ assertEq = curry $ \case
   (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
   _ -> throwError IllTyped
 
+-- FIXME: We should restrict ADT tags to actually be in range of their tag here!
 symbolicBndrs
   :: forall m n
    . MonadError EvalError m
