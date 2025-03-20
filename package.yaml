@@ -46,6 +46,7 @@ dependencies:
 - mtl
 - microlens
 - QuickCheck
+- grisette >= 0.11.0.0
 
 ghc-options:
 - -Wall

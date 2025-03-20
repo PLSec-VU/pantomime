@@ -25,11 +25,25 @@ source-repository head
 
 library
   exposed-modules:
+      BitVec
       Diverge
       GHC.MonadCore
       Lint
+      Monomorph
       Projection
       Subst
+      Symbolic
+      Symbolic.ADT
+      Symbolic.Concrete
+      Symbolic.Environment
+      Symbolic.Evaluate
+      Symbolic.KnownPos
+      Symbolic.Runtime
+      Symbolic.Solve
+      Symbolic.Util
+      Symbolic.Value
+      Symbolic2
+      SymUtil
       Synth
       Transform
       Transform2
@@ -65,6 +79,7 @@ library
     , composition
     , containers
     , ghc >=9.6.4
+    , grisette >=0.11.0.0
     , microlens
     , mtl
     , syb >=0.7.2.4
@@ -78,6 +93,7 @@ executable uc-plugin-exe
       ClassInline
       LocalClass
       Processor
+      ProcessorControl
       ProcessorModular
       RW
       ThreeAdder
@@ -111,6 +127,7 @@ executable uc-plugin-exe
     , composition
     , containers
     , ghc >=9.6.4
+    , grisette >=0.11.0.0
     , microlens
     , mtl
     , syb >=0.7.2.4
@@ -153,6 +170,7 @@ test-suite uc-plugin-test
     , directory
     , ghc >=9.6.4
     , ghc-paths
+    , grisette >=0.11.0.0
     , hspec
     , microlens
     , mtl
