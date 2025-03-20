@@ -3,6 +3,8 @@ module UC
   , UC (..)
   , UCCompare (..)
   , UCNorm (..)
+  , SymCompare (..)
+  , Spec (..)
   , Projection.Circuit
   ) where
 
@@ -29,6 +31,8 @@ import Types
 import Util
 import Transform
 import Unification
+import Symbolic.Solve
+import Monomorph (monomorphize)
 
 plugin :: Plugin
 plugin = defaultPlugin
@@ -40,13 +44,31 @@ plugin = defaultPlugin
 -- steps! Maybe we can just call it debug?
 install :: MonadCore m => [CommandLineOption] -> Pass m [CoreToDo]
 install _ todo = pure $ mconcat
-  [ normalizePasses
+  [ symComparePasses
+  , checkSpecPasses
+  , normalizePasses
   , comparePasses
   , tacticPasses
   , todo
   ]
   where
     withProxy proxy ls = ($ proxy) <$> ls
+
+    symComparePasses = withProxy (Proxy @(UCGenerated (SymCompare TH.Name)))
+      [ createUCBindsPass
+      , printAndLintPass
+      , symComparePass
+      , removeUCBindsPass
+      ]
+
+    -- TODO: I don't really need to create new binds to do this pass, since I'm
+    -- not modifying the binds anyway.
+    checkSpecPasses = withProxy (Proxy @(UCGenerated (Spec TH.Name)))
+      [ createUCBindsPass
+      , printAndLintPass
+      , checkSpecPass
+      , removeUCBindsPass
+      ]
 
     normalizePasses = withProxy (Proxy @(UCGenerated UCNorm))
       [ createUCBindsPass
@@ -158,6 +180,20 @@ printAndLintPass _ = CoreDoPluginPass name pass
     name = TH.nameBase 'printAndLintPass
     pass = annBindsPassWithGuts $ \(_ :: a) -> printAndLint
 
+symComparePass
+  :: proxy
+  -> CoreToDo
+symComparePass _ = CoreDoPluginPass name pass
+  where
+    name = TH.nameBase 'symComparePass
+    pass = annBindsPassWithGuts symCompare
+
+checkSpecPass :: proxy -> CoreToDo
+checkSpecPass _ = CoreDoPluginPass name pass
+  where
+    name = TH.nameBase 'checkSpecPass
+    pass = annBindsPassWithGuts checkSpec
+
 normalizePass
   :: forall a
    . Data a
@@ -222,6 +258,55 @@ composeImpl uc expr = do
 
   pure $ occurAnalyseExpr expr''
 
+composeImpl'
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => Spec TH.Name
+  -> Pass m CoreExpr
+composeImpl' spec expr = do
+  let resolve name = Var <$> resolveTH' name
+
+  compose <- resolve 'Projection.compose
+  obs <- resolve $ observation' spec
+
+  expr' <- unifyApps compose [expr, obs]
+    ??= "Incompatible types on observation/implementation pair"
+
+  sproj <- resolve 'Projection.sproj
+  proj <- resolve $ projection' spec
+
+  expr'' <- unifyApps sproj [proj, expr']
+    ??= "Incompatible types on (implementation/observation)/projection pair"
+
+  pure $ occurAnalyseExpr expr''
+
+composeSim'
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => Spec TH.Name
+  -> m CoreExpr
+composeSim' uc = do
+  let resolve name = Var <$> resolveTH' name
+
+  compose <- resolve 'Projection.compose
+  sproj' <- resolve 'Projection.sproj'
+
+  sim <- resolve $ simulator' uc
+  leak <- resolve $ leakage' uc
+  proj <- resolve $ projection' uc
+
+  expr' <- unifyApps compose [leak, sim]
+    ??= "Incompatible types on leakage/simulator pair"
+
+  expr'' <- unifyApps sproj' [proj, expr']
+    ??= "Incompatible types on projection/(leakage/simulator) pair"
+
+  pure $ occurAnalyseExpr expr''
+
 composeSim
   :: MonadFail m
   => MonadCore m
@@ -273,6 +358,77 @@ ucCheck (UCGenerated uc) (Bind' var expr) = do
   let var' = setVarType var $ exprType expr''
   pure $ Bind' var' expr''
 
+checkSpec
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => HasDynFlags m
+  => UCGenerated (Spec TH.Name)
+  -> Pass m CoreBind'
+checkSpec (UCGenerated spec) (Bind' var expr) = do
+  guts <- reader modGuts
+  let program = mg_binds guts
+  let scope = extendInScopeSetBndrs emptyInScopeSet program
+
+  imp <- composeImpl' spec expr
+  Lint.panic Lint.base scope imp
+
+  sim <- composeSim' spec
+  Lint.panic Lint.base scope sim
+
+  (imp', sim') <- unifyExprs imp sim
+    ??= "Unable to unify implementation projection with simulator"
+
+  instEnvs <- getInstEnvs'
+  let imp'' = resolveInstances instEnvs imp'
+  let sim'' = resolveInstances instEnvs sim'
+
+  imp''' <- monomorphize guts imp''
+  Lint.panic Lint.base scope imp'''
+
+  sim''' <- monomorphize guts sim''
+  Lint.panic Lint.base scope sim'''
+
+  result <- exprSymEq imp''' sim'''
+
+  case result of
+    Right _ -> do
+      dbg' "Expressions are equal!"
+    Left err -> do
+      dbg err
+      fail "Expressions are **NOT** equal"
+
+  pure $ Bind' var expr
+
+symCompare
+  :: MonadFail m
+  => MonadCore m
+  => MonadReader r m
+  => HasModGuts r
+  => HasDynFlags m
+  => UCGenerated (SymCompare TH.Name)
+  -> Pass m CoreBind'
+symCompare (UCGenerated (SymCompare other)) (Bind' var expr) = do
+  let resolve name = Var <$> resolveTH' name
+
+  guts <- reader modGuts
+  expr' <- monomorphize guts expr
+
+  other' <- do
+    other' <- resolve other
+    monomorphize guts other'
+
+  result <- exprSymEq expr' other'
+
+  case result of
+    Right _ -> do
+      dbg' "Expressions were equal!"
+      pure $ Bind' var expr
+    Left err -> do
+      dbg err
+      fail "Expressions were not equal"
+
 ucCompare
   :: MonadFail m
   => MonadCore m
@@ -317,6 +473,7 @@ unifyAndNorm this other = do
           let expr' = resolveInstances instEnv expr
           Lint.panic Lint.base scope expr'
           guts <- reader modGuts
+          -- monomorphize guts expr'
           normalize guts expr'
 
   -- Normalize circuits

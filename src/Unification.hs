@@ -19,7 +19,6 @@ import GHC.Data.TrieMap (TrieMap (..), insertTM)
 import GHC.Data.Maybe (rightToMaybe)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy)
 
-import Data.Foldable (foldl')
 import Data.Maybe (fromMaybe)
 
 import Control.Applicative (Alternative (..))

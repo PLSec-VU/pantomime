@@ -12,6 +12,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.Trans.Writer (WriterT)
 import Control.Monad.Trans.State (StateT)
+import Control.Monad.Trans.Except (ExceptT)
 import Control.Monad.IO.Class (liftIO)
 
 class Monad m => MonadCore m where
@@ -30,6 +31,9 @@ instance (Monoid w, MonadCore m) => MonadCore (WriterT w m) where
   liftCore = lift . liftCore
 
 instance MonadCore m => MonadCore (StateT s m) where
+  liftCore = lift . liftCore
+
+instance MonadCore m => MonadCore (ExceptT s m) where
   liftCore = lift . liftCore
 
 -- FIXME: We should perhaps make a wrapper for CoreM, because this orphan is

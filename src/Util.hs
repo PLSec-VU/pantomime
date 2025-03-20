@@ -38,7 +38,6 @@ import GHC.Unit.External (eps_inst_env)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
-import Data.Foldable (foldl')
 import Data.Maybe (mapMaybe, listToMaybe)
 import Data.Generics.Aliases (mkT)
 import Data.Generics.Schemes (everywhere)

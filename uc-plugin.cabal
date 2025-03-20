@@ -32,7 +32,6 @@ library
       Monomorph
       Projection
       Subst
-      Symbolic
       Symbolic.ADT
       Symbolic.Concrete
       Symbolic.Environment
@@ -42,11 +41,8 @@ library
       Symbolic.Solve
       Symbolic.Util
       Symbolic.Value
-      Symbolic2
       SymUtil
-      Synth
       Transform
-      Transform2
       Types
       UC
       Unification

@@ -2,6 +2,8 @@ module Types
   ( UC (..)
   , UCNorm (..)
   , UCCompare (..)
+  , SymCompare (..)
+  , Spec (..)
 
   , UCGenerated (..)
   , ucGenAnn
@@ -45,7 +47,27 @@ instance Outputable a => Outputable (UC a) where
         ]
 
 newtype UCCompare a = UCCompare a
-  deriving (Data, Typeable, Functor, Traversable, Foldable)
+  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
+
+-- | Leakage specification of a circuit.
+--
+-- Annotation should be on a circuit of type: Circuit si i o
+-- TODO: At some point this type should replace the original UC annotation and
+-- we should remove the prime on the field names.
+data Spec a = Spec
+  { observation' :: a
+  -- ^ Observation circuit: Circuit so o o'
+  , leakage' :: a
+  -- ^ Leakage circuit: Circuit sl i a
+  , simulator' :: a
+  -- ^ Simulator circuit: Circuit ss a o'
+  , projection' :: a
+  -- ^ State projection: (si, so) -> (sl, ss)
+  }
+  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
+
+newtype SymCompare a = SymCompare a
+  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
 
 data UCNorm = UCNorm
   deriving (Show, Data, Typeable)

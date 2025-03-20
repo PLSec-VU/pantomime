@@ -4,6 +4,7 @@ module Projection
   , sproj
   , sproj'
   , iproj
+  , compose
   , composeI
   , composeS
   ) where
@@ -24,9 +25,15 @@ sproj' :: (s -> s') -> Circuit s' i o -> (s -> i -> (s', o))
 sproj' obs impl s = impl (obs s)
 
 iproj :: Circuit s0 i i' -> Circuit s1 i' o -> Circuit (s0, s1) i o
-iproj leak sim (s0, s1) i = do
-  let (s0', i') = leak s0 i
-  let (s1', o) = sim s1 i'
+iproj = compose
+
+compose
+  :: Circuit s0 i a
+  -> Circuit s1 a o
+  -> Circuit (s0, s1) i o
+compose c0 c1 (s0, s1) i = do
+  let (s0', x) = c0 s0 i
+  let (s1', o) = c1 s1 x
   ((s0', s1'), o)
 
 -- TODO: I guess we don't really want the observation function to be a circuit
