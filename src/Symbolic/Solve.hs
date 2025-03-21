@@ -49,7 +49,7 @@ import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
 
-import Symbolic.KnownPos
+import Symbolic.WordSize
 import Symbolic.Evaluate
 import Symbolic.Environment
 import Symbolic.ADT
@@ -90,13 +90,13 @@ exprSymEq lhs rhs = do
 
   -- We run the comparison with the word size of the target platform.
   case pwsize of
-    PW4 -> exprSymEq' @m @32 lhs rhs
-    PW8 -> exprSymEq' @m @64 lhs rhs
+    PW4 -> exprSymEq' @m @PW4 lhs rhs
+    PW8 -> exprSymEq' @m @PW8 lhs rhs
 
 exprSymEq'
-  :: forall m n
+  :: forall m ws
    . MonadCore m
-  => KnownPos n
+  => KnownWordSize ws
   => CoreExpr
   -> CoreExpr
   -> m (Either NonEq ())
@@ -113,8 +113,8 @@ exprSymEq' lhs rhs = runExceptT $ do
     bndrs <- symbolicBndrs $ exprType lhs
 
     let saturate expr = do
-          value <- evaluate @_ @n emptyEnv expr
-          applyValues @_ @n value bndrs
+          value <- evaluate @_ @ws emptyEnv expr
+          applyValues @_ @ws value bndrs
 
     lresult <- saturate lhs
     rresult <- saturate rhs
@@ -156,12 +156,12 @@ exprSymEq' lhs rhs = runExceptT $ do
 -- FIXME: I don't think this works for divide by zero. I.e. if only one of the
 -- two expressions fail, it should be non-equal.
 assertEq
-  :: forall m n
+  :: forall m ws
    . MonadError EvalError m
   => MonadCore m
-  => KnownPos n
-  => Value m n
-  -> Value m n
+  => KnownWordSize ws
+  => Value m ws
+  -> Value m ws
   -> m (RuntimeValue SymBool)
 assertEq = curry $ \case
   (Primitive lhs, Primitive rhs) -> cmpPrimitive lhs rhs
@@ -177,7 +177,7 @@ assertEq = curry $ \case
     -- conditional (i.e. the DataCon matches) and the inner assertion.
     branches <- forM dataCons $ \dataCon -> do
       -- Ensure that both ADTs match the current DataCon.
-      let inBranch adt = adtIsDataCon @n adt dataCon
+      let inBranch adt = adtIsDataCon @ws adt dataCon
       let conditional = mrgLiftA2 (.&&) (inBranch lhs) (inBranch rhs)
 
       -- Gather the field names.
@@ -187,7 +187,7 @@ assertEq = curry $ \case
 
       -- Assertion for every field that they are equal.
       assertions <- forM accessors $ \(name, ty) -> do
-        lfield <- accessField' @_ @n lhs name ty
+        lfield <- accessField' @_ @ws lhs name ty
         rfield <- accessField' rhs name ty
         assertEq lfield rfield
 
@@ -202,7 +202,7 @@ assertEq = curry $ \case
       pure $ mrgLiftA2 implies conditional assertion
 
     -- Ensure the tags are actually equal.
-    let eqTag = cmpRuntime (accessTag @n lhs) (accessTag rhs)
+    let eqTag = cmpRuntime (accessTag @ws lhs) (accessTag rhs)
 
     -- Merge the branches as a large if-then-else.
     pure $ foldl' (mrgLiftA2 (.&&)) eqTag branches
@@ -218,11 +218,11 @@ assertEq = curry $ \case
 
 -- FIXME: We should restrict ADT tags to actually be in range of their tag here!
 symbolicBndrs
-  :: forall m n
+  :: forall m ws
    . MonadError EvalError m
-  => KnownPos n
+  => KnownWordSize ws
   => Type
-  -> m [Value m n]
+  -> m [Value m ws]
 symbolicBndrs ty = do
   ty' <- case tcSplitSigmaTy ty of
     ([], [], ty') -> pure ty'

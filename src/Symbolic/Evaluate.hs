@@ -34,15 +34,14 @@ import Data.Bits (Bits(..), (.^.))
 
 -- TODO: There has to be a better way to not import pretty printing stuff from
 -- grisette...
-import Grisette hiding (PPrintType (..), (<>), (<+>), nest, punctuate, comma, vcat, braces, lbrace, rbrace)
+import Grisette hiding (Rec)
 
 import Symbolic.Util
-import Symbolic.KnownPos
+import Symbolic.WordSize
 import Symbolic.Runtime
 import Symbolic.ADT
 import Symbolic.Value
 import Symbolic.Environment
-import BitVec
 
 -- TODO: Remove MonadCore from the requirements.
 type MonadEval m = (MonadError EvalError m, MonadState SymbolicState m, MonadCore m)
@@ -54,9 +53,9 @@ newtype SymbolicState = SymbolicState
 
 -- | Get a fresh ADT identifier.
 freshADT
-  :: forall m n
+  :: forall m ws
    . MonadState SymbolicState m
-  => KnownPos n
+  => KnownWordSize ws
   => Type
   -> m (RuntimeValue SymADT)
 freshADT ty = state $ \s -> do
@@ -69,19 +68,19 @@ freshADT ty = state $ \s -> do
   let adt = pure $ sym symbol
 
   -- Ensure that the tag is within bounds.
-  let adt' = assumeRuntime (tagInRange @n ty adt) adt
+  let adt' = assumeRuntime (tagInRange @ws ty adt) adt
 
   -- Return fresh ADT and the next index.
   (adt', s')
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate
-  :: forall m n
+  :: forall m ws
    . MonadEval m
-  => KnownPos n
-  => Environment m n
+  => KnownWordSize ws
+  => Environment m ws
   -> CoreExpr
-  -> m (Value m n)
+  -> m (Value m ws)
 evaluate env = \case
   -- TODO: Add support for CoreUnfolding and DFunUnfolding.
   Var var | Just op <- isPrimOpId_maybe var -> evalPrimOp op
@@ -145,13 +144,13 @@ evaluate env = \case
 -- Expects the case binder to already be bound to the scrutinee in the
 -- environment.
 evalAlt
-  :: forall m n
+  :: forall m ws
    . MonadEval m
-  => KnownPos n
-  => Environment m n
-  -> Value m n
+  => KnownWordSize ws
+  => Environment m ws
+  -> Value m ws
   -> CoreAlt
-  -> m (RuntimeValue SymBool, Value m n)
+  -> m (RuntimeValue SymBool, Value m ws)
 evalAlt env scrut = \case
   Alt (DataAlt dataCon) bndrs rhs -> do
     -- Ensure the scrutinee is actually an ADT.
@@ -160,7 +159,7 @@ evalAlt env scrut = \case
       _ -> throwError IllTyped
 
     -- Whether the tag of this ADT is equivalent to the DataCon.
-    let conditional = adtIsDataCon @n scrut' dataCon
+    let conditional = adtIsDataCon @ws scrut' dataCon
 
     -- Gather field accessors for all binders.
     -- FIXME: I think the accessor names are returned in the same order as
@@ -201,11 +200,11 @@ evalAlt env scrut = \case
   _ -> throwError UnsupportedExpr
 
 evalDataCon
-  :: forall m n
+  :: forall m ws
    . MonadEval m
-  => KnownPos n
+  => KnownWordSize ws
   => DataCon
-  -> m (Value m n)
+  -> m (Value m ws)
 evalDataCon dataCon = do
   -- The root creates the actually symbolic DataCon using the given type
   -- instantiation.
@@ -230,19 +229,19 @@ evalDataCon dataCon = do
 -- passed to the function by use of 'dataConInstArgTys'. I.e. the given types
 -- should be those applied to the TyCon when constructing the final type.
 evalDataConInst
-  :: forall m n
+  :: forall m ws
    . MonadEval m
-  => KnownPos n
+  => KnownWordSize ws
   => DataCon
   -- ^ The DataCon for which we will create a symbolic instance.
   -> [Type]
   -- ^ The types with which we will instantiate universal quantifiers of the
   -- DataCon.
-  -> m (Value m n)
+  -> m (Value m ws)
 evalDataConInst dataCon tys = do
   -- Create a fresh identifier for the ADT.
   let ty = mkTyConApp (dataConTyCon dataCon) tys
-  adt <- freshADT @m @n ty
+  adt <- freshADT @m @ws ty
 
   -- Gather the accessor names and instantiate the universal types to create the
   -- field accessors.
@@ -268,15 +267,15 @@ evalDataConInst dataCon tys = do
     pure $ liftA2 (.&&) extra cond
 
   -- As a final constraint, the ADT tag should match the given DataCon.
-  final $ adtIsDataCon @n adt dataCon
+  final $ adtIsDataCon @ws adt dataCon
 
 -- | Get the value corresponding to a literal.
 evalLiteral
-  :: forall m n
+  :: forall m ws
    . MonadError EvalError m
-  => KnownPos n
+  => KnownWordSize ws
   => Literal
-  -> m (Value m n)
+  -> m (Value m ws)
 evalLiteral = fmap Primitive . \case
   LitNumber ty num -> case ty of
     LitNumInt -> pure $ Int num'
@@ -310,11 +309,11 @@ evalLiteral = fmap Primitive . \case
 -- | Get the value corresponding to a primitive operation.
 -- TODO: I want to add support for rem and quot.
 evalPrimOp
-  :: forall m n
+  :: forall m ws
    . MonadEval m
-  => KnownPos n
+  => KnownWordSize ws
   => PrimOp
-  -> m (Value m n)
+  -> m (Value m ws)
 evalPrimOp = \case
   CharGtOp -> throwError UnsupportedExpr
   CharGeOp -> throwError UnsupportedExpr
@@ -332,9 +331,9 @@ evalPrimOp = \case
   Int8QuotOp -> throwError UnsupportedExpr
   Int8RemOp -> throwError UnsupportedExpr
   Int8QuotRemOp -> throwError UnsupportedExpr
-  Int8SllOp -> binary $ symShiftL' @SymIntN @8
-  Int8SraOp -> binary $ symShiftRA' @SymIntN @8
-  Int8SrlOp -> binary $ symShiftRL' @SymIntN @8
+  Int8SllOp -> binary $ symShiftL' @SymIntN8
+  Int8SraOp -> binary $ symShiftRA' @SymIntN8
+  Int8SrlOp -> binary $ symShiftRL' @SymIntN8
   Int8ToWord8Op -> unary $ toUnsigned @SymWordN8 @SymIntN8
   Int8EqOp -> binary $ symEq @SymIntN8
   Int8GeOp -> binary $ symGe @SymIntN8
@@ -354,8 +353,8 @@ evalPrimOp = \case
   Word8OrOp -> binary $ (.|.) @SymWordN8
   Word8XorOp -> binary $ (.^.) @SymWordN8
   Word8NotOp -> unary $ complement @SymWordN8
-  Word8SllOp -> binary $ symShiftL' @SymWordN @8
-  Word8SrlOp -> binary $ symShiftRL' @SymWordN @8
+  Word8SllOp -> binary $ symShiftL' @SymWordN8
+  Word8SrlOp -> binary $ symShiftRL' @SymWordN8
   Word8ToInt8Op -> unary $ toSigned @SymWordN8 @SymIntN8
   Word8EqOp -> binary $ symEq @SymWordN8
   Word8GeOp -> binary $ symGe @SymWordN8
@@ -372,9 +371,9 @@ evalPrimOp = \case
   Int16QuotOp -> throwError UnsupportedExpr
   Int16RemOp -> throwError UnsupportedExpr
   Int16QuotRemOp -> throwError UnsupportedExpr
-  Int16SllOp -> binary $ symShiftL' @SymIntN @16
-  Int16SraOp -> binary $ symShiftRA' @SymIntN @16
-  Int16SrlOp -> binary $ symShiftRL' @SymIntN @16
+  Int16SllOp -> binary $ symShiftL' @SymIntN16
+  Int16SraOp -> binary $ symShiftRA' @SymIntN16
+  Int16SrlOp -> binary $ symShiftRL' @SymIntN16
   Int16ToWord16Op -> unary $ toUnsigned @SymWordN16 @SymIntN16
   Int16EqOp -> binary $ symEq @SymIntN16
   Int16GeOp -> binary $ symGe @SymIntN16
@@ -394,8 +393,8 @@ evalPrimOp = \case
   Word16OrOp -> binary $ (.|.) @SymWordN16
   Word16XorOp -> binary $ (.^.) @SymWordN16
   Word16NotOp -> unary $ complement @SymWordN16
-  Word16SllOp -> binary $ symShiftL' @SymWordN @16
-  Word16SrlOp -> binary $ symShiftRL' @SymWordN @16
+  Word16SllOp -> binary $ symShiftL' @SymWordN16
+  Word16SrlOp -> binary $ symShiftRL' @SymWordN16
   Word16ToInt16Op -> unary $ toSigned @SymWordN16 @SymIntN16
   Word16EqOp -> binary $ symEq @SymWordN16
   Word16GeOp -> binary $ symGe @SymWordN16
@@ -412,9 +411,9 @@ evalPrimOp = \case
   Int32QuotOp -> throwError UnsupportedExpr
   Int32RemOp -> throwError UnsupportedExpr
   Int32QuotRemOp -> throwError UnsupportedExpr
-  Int32SllOp -> binary $ symShiftL' @SymIntN @32
-  Int32SraOp -> binary $ symShiftRA' @SymIntN @32
-  Int32SrlOp -> binary $ symShiftRL' @SymIntN @32
+  Int32SllOp -> binary $ symShiftL' @SymIntN32
+  Int32SraOp -> binary $ symShiftRA' @SymIntN32
+  Int32SrlOp -> binary $ symShiftRL' @SymIntN32
   Int32ToWord32Op -> unary $ toUnsigned @SymWordN32 @SymIntN32
   Int32EqOp -> binary $ symEq @SymIntN32
   Int32GeOp -> binary $ symGe @SymIntN32
@@ -434,8 +433,8 @@ evalPrimOp = \case
   Word32OrOp -> binary $ (.|.) @SymWordN32
   Word32XorOp -> binary $ (.^.) @SymWordN32
   Word32NotOp -> unary $ complement @SymWordN32
-  Word32SllOp -> binary $ symShiftL' @SymWordN @32
-  Word32SrlOp -> binary $ symShiftRL' @SymWordN @32
+  Word32SllOp -> binary $ symShiftL' @SymWordN32
+  Word32SrlOp -> binary $ symShiftRL' @SymWordN32
   Word32ToInt32Op -> unary $ toSigned @SymWordN32 @SymIntN32
   Word32EqOp -> binary $ symEq @SymWordN32
   Word32GeOp -> binary $ symGe @SymWordN32
@@ -451,9 +450,9 @@ evalPrimOp = \case
   Int64MulOp -> binary $ (*) @SymIntN64
   Int64QuotOp -> throwError UnsupportedExpr
   Int64RemOp -> throwError UnsupportedExpr
-  Int64SllOp -> binary $ symShiftL' @SymIntN @64
-  Int64SraOp -> binary $ symShiftRA' @SymIntN @64
-  Int64SrlOp -> binary $ symShiftRL' @SymIntN @64
+  Int64SllOp -> binary $ symShiftL' @SymIntN64
+  Int64SraOp -> binary $ symShiftRA' @SymIntN64
+  Int64SrlOp -> binary $ symShiftRL' @SymIntN64
   Int64ToWord64Op -> unary $ toUnsigned @SymWordN64 @SymIntN64
   Int64EqOp -> binary $ symEq @SymIntN64
   Int64GeOp -> binary $ symGe @SymIntN64
@@ -472,8 +471,8 @@ evalPrimOp = \case
   Word64OrOp -> binary $ (.|.) @SymWordN64
   Word64XorOp -> binary $ (.^.) @SymWordN64
   Word64NotOp -> unary $ complement @SymWordN64
-  Word64SllOp -> binary $ symShiftL' @SymWordN @64
-  Word64SrlOp -> binary $ symShiftRL' @SymWordN @64
+  Word64SllOp -> binary $ symShiftL' @SymWordN64
+  Word64SrlOp -> binary $ symShiftRL' @SymWordN64
   Word64ToInt64Op -> unary $ toSigned @SymWordN64 @SymIntN64
   Word64EqOp -> binary $ symEq @SymWordN64
   Word64GeOp -> binary $ symGe @SymWordN64
@@ -481,261 +480,222 @@ evalPrimOp = \case
   Word64LeOp -> binary $ symLe @SymWordN64
   Word64LtOp -> binary $ symLt @SymWordN64
   Word64NeOp -> binary $ symNe @SymWordN64
-  IntAddOp -> binary $ (+) @(SymIntArch n)
-  IntSubOp -> binary $ (-) @(SymIntArch n)
-  IntMulOp -> binary $ (*) @(SymIntArch n)
+  IntAddOp -> binary $ (+) @(SymInt ws)
+  IntSubOp -> binary $ (-) @(SymInt ws)
+  IntMulOp -> binary $ (*) @(SymInt ws)
   IntMul2Op -> throwError UnsupportedExpr
   IntMulMayOfloOp -> throwError UnsupportedExpr
   IntQuotOp -> throwError UnsupportedExpr
   IntRemOp -> throwError UnsupportedExpr
   IntQuotRemOp -> throwError UnsupportedExpr
-  IntAndOp -> binary $ (.&.) @(SymIntArch n)
-  IntOrOp -> binary $ (.|.) @(SymIntArch n)
-  IntXorOp -> binary $ (.^.) @(SymIntArch n)
-  IntNotOp -> unary $ complement @(SymIntArch n)
-  IntNegOp -> unary $ negate @(SymIntArch n)
+  IntAndOp -> binary $ (.&.) @(SymInt ws)
+  IntOrOp -> binary $ (.|.) @(SymInt ws)
+  IntXorOp -> binary $ (.^.) @(SymInt ws)
+  IntNotOp -> unary $ complement @(SymInt ws)
+  IntNegOp -> unary $ negate @(SymInt ws)
   IntAddCOp -> throwError UnsupportedExpr
   IntSubCOp -> throwError UnsupportedExpr
-  IntGtOp -> binary $ symGt @(SymWordArch n)
-  IntGeOp -> binary $ symGe @(SymWordArch n)
-  IntEqOp -> binary $ symEq @(SymWordArch n)
-  IntNeOp -> binary $ symNe @(SymWordArch n)
-  IntLtOp -> binary $ symLt @(SymWordArch n)
-  IntLeOp -> binary $ symLe @(SymWordArch n)
+  IntGtOp -> binary $ symGt @(SymWord ws)
+  IntGeOp -> binary $ symGe @(SymWord ws)
+  IntEqOp -> binary $ symEq @(SymWord ws)
+  IntNeOp -> binary $ symNe @(SymWord ws)
+  IntLtOp -> binary $ symLt @(SymWord ws)
+  IntLeOp -> binary $ symLe @(SymWord ws)
   ChrOp -> throwError UnsupportedExpr
-  IntToWordOp -> unary $ toUnsigned @(SymWordArch n) @(SymIntArch n)
+  IntToWordOp -> unary $ toUnsigned @(SymWord ws) @(SymInt ws)
   IntToFloatOp -> throwError UnsupportedExpr
   IntToDoubleOp -> throwError UnsupportedExpr
   WordToFloatOp -> throwError UnsupportedExpr
   WordToDoubleOp -> throwError UnsupportedExpr
-  IntSllOp -> binary $ symShiftL' @SymIntArch @n
-  IntSraOp -> binary $ symShiftRA' @SymIntArch @n
-  IntSrlOp -> binary $ symShiftRL' @SymIntArch @n
-  WordAddOp -> binary $ (+) @(SymWordArch n)
+  IntSllOp -> binary $ symShiftL' @(SymInt ws)
+  IntSraOp -> binary $ symShiftRA' @(SymInt ws)
+  IntSrlOp -> binary $ symShiftRL' @(SymInt ws)
+  WordAddOp -> binary $ (+) @(SymWord ws)
   WordAddCOp -> throwError UnsupportedExpr
   WordSubCOp -> throwError UnsupportedExpr
   WordAdd2Op -> throwError UnsupportedExpr
-  WordSubOp -> binary $ (-) @(SymWordArch n)
-  WordMulOp -> binary $ (*) @(SymWordArch n)
+  WordSubOp -> binary $ (-) @(SymWord ws)
+  WordMulOp -> binary $ (*) @(SymWord ws)
   WordMul2Op -> throwError UnsupportedExpr
   WordQuotOp -> throwError UnsupportedExpr
   WordRemOp -> throwError UnsupportedExpr
   WordQuotRemOp -> throwError UnsupportedExpr
   WordQuotRem2Op -> throwError UnsupportedExpr
-  WordAndOp -> binary $ (.&.) @(SymWordArch n)
-  WordOrOp -> binary $ (.|.) @(SymWordArch n)
-  WordXorOp -> binary $ (.^.) @(SymWordArch n)
-  WordNotOp -> unary $ complement @(SymWordArch n)
-  WordSllOp -> binary $ symShiftL' @SymWordArch @n
-  WordSrlOp -> binary $ symShiftRL' @SymWordArch @n
-  WordToIntOp -> unary $ toSigned @(SymWordArch n) @(SymIntArch n)
-  WordGtOp -> binary $ symGt @(SymWordArch n)
-  WordGeOp -> binary $ symGe @(SymWordArch n)
-  WordEqOp -> binary $ symEq @(SymWordArch n)
-  WordNeOp -> binary $ symNe @(SymWordArch n)
-  WordLtOp -> binary $ symLt @(SymWordArch n)
-  WordLeOp -> binary $ symLe @(SymWordArch n)
+  WordAndOp -> binary $ (.&.) @(SymWord ws)
+  WordOrOp -> binary $ (.|.) @(SymWord ws)
+  WordXorOp -> binary $ (.^.) @(SymWord ws)
+  WordNotOp -> unary $ complement @(SymWord ws)
+  WordSllOp -> binary $ symShiftL' @(SymWord ws)
+  WordSrlOp -> binary $ symShiftRL' @(SymWord ws)
+  WordToIntOp -> unary $ toSigned @(SymWord ws) @(SymInt ws)
+  WordGtOp -> binary $ symGt @(SymWord ws)
+  WordGeOp -> binary $ symGe @(SymWord ws)
+  WordEqOp -> binary $ symEq @(SymWord ws)
+  WordNeOp -> binary $ symNe @(SymWord ws)
+  WordLtOp -> binary $ symLt @(SymWord ws)
+  WordLeOp -> binary $ symLe @(SymWord ws)
   TagToEnumOp -> pure . Fun $ \case
     Ty ty -> pure . Fun $ \case
       Primitive (Int tag) -> do
-        adt <- freshADT @m @n ty
-        let cond = cmpRuntime tag $ accessTag @n adt
+        adt <- freshADT @m @ws ty
+        let cond = cmpRuntime tag $ accessTag @ws adt
         -- Assume that the ADT tag matches the given tag. Return the ADT.
         pure . ADT ty $ assumeRuntime cond adt
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError UnsupportedExpr
   where
-    symShiftRL'
-      :: forall bv i
-       . SymFromIntegral (SymWordN i) (bv i)
-      => SymFromIntegral (bv i) (SymWordN i)
-      => KnownPos i
-      => bv i
-      -> SymIntArch n
-      -> bv i
-    symShiftRL' lhs rhs = symShiftRL lhs $ unSymIntArch rhs
-
     symShiftRA'
-      :: forall bv i
-       . SymFromIntegral (SymIntN i) (bv i)
-      => SymFromIntegral (bv i) (SymIntN i)
-      => KnownPos i
-      => bv i
-      -> SymIntArch n
-      -> bv i
-    symShiftRA' lhs rhs = symShiftRA lhs $ unSymIntArch rhs
+      :: forall bv
+       . KnownBitSize bv
+      => SymFromIntegral bv (SymIntN (BitSize bv))
+      => SymFromIntegral (SymIntN (BitSize bv)) bv
+      => bv
+      -> SymInt ws
+      -> bv
+    symShiftRA' = symShiftRA
+
+    symShiftRL'
+      :: forall bv
+       . KnownBitSize bv
+      => SymFromIntegral bv (SymWordN (BitSize bv))
+      => SymFromIntegral (SymWordN (BitSize bv)) bv
+      => bv
+      -> SymInt ws
+      -> bv
+    symShiftRL' = symShiftRL
 
     symShiftL'
-      :: forall bv i
-       . SymFromIntegral (SymIntN i) (bv i)
-      => SymShift (bv i)
-      => KnownPos i
-      => bv i
-      -> SymIntArch n
-      -> bv i
-    symShiftL' lhs rhs = symShiftL lhs $ unSymIntArch rhs
+      :: forall bv
+       . SymFromIntegral (SymInt ws) bv
+      => SymShift bv
+      => bv
+      -> SymInt ws
+      -> bv
+    symShiftL' = symShiftL @bv @ws
 
-    toIntArch :: KnownPos i => SymIntN i -> SymIntArch n
-    toIntArch = SymIntArch . sizedBVResize
+    toIntArch :: KnownPos i => SymIntN i -> SymInt ws
+    toIntArch = SymInt . sizedBVResize
 
-    toIntSized :: KnownPos i => SymIntArch n -> SymIntN i
-    toIntSized = sizedBVResize . unSymIntArch
+    toIntSized :: KnownPos i => SymInt ws -> SymIntN i
+    toIntSized = sizedBVResize . unSymInt
 
-    toWordArch :: KnownPos i => SymWordN i -> SymWordArch n
-    toWordArch = SymWordArch . sizedBVResize
+    toWordArch :: KnownPos i => SymWordN i -> SymWord ws
+    toWordArch = SymWord . sizedBVResize
 
-    toWordSized :: KnownPos i => SymWordArch n -> SymWordN i
-    toWordSized = sizedBVResize . unSymWordArch
+    toWordSized :: KnownPos i => SymWord ws -> SymWordN i
+    toWordSized = sizedBVResize . unSymWord
 
-    symGe :: SymOrd a => a -> a -> SymIntArch n
-    symGe lhs rhs = SymIntArch $ symIte (lhs .>= rhs) 1 0
+    symGe :: SymOrd a => a -> a -> SymInt ws
+    symGe lhs rhs = SymInt $ symIte (lhs .>= rhs) 1 0
 
-    symGt :: SymOrd a => a -> a -> SymIntArch n
-    symGt lhs rhs = SymIntArch $ symIte (lhs .> rhs) 1 0
+    symGt :: SymOrd a => a -> a -> SymInt ws
+    symGt lhs rhs = SymInt $ symIte (lhs .> rhs) 1 0
 
-    symEq :: SymEq a => a -> a -> SymIntArch n
-    symEq lhs rhs = SymIntArch $ symIte (lhs .== rhs) 1 0
+    symEq :: SymEq a => a -> a -> SymInt ws
+    symEq lhs rhs = SymInt $ symIte (lhs .== rhs) 1 0
 
-    symNe :: SymEq a => a -> a -> SymIntArch n
-    symNe lhs rhs = SymIntArch $ symIte (lhs ./= rhs) 1 0
+    symNe :: SymEq a => a -> a -> SymInt ws
+    symNe lhs rhs = SymInt $ symIte (lhs ./= rhs) 1 0
 
-    symLt :: SymOrd a => a -> a -> SymIntArch n
-    symLt lhs rhs = SymIntArch $ symIte (lhs .< rhs) 1 0
+    symLt :: SymOrd a => a -> a -> SymInt ws
+    symLt lhs rhs = SymInt $ symIte (lhs .< rhs) 1 0
 
-    symLe :: SymOrd a => a -> a -> SymIntArch n
-    symLe lhs rhs = SymIntArch $ symIte (lhs .<= rhs) 1 0
+    symLe :: SymOrd a => a -> a -> SymInt ws
+    symLe lhs rhs = SymInt $ symIte (lhs .<= rhs) 1 0
 
 binary
-  :: Wrap m n (RuntimeValue a -> RuntimeValue b -> RuntimeValue c)
+  :: Wrap m ws (RuntimeValue a -> RuntimeValue b -> RuntimeValue c)
   => (a -> b -> c)
-  -> m (Value m n)
+  -> m (Value m ws)
 binary = pure . wrap . liftA2 @(ExceptT RuntimeError Union)
 
 unary
-  :: Wrap m n (RuntimeValue a -> RuntimeValue b)
+  :: Wrap m ws (RuntimeValue a -> RuntimeValue b)
   => (a -> b)
-  -> m (Value m n)
+  -> m (Value m ws)
 unary = pure . wrap . fmap @(ExceptT RuntimeError Union)
 
 -- TODO: This wrap stuff is probably better suited in a separate file.
-class MonadEval m => Wrap m n a where
-  wrap :: a -> Value m n
+class MonadEval m => Wrap m ws a where
+  wrap :: a -> Value m ws
 
-newtype SymIntArch n where
-  SymIntArch :: SymIntN n -> SymIntArch n
+instance MonadEval m => Wrap m ws (RuntimeValue (SymInt ws)) where
+  wrap = Primitive . Int . fmap unSymInt
 
-unSymIntArch :: SymIntArch n -> SymIntN n
-unSymIntArch (SymIntArch val) = val
-
-deriving via SymIntN n instance KnownPos n => Num (SymIntArch n)
-deriving via SymIntN n instance KnownPos n => Eq (SymIntArch n)
-deriving via SymIntN n instance KnownPos n => Bits (SymIntArch n)
-deriving via SymIntN n instance KnownPos n => SymOrd (SymIntArch n)
-deriving via SymIntN n instance KnownPos n => SymEq (SymIntArch n)
-deriving via SymIntN n instance KnownPos n => SymShift (SymIntArch n)
-deriving via SymIntN n instance KnownPos n => SymFromIntegral (SymIntN n) (SymIntArch n)
-deriving via SymIntN n instance KnownPos n => SymFromIntegral (SymWordN n) (SymIntArch n)
-deriving via SymIntN n instance KnownPos n => SymFromIntegral (SymIntArch n) (SymIntN n)
-deriving via SymIntN n instance KnownPos n => SymFromIntegral (SymWordArch n) (SymIntN n)
-
-newtype SymWordArch n where
-  SymWordArch :: SymWordN n -> SymWordArch n
-
-unSymWordArch :: SymWordArch n -> SymWordN n
-unSymWordArch (SymWordArch val) = val
-
-deriving via SymWordN n instance KnownPos n => Num (SymWordArch n)
-deriving via SymWordN n instance KnownPos n => Eq (SymWordArch n)
-deriving via SymWordN n instance KnownPos n => Bits (SymWordArch n)
-deriving via SymWordN n instance KnownPos n => SymOrd (SymWordArch n)
-deriving via SymWordN n instance KnownPos n => SymEq (SymWordArch n)
-deriving via SymWordN n instance KnownPos n => SymShift (SymWordArch n)
-deriving via SymWordN n instance KnownPos n => SymFromIntegral (SymIntN n) (SymWordArch n)
-deriving via SymWordN n instance KnownPos n => SymFromIntegral (SymWordN n) (SymWordArch n)
-deriving via SymWordN n instance KnownPos n => SymFromIntegral (SymWordArch n) (SymWordN n)
-deriving via SymWordN n instance KnownPos n => SymFromIntegral (SymIntArch n) (SymWordN n)
-
-instance KnownPos n => SignConversion (SymWordArch n) (SymIntArch n) where
-  toUnsigned = SymWordArch . toUnsigned . unSymIntArch
-  toSigned = SymIntArch . toSigned . unSymWordArch
-
-instance (MonadEval m, KnownPos n) => Wrap m n (RuntimeValue (SymIntArch n)) where
-  wrap = Primitive . Int . fmap unSymIntArch
-
-instance MonadEval m => Wrap m n (RuntimeValue SymIntN8) where
+instance MonadEval m => Wrap m ws (RuntimeValue SymIntN8) where
   wrap = Primitive . Int8
 
-instance MonadEval m => Wrap m n (RuntimeValue SymIntN16) where
+instance MonadEval m => Wrap m ws (RuntimeValue SymIntN16) where
   wrap = Primitive . Int16
 
-instance MonadEval m => Wrap m n (RuntimeValue SymIntN32) where
+instance MonadEval m => Wrap m ws (RuntimeValue SymIntN32) where
   wrap = Primitive . Int32
 
-instance MonadEval m => Wrap m n (RuntimeValue SymIntN64) where
+instance MonadEval m => Wrap m ws (RuntimeValue SymIntN64) where
   wrap = Primitive . Int64
 
-instance (MonadEval m, KnownPos n) => Wrap m n (RuntimeValue (SymWordArch n)) where
-  wrap = Primitive . Word . fmap unSymWordArch
+instance (MonadEval m, KnownWordSize ws) => Wrap m ws (RuntimeValue (SymWord ws)) where
+  wrap = Primitive . Word . fmap unSymWord
 
-instance MonadEval m => Wrap m n (RuntimeValue SymWordN8) where
+instance MonadEval m => Wrap m ws (RuntimeValue SymWordN8) where
   wrap = Primitive . Word8
 
-instance MonadEval m => Wrap m n (RuntimeValue SymWordN16) where
+instance MonadEval m => Wrap m ws (RuntimeValue SymWordN16) where
   wrap = Primitive . Word16
 
-instance MonadEval m => Wrap m n (RuntimeValue SymWordN32) where
+instance MonadEval m => Wrap m ws (RuntimeValue SymWordN32) where
   wrap = Primitive . Word32
 
-instance MonadEval m => Wrap m n (RuntimeValue SymWordN64) where
+instance MonadEval m => Wrap m ws (RuntimeValue SymWordN64) where
   wrap = Primitive . Word64
 
-instance (MonadEval m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymIntArch n) -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue (SymInt ws) -> b) where
   wrap f = Fun $ \case
-    Primitive (Int arg) -> pure $ wrap @m @n (f $ arg <&> SymIntArch)
+    Primitive (Int arg) -> pure $ wrap @m @ws (f $ arg <&> SymInt)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN8 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymIntN8 -> b) where
   wrap f = Fun $ \case
-    Primitive (Int8 arg) -> pure $ wrap @m @n (f arg)
+    Primitive (Int8 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN16 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymIntN16 -> b) where
   wrap f = Fun $ \case
-    Primitive (Int16 arg) -> pure $ wrap @m @n (f arg)
+    Primitive (Int16 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN32 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymIntN32 -> b) where
   wrap f = Fun $ \case
-    Primitive (Int32 arg) -> pure $ wrap @m @n (f arg)
+    Primitive (Int32 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN64 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymIntN64 -> b) where
   wrap f = Fun $ \case
-    Primitive (Int64 arg) -> pure $ wrap @m @n (f arg)
+    Primitive (Int64 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymWordArch n) -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue (SymWord ws) -> b) where
   wrap f = Fun $ \case
-    Primitive (Word arg) -> pure $ wrap @m @n (f $ arg <&> SymWordArch)
+    Primitive (Word arg) -> pure $ wrap @m @ws (f $ arg <&> SymWord)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN8 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymWordN8 -> b) where
   wrap f = Fun $ \case
-    Primitive (Word8 arg) -> pure $ wrap @m @n (f arg)
+    Primitive (Word8 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN16 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymWordN16 -> b) where
   wrap f = Fun $ \case
-    Primitive (Word16 arg) -> pure $ wrap @m @n (f arg)
+    Primitive (Word16 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN32 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymWordN32 -> b) where
   wrap f = Fun $ \case
-    Primitive (Word32 arg) -> pure $ wrap @m @n (f arg)
+    Primitive (Word32 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN64 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymWordN64 -> b) where
   wrap f = Fun $ \case
-    Primitive (Word64 arg) -> pure $ wrap @m @n (f arg)
+    Primitive (Word64 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped

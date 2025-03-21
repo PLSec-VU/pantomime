@@ -25,7 +25,6 @@ source-repository head
 
 library
   exposed-modules:
-      BitVec
       Diverge
       GHC.MonadCore
       Lint
@@ -36,11 +35,11 @@ library
       Symbolic.Concrete
       Symbolic.Environment
       Symbolic.Evaluate
-      Symbolic.KnownPos
       Symbolic.Runtime
       Symbolic.Solve
       Symbolic.Util
       Symbolic.Value
+      Symbolic.WordSize
       SymUtil
       Transform
       Types

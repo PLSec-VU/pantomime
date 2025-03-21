@@ -26,10 +26,11 @@ module Symbolic.ADT
   , dataConToTag
 
   , adtIsDataCon
-  , accessTag
-  , Solvable' (..)
-  , accessField
   , tagInRange
+
+  , Solvable' (..)
+  , accessTag
+  , accessField
 
   , dataConAccessorNames
   ) where
@@ -45,7 +46,7 @@ import Data.Hashable (Hashable)
 import Data.String (IsString(..))
 
 import Symbolic.Runtime
-import Symbolic.KnownPos
+import Symbolic.WordSize
 
 -- TODO: I think it would be good to make the ADT type always carry its type.
 -- Not just inside of a Value.
@@ -59,28 +60,28 @@ type SymADT = SymWordN64
 type ADT = WordN64
 
 -- | Symbolic ADT Tag to distinguish between constructors.
-type SymTag n = SymIntN n
+type SymTag ws = SymIntN (WordBits ws)
 
 -- | Conrete representation of ADT Tag.
 --
 -- Note, that this is the SMT encoded representation.
-type Tag n = IntN n
+type Tag ws = IntN (WordBits ws)
 
 -- | Get the DataCon from a Tag and the Type that should match the .
 tagToDataCon
-  :: forall n
-   . KnownPos n
-  => Tag n
+  :: forall ws
+   . KnownWordSize ws
+  => Tag ws
   -> Type
   -> Maybe DataCon
 tagToDataCon tag ty = do
   (tyCon, _) <- splitTyConApp_maybe ty
   dataCons <- tyConDataCons_maybe tyCon
-  let cmp dataCon = dataConToTag @n dataCon == tag
+  let cmp dataCon = dataConToTag dataCon == tag
   find cmp dataCons
 
 -- | Get the symbolic representation of the DataCon.
-dataConToTag :: KnownPos n => DataCon -> Tag n
+dataConToTag :: KnownWordSize ws => DataCon -> Tag ws
 dataConToTag = fromIntegral . dataConTagZ
 
 -- | Whether the given ADT matches the DataCon.
@@ -89,22 +90,22 @@ dataConToTag = fromIntegral . dataConTagZ
 -- TODO: I do want this to perform a typecheck! I would need to include the
 -- type on an ADT first.
 adtIsDataCon
-  :: forall n
-   . KnownPos n
+  :: forall ws
+   . KnownWordSize ws
   => RuntimeValue SymADT
   -> DataCon
   -> RuntimeValue SymBool
 adtIsDataCon adt dataCon = do
-  field <- accessTag adt
-  let tag = con $ dataConToTag @n dataCon
+  field <- accessTag @ws adt
+  let tag = con $ dataConToTag dataCon
   mrgReturn $ field .== tag
 
 -- | Accessor for the tag of an ADT.
 accessTag
-  :: forall n
-   . KnownPos n
+  :: forall ws
+   . KnownWordSize ws
   => RuntimeValue SymADT
-  -> RuntimeValue (SymTag n)
+  -> RuntimeValue (SymTag ws)
 accessTag adt = accessField adt "!tag"
 
 -- class Solvable (c t => Solvable' c t | t -> c where
@@ -150,7 +151,7 @@ accessField
   -> RuntimeValue t
 accessField adt name = do
   let symbol = simple . identifier . fromString $ name
-  let accessor = sym' @c @t symbol :: SymADT -~> t
+  let accessor = sym' symbol :: SymADT -~> t
   adt' <- adt
   pure $ accessor # adt'
 
@@ -159,15 +160,15 @@ accessField adt name = do
 -- This may, for example, be used to assume that an ADT represents any valid
 -- DataCon.
 tagInRange
-  :: forall n
-   . KnownPos n
+  :: forall ws
+   . KnownWordSize ws
   => Type
   -> RuntimeValue SymADT
   -> RuntimeValue SymBool
 tagInRange ty adt = do
   let (tyCon, _) = splitTyConApp ty
   let amount = length $ tyConDataCons tyCon
-  tag <- accessTag @n adt
+  tag <- accessTag @ws adt
   mrgPure $ 0 .<= tag .&& tag .< fromIntegral amount
 
 -- | Get the accessor names of this DataCon.

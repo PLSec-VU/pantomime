@@ -32,7 +32,7 @@ import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..))
 import Control.Monad.Except (MonadError (..))
 import Control.Monad (forM)
 
-import Symbolic.KnownPos
+import Symbolic.WordSize
 import Symbolic.Value
 import Symbolic.Runtime
 import Symbolic.ADT
@@ -96,16 +96,16 @@ pprConcrete addHeader addParens = \case
   Unknown -> addHeader $ text "???"
 
 concretize
-  :: forall m m' n
+  :: forall m m' ws
    . MonadError EvalError m
-  => KnownPos n
+  => KnownWordSize ws
   => Model
-  -> Value m' n
+  -> Value m' ws
   -> m Concrete
 concretize model = \case
   Primitive prim -> pure $ concretePrimitive model prim
   -- TODO: Clean this horrible piece of code up!
-  ADT ty adt -> case evalSymToCon @_ @(Either RuntimeError (Tag n)) model $ accessTag @n adt of
+  ADT ty adt -> case evalSymToCon @_ @(Either RuntimeError (Tag ws)) model $ accessTag @ws adt of
     Right tag -> do
       case tagToDataCon tag ty of
         Just dataCon -> do
@@ -119,7 +119,7 @@ concretize model = \case
           let names = dataConAccessorNames dataCon
           let accessors = zip names argTys'
           fields <- forM accessors $ \(name, ty') -> do
-            field <- accessField' @m @n adt name ty'
+            field <- accessField' @m @ws adt name ty'
             concretize model field
 
           pure $ Record dataCon fields
@@ -149,18 +149,18 @@ concretize model = \case
   Co _ -> throwError IllTyped
 
 concretePrimitive
-  :: forall n
-   . KnownPos n
+  :: forall ws
+   . KnownWordSize ws
   => Model
-  -> Primitive n
+  -> Primitive ws
   -> Concrete
 concretePrimitive model = \case
-  Int value -> prim @_ @(IntN n) value
+  Int value -> prim @_ @(IntN (WordBits ws)) value
   Int8 value -> prim @_ @IntN8 value
   Int16 value -> prim @_ @IntN16 value
   Int32 value -> prim @_ @IntN32 value
   Int64 value -> prim @_ @IntN64 value
-  Word value -> prim @_ @(WordN n) value
+  Word value -> prim @_ @(WordN (WordBits ws)) value
   Word8 value -> prim @_ @WordN8 value
   Word16 value -> prim @_ @WordN16 value
   Word32 value -> prim @_ @WordN32 value
