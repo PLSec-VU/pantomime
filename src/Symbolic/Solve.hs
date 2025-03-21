@@ -164,18 +164,7 @@ assertEq
   -> Value m n
   -> m (RuntimeValue SymBool)
 assertEq = curry $ \case
-  (Int lhs, Int rhs) -> pure $ cmpRuntime lhs rhs
-  (Int8 lhs, Int8 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int16 lhs, Int16 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int32 lhs, Int32 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int64 lhs, Int64 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word lhs, Word rhs) -> pure $ cmpRuntime lhs rhs
-  (Word8 lhs, Word8 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word16 lhs, Word16 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word32 lhs, Word32 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word64 lhs, Word64 rhs) -> pure $ cmpRuntime lhs rhs
-  (Float lhs, Float rhs) -> pure $ cmpRuntime lhs rhs
-  (Double lhs, Double rhs) -> pure $ cmpRuntime lhs rhs
+  (Primitive lhs, Primitive rhs) -> cmpPrimitive lhs rhs
   (ADT lty lhs, ADT rty rhs) -> do
     -- Ensure the equality is sound.
     unless (lty `eqType` rty) $ throwError IllTyped

@@ -277,7 +277,7 @@ evalLiteral
   => KnownPos n
   => Literal
   -> m (Value m n)
-evalLiteral = \case
+evalLiteral = fmap Primitive . \case
   LitNumber ty num -> case ty of
     LitNumInt -> pure $ Int num'
     LitNumInt8 -> pure $ Int8 num'
@@ -537,7 +537,7 @@ evalPrimOp = \case
   WordLeOp -> binary $ symLe @(SymWordArch n)
   TagToEnumOp -> pure . Fun $ \case
     Ty ty -> pure . Fun $ \case
-      Int tag -> do
+      Primitive (Int tag) -> do
         adt <- freshADT @m @n ty
         let cond = cmpRuntime tag $ accessTag @n adt
         -- Assume that the ADT tag matches the given tag. Return the ADT.
@@ -661,81 +661,81 @@ instance KnownPos n => SignConversion (SymWordArch n) (SymIntArch n) where
   toSigned = SymIntArch . toSigned . unSymWordArch
 
 instance (MonadEval m, KnownPos n) => Wrap m n (RuntimeValue (SymIntArch n)) where
-  wrap = Int . fmap unSymIntArch
+  wrap = Primitive . Int . fmap unSymIntArch
 
 instance MonadEval m => Wrap m n (RuntimeValue SymIntN8) where
-  wrap = Int8
+  wrap = Primitive . Int8
 
 instance MonadEval m => Wrap m n (RuntimeValue SymIntN16) where
-  wrap = Int16
+  wrap = Primitive . Int16
 
 instance MonadEval m => Wrap m n (RuntimeValue SymIntN32) where
-  wrap = Int32
+  wrap = Primitive . Int32
 
 instance MonadEval m => Wrap m n (RuntimeValue SymIntN64) where
-  wrap = Int64
+  wrap = Primitive . Int64
 
 instance (MonadEval m, KnownPos n) => Wrap m n (RuntimeValue (SymWordArch n)) where
-  wrap = Word . fmap unSymWordArch
+  wrap = Primitive . Word . fmap unSymWordArch
 
 instance MonadEval m => Wrap m n (RuntimeValue SymWordN8) where
-  wrap = Word8
+  wrap = Primitive . Word8
 
 instance MonadEval m => Wrap m n (RuntimeValue SymWordN16) where
-  wrap = Word16
+  wrap = Primitive . Word16
 
 instance MonadEval m => Wrap m n (RuntimeValue SymWordN32) where
-  wrap = Word32
+  wrap = Primitive . Word32
 
 instance MonadEval m => Wrap m n (RuntimeValue SymWordN64) where
-  wrap = Word64
+  wrap = Primitive . Word64
 
 instance (MonadEval m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymIntArch n) -> b) where
   wrap f = Fun $ \case
-    Int arg -> pure $ wrap @m @n (f $ arg <&> SymIntArch)
+    Primitive (Int arg) -> pure $ wrap @m @n (f $ arg <&> SymIntArch)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN8 -> b) where
   wrap f = Fun $ \case
-    Int8 arg -> pure $ wrap @m @n (f arg)
+    Primitive (Int8 arg) -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN16 -> b) where
   wrap f = Fun $ \case
-    Int16 arg -> pure $ wrap @m @n (f arg)
+    Primitive (Int16 arg) -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN32 -> b) where
   wrap f = Fun $ \case
-    Int32 arg -> pure $ wrap @m @n (f arg)
+    Primitive (Int32 arg) -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymIntN64 -> b) where
   wrap f = Fun $ \case
-    Int64 arg -> pure $ wrap @m @n (f arg)
+    Primitive (Int64 arg) -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, KnownPos n, Wrap m n b) => Wrap m n (RuntimeValue (SymWordArch n) -> b) where
   wrap f = Fun $ \case
-    Word arg -> pure $ wrap @m @n (f $ arg <&> SymWordArch)
+    Primitive (Word arg) -> pure $ wrap @m @n (f $ arg <&> SymWordArch)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN8 -> b) where
   wrap f = Fun $ \case
-    Word8 arg -> pure $ wrap @m @n (f arg)
+    Primitive (Word8 arg) -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN16 -> b) where
   wrap f = Fun $ \case
-    Word16 arg -> pure $ wrap @m @n (f arg)
+    Primitive (Word16 arg) -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN32 -> b) where
   wrap f = Fun $ \case
-    Word32 arg -> pure $ wrap @m @n (f arg)
+    Primitive (Word32 arg) -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m n b) => Wrap m n (RuntimeValue SymWordN64 -> b) where
   wrap f = Fun $ \case
-    Word64 arg -> pure $ wrap @m @n (f arg)
+    Primitive (Word64 arg) -> pure $ wrap @m @n (f arg)
     _ -> throwError IllTyped

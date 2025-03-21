@@ -42,13 +42,16 @@ import Symbolic.Util
 -- a bit better.
 data Concrete where
   Record :: DataCon -> [Concrete] -> Concrete
-  Primitive :: ModelValue -> Concrete
+  Value :: ModelValue -> Concrete
   Error :: RuntimeError -> Concrete
   Unknown :: Concrete
 
 -- TODO: This isn't the nicest outputable instance. I think we want a concrete
 -- to have a name, such that we can use pprConcrete to output the actual name
--- instead of a bunch of question marks.
+-- instead of a bunch of question marks. I additionally would like to emit the
+-- type of each argument (and the final output). Ideally in Haskell style:
+-- x :: Type
+-- x = value
 instance Outputable Concrete where
   ppr = pprConcrete ("??? =" <+>) id
 
@@ -87,7 +90,8 @@ pprConcrete addHeader addParens = \case
       let fields' = sep $ pprConcrete id parens <$> fields
       addParens $ hang header 2 fields'
 
-  Primitive value -> addHeader $ text (show value)
+  -- TODO: I don't want to print the type here.
+  Value value -> addHeader $ text (show value)
   Error err -> addHeader $ "RUNTIME ERROR" <+> ppr err
   Unknown -> addHeader $ text "???"
 
@@ -99,18 +103,7 @@ concretize
   -> Value m' n
   -> m Concrete
 concretize model = \case
-  Int value -> prim @_ @(IntN n) value
-  Int8 value -> prim @_ @IntN8 value
-  Int16 value -> prim @_ @IntN16 value
-  Int32 value -> prim @_ @IntN32 value
-  Int64 value -> prim @_ @IntN64 value
-  Word value -> prim @_ @(WordN n) value
-  Word8 value -> prim @_ @WordN8 value
-  Word16 value -> prim @_ @WordN16 value
-  Word32 value -> prim @_ @WordN32 value
-  Word64 value -> prim @_ @WordN64 value
-  Float value -> prim @_ @FP32 value
-  Double value -> prim @_ @FP64 value
+  Primitive prim -> pure $ concretePrimitive model prim
   -- TODO: Clean this horrible piece of code up!
   ADT ty adt -> case evalSymToCon @_ @(Either RuntimeError (Tag n)) model $ accessTag @n adt of
     Right tag -> do
@@ -154,6 +147,26 @@ concretize model = \case
   Fun _ -> throwError IllTyped
   Ty _ -> throwError IllTyped
   Co _ -> throwError IllTyped
+
+concretePrimitive
+  :: forall n
+   . KnownPos n
+  => Model
+  -> Primitive n
+  -> Concrete
+concretePrimitive model = \case
+  Int value -> prim @_ @(IntN n) value
+  Int8 value -> prim @_ @IntN8 value
+  Int16 value -> prim @_ @IntN16 value
+  Int32 value -> prim @_ @IntN32 value
+  Int64 value -> prim @_ @IntN64 value
+  Word value -> prim @_ @(WordN n) value
+  Word8 value -> prim @_ @WordN8 value
+  Word16 value -> prim @_ @WordN16 value
+  Word32 value -> prim @_ @WordN32 value
+  Word64 value -> prim @_ @WordN64 value
+  Float value -> prim @_ @FP32 value
+  Double value -> prim @_ @FP64 value
   where
     prim
       :: forall a b
@@ -161,9 +174,10 @@ concretize model = \case
       => EvalSym a
       => SupportedPrim b
       => RuntimeValue a
-      -> m Concrete
+      -> Concrete
     prim value = do
       let concrete = evalSymToCon @_ @(Either RuntimeError b) model value
       case concrete of
-        Right value' -> pure $ Primitive (ModelValue value')
-        Left err -> pure $ Error err
+        Right value' -> Value $ ModelValue value'
+        Left err -> Error err
+

@@ -26,6 +26,11 @@ module Symbolic.Value
   , applyValues
   , cmpValue
   , iteValue
+
+  , Primitive (..)
+  , typedPrimitive
+  , cmpPrimitive
+  , itePrimitive
   ) where
 
 import GHC.Plugins hiding (empty)
@@ -43,8 +48,15 @@ import Symbolic.KnownPos
 import Symbolic.Runtime
 import Symbolic.ADT
 
+-- data Func m n where
+--   SFunc :: Type -> SymWordN64 -> Func m n
+--   CFunc :: Type -> (Value m n -> m (Value m n)) -> Func m n
+
 -- TODO: I think the Int and Word stuff should go under one constructor: Prim.
 -- They all function pretty much the same anyway.
+-- TODO: Could we adjust n to be a DataKind of the actualy word size data type
+-- from Haskell? To me that seems a lot cleaner, as it represents more
+-- accurately what Int and Word are exactly.
 data Value m n where
   -- TODO: Add support for Char
   -- TODO: Add support for ByteArray (as this is how big integers are
@@ -52,18 +64,10 @@ data Value m n where
   -- TODO: Add support for symbolic (higher order) functions.
   -- Char :: RuntimeValue (SymWordN 31) -> Value m n
   -- BigNat :: RuntimeValue SymInteger -> Value m n
-  Int :: RuntimeValue (SymIntN n) -> Value m n
-  Int8 :: RuntimeValue SymIntN8 -> Value m n
-  Int16 :: RuntimeValue SymIntN16 -> Value m n
-  Int32 :: RuntimeValue SymIntN32 -> Value m n
-  Int64 :: RuntimeValue SymIntN64 -> Value m n
-  Word :: RuntimeValue (SymWordN n) -> Value m n
-  Word8 :: RuntimeValue SymWordN8 -> Value m n
-  Word16 :: RuntimeValue SymWordN16 -> Value m n
-  Word32 :: RuntimeValue SymWordN32 -> Value m n
-  Word64 :: RuntimeValue SymWordN64 -> Value m n
-  Float :: RuntimeValue SymFP32 -> Value m n
-  Double :: RuntimeValue SymFP64 -> Value m n
+  Primitive :: Primitive n -> Value m n
+  -- TODO: I think it would be nice to have an ADT be already its TyCon and
+  -- Type arguments split. This prevents us from making some class of ill-formed
+  -- ADTs.
   ADT :: Type -> RuntimeValue SymADT -> Value m n
   -- TODO: I don't really like the prime on the name of Cast here. Maybe we
   -- could go for some other name? Perhaps just Newtype, as that's pretty much
@@ -75,18 +79,7 @@ data Value m n where
 
 instance KnownPos n => Outputable (Value m n) where
   ppr = \case
-    Int val -> text "Int# =>" <+> text (show val)
-    Int8 val -> text "Int8# =>" <+> text (show val)
-    Int16 val -> text "Int16# =>" <+> text (show val)
-    Int32 val -> text "Int32# =>" <+> text (show val)
-    Int64 val -> text "Int64# =>" <+> text (show val)
-    Word val -> text "Word# =>" <+> text (show val)
-    Word8 val -> text "Word8# =>" <+> text (show val)
-    Word16 val -> text "Word16# =>" <+> text (show val)
-    Word32 val -> text "Word32# =>" <+> text (show val)
-    Word64 val -> text "Word64# =>" <+> text (show val)
-    Float val -> text "Float# =>" <+> text (show val)
-    Double val -> text "Double# =>" <+> text (show val)
+    Primitive prim -> ppr prim
     ADT ty val -> ppr ty <+> "=>" <+> text (show val)
     Cast' co val -> ppr co <+> "=>" <+> ppr val
     Fun _ -> text "Fun ??"
@@ -130,18 +123,7 @@ typedValue
   -> Type
   -> m (Value m n)
 typedValue value ty
-  | ty `eqType` intPrimTy = pure $ Int value
-  | ty `eqType` int8PrimTy = pure $ Int8 value
-  | ty `eqType` int16PrimTy = pure $ Int16 value
-  | ty `eqType` int32PrimTy = pure $ Int32 value
-  | ty `eqType` int64PrimTy = pure $ Int64 value
-  | ty `eqType` wordPrimTy = pure $ Word value
-  | ty `eqType` word8PrimTy = pure $ Word8 value
-  | ty `eqType` word16PrimTy = pure $ Word16 value
-  | ty `eqType` word32PrimTy = pure $ Word32 value
-  | ty `eqType` word64PrimTy = pure $ Word64 value
-  | ty `eqType` floatPrimTy = pure $ Float value
-  | ty `eqType` doublePrimTy = pure $ Double value
+  | Right prim <- typedPrimitive value ty = pure $ Primitive prim
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
   , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
     value' <- typedValue value ty'
@@ -184,18 +166,18 @@ accessField'
 accessField' adt name ty
   -- TODO: Why can we not pass 'construct' to 'typedValue'? I don't understand
   -- why it has overlapping instances... For now, we just duplicate some code...
-  | ty `eqType` intPrimTy = pure $ Int construct
-  | ty `eqType` int8PrimTy = pure $ Int8 construct
-  | ty `eqType` int16PrimTy = pure $ Int16 construct
-  | ty `eqType` int32PrimTy = pure $ Int32 construct
-  | ty `eqType` int64PrimTy = pure $ Int64 construct
-  | ty `eqType` wordPrimTy = pure $ Word construct
-  | ty `eqType` word8PrimTy = pure $ Word8 construct
-  | ty `eqType` word16PrimTy = pure $ Word16 construct
-  | ty `eqType` word32PrimTy = pure $ Word32 construct
-  | ty `eqType` word64PrimTy = pure $ Word64 construct
-  | ty `eqType` floatPrimTy = pure $ Float construct
-  | ty `eqType` doublePrimTy = pure $ Double construct
+  | ty `eqType` intPrimTy = pure . Primitive $ Int construct
+  | ty `eqType` int8PrimTy = pure . Primitive $ Int8 construct
+  | ty `eqType` int16PrimTy = pure . Primitive $ Int16 construct
+  | ty `eqType` int32PrimTy = pure . Primitive $ Int32 construct
+  | ty `eqType` int64PrimTy = pure . Primitive $ Int64 construct
+  | ty `eqType` wordPrimTy = pure . Primitive $ Word construct
+  | ty `eqType` word8PrimTy = pure . Primitive $ Word8 construct
+  | ty `eqType` word16PrimTy = pure . Primitive $ Word16 construct
+  | ty `eqType` word32PrimTy = pure . Primitive $ Word32 construct
+  | ty `eqType` word64PrimTy = pure . Primitive $ Word64 construct
+  | ty `eqType` floatPrimTy = pure . Primitive $ Float construct
+  | ty `eqType` doublePrimTy = pure . Primitive $ Double construct
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
   , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
     value <- accessField' adt name ty'
@@ -269,18 +251,7 @@ cmpValue
   -> Value m' n
   -> m (RuntimeValue SymBool)
 cmpValue = curry $ \case
-  (Int lhs, Int rhs) -> pure $ cmpRuntime lhs rhs
-  (Int8 lhs, Int8 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int16 lhs, Int16 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int32 lhs, Int32 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int64 lhs, Int64 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word lhs, Word rhs) -> pure $ cmpRuntime lhs rhs
-  (Word8 lhs, Word8 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word16 lhs, Word16 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word32 lhs, Word32 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word64 lhs, Word64 rhs) -> pure $ cmpRuntime lhs rhs
-  (Float lhs, Float rhs) -> pure $ cmpRuntime lhs rhs
-  (Double lhs, Double rhs) -> pure $ cmpRuntime lhs rhs
+  (Primitive lhs, Primitive rhs) -> cmpPrimitive lhs rhs
   (ADT lty lhs, ADT rty rhs) -> do
     unless (lty `eqType` rty) $ throwError $ IllTyped
     pure $ cmpRuntime lhs rhs
@@ -304,16 +275,7 @@ iteValue
   -> Value m n
   -> m (Value m n)
 iteValue cond = curry $ \case
-  (Int lhs, Int rhs) -> pure . Int $ iteRuntime cond lhs rhs
-  (Int8 lhs, Int8 rhs) -> pure . Int8 $ iteRuntime cond lhs rhs
-  (Int16 lhs, Int16 rhs) -> pure . Int16 $ iteRuntime cond lhs rhs
-  (Int32 lhs, Int32 rhs) -> pure . Int32 $ iteRuntime cond lhs rhs
-  (Int64 lhs, Int64 rhs) -> pure . Int64 $ iteRuntime cond lhs rhs
-  (Word lhs, Word rhs) -> pure . Word $ iteRuntime cond lhs rhs
-  (Word8 lhs, Word8 rhs) -> pure . Word8 $ iteRuntime cond lhs rhs
-  (Word16 lhs, Word16 rhs) -> pure . Word16 $ iteRuntime cond lhs rhs
-  (Word32 lhs, Word32 rhs) -> pure . Word32 $ iteRuntime cond lhs rhs
-  (Word64 lhs, Word64 rhs) -> pure . Word64 $ iteRuntime cond lhs rhs
+  (Primitive lhs, Primitive rhs) -> Primitive <$> itePrimitive cond lhs rhs
   (ADT lty lhs, ADT rty rhs) -> do
     unless (lty `eqType` rty) $ throwError IllTyped
     pure . ADT lty $ iteRuntime cond lhs rhs
@@ -326,4 +288,104 @@ iteValue cond = curry $ \case
       lhs' <- lhs arg
       rhs' <- rhs arg
       iteValue cond lhs' rhs'
+  -- (Fun _, ADT ty _) -> pprPanic "wow..." $ ppr ty
+  -- (lhs, rhs) -> pprPanic ":(" $ ppr lhs <+> "/=" <+> ppr rhs
+  _ -> throwError IllTyped
+
+-- | Primitive values supported by the symbolic solver.
+data Primitive n where
+  Int :: RuntimeValue (SymIntN n) -> Primitive n
+  Int8 :: RuntimeValue SymIntN8 -> Primitive n
+  Int16 :: RuntimeValue SymIntN16 -> Primitive n
+  Int32 :: RuntimeValue SymIntN32 -> Primitive n
+  Int64 :: RuntimeValue SymIntN64 -> Primitive n
+  Word :: RuntimeValue (SymWordN n) -> Primitive n
+  Word8 :: RuntimeValue SymWordN8 -> Primitive n
+  Word16 :: RuntimeValue SymWordN16 -> Primitive n
+  Word32 :: RuntimeValue SymWordN32 -> Primitive n
+  Word64 :: RuntimeValue SymWordN64 -> Primitive n
+  Float :: RuntimeValue SymFP32 -> Primitive n
+  Double :: RuntimeValue SymFP64 -> Primitive n
+
+instance KnownPos n => Outputable (Primitive n) where
+  ppr = \case
+    Int val -> text "Int# =>" <+> text (show val)
+    Int8 val -> text "Int8# =>" <+> text (show val)
+    Int16 val -> text "Int16# =>" <+> text (show val)
+    Int32 val -> text "Int32# =>" <+> text (show val)
+    Int64 val -> text "Int64# =>" <+> text (show val)
+    Word val -> text "Word# =>" <+> text (show val)
+    Word8 val -> text "Word8# =>" <+> text (show val)
+    Word16 val -> text "Word16# =>" <+> text (show val)
+    Word32 val -> text "Word32# =>" <+> text (show val)
+    Word64 val -> text "Word64# =>" <+> text (show val)
+    Float val -> text "Float# =>" <+> text (show val)
+    Double val -> text "Double# =>" <+> text (show val)
+
+-- | Construct a primitive, symbolic value with the given type.
+typedPrimitive
+  :: forall m n
+   . MonadError EvalError m
+  => KnownPos n
+  => (forall c t. Solvable c t => LinkedRep c t => RuntimeValue t)
+  -> Type
+  -> m (Primitive n)
+typedPrimitive value ty
+  | ty `eqType` intPrimTy = pure $ Int value
+  | ty `eqType` int8PrimTy = pure $ Int8 value
+  | ty `eqType` int16PrimTy = pure $ Int16 value
+  | ty `eqType` int32PrimTy = pure $ Int32 value
+  | ty `eqType` int64PrimTy = pure $ Int64 value
+  | ty `eqType` wordPrimTy = pure $ Word value
+  | ty `eqType` word8PrimTy = pure $ Word8 value
+  | ty `eqType` word16PrimTy = pure $ Word16 value
+  | ty `eqType` word32PrimTy = pure $ Word32 value
+  | ty `eqType` word64PrimTy = pure $ Word64 value
+  | ty `eqType` floatPrimTy = pure $ Float value
+  | ty `eqType` doublePrimTy = pure $ Double value
+  | otherwise = throwError UnsupportedExpr
+
+-- | Compare primitives values.
+cmpPrimitive
+  :: MonadError EvalError m
+  => KnownPos n
+  => Primitive n
+  -> Primitive n
+  -> m (RuntimeValue SymBool)
+cmpPrimitive = curry $ \case
+  (Int lhs, Int rhs) -> pure $ cmpRuntime lhs rhs
+  (Int8 lhs, Int8 rhs) -> pure $ cmpRuntime lhs rhs
+  (Int16 lhs, Int16 rhs) -> pure $ cmpRuntime lhs rhs
+  (Int32 lhs, Int32 rhs) -> pure $ cmpRuntime lhs rhs
+  (Int64 lhs, Int64 rhs) -> pure $ cmpRuntime lhs rhs
+  (Word lhs, Word rhs) -> pure $ cmpRuntime lhs rhs
+  (Word8 lhs, Word8 rhs) -> pure $ cmpRuntime lhs rhs
+  (Word16 lhs, Word16 rhs) -> pure $ cmpRuntime lhs rhs
+  (Word32 lhs, Word32 rhs) -> pure $ cmpRuntime lhs rhs
+  (Word64 lhs, Word64 rhs) -> pure $ cmpRuntime lhs rhs
+  (Float lhs, Float rhs) -> pure $ cmpRuntime lhs rhs
+  (Double lhs, Double rhs) -> pure $ cmpRuntime lhs rhs
+  _ -> throwError IllTyped
+
+-- If-then-else for primitive values.
+itePrimitive
+  :: MonadError EvalError m
+  => KnownPos n
+  => RuntimeValue SymBool
+  -> Primitive n
+  -> Primitive n
+  -> m (Primitive n)
+itePrimitive cond = curry $ \case
+  (Int lhs, Int rhs) -> pure . Int $ iteRuntime cond lhs rhs
+  (Int8 lhs, Int8 rhs) -> pure . Int8 $ iteRuntime cond lhs rhs
+  (Int16 lhs, Int16 rhs) -> pure . Int16 $ iteRuntime cond lhs rhs
+  (Int32 lhs, Int32 rhs) -> pure . Int32 $ iteRuntime cond lhs rhs
+  (Int64 lhs, Int64 rhs) -> pure . Int64 $ iteRuntime cond lhs rhs
+  (Word lhs, Word rhs) -> pure . Word $ iteRuntime cond lhs rhs
+  (Word8 lhs, Word8 rhs) -> pure . Word8 $ iteRuntime cond lhs rhs
+  (Word16 lhs, Word16 rhs) -> pure . Word16 $ iteRuntime cond lhs rhs
+  (Word32 lhs, Word32 rhs) -> pure . Word32 $ iteRuntime cond lhs rhs
+  (Word64 lhs, Word64 rhs) -> pure . Word64 $ iteRuntime cond lhs rhs
+  (Float lhs, Float rhs) -> pure . Float $ iteRuntime cond lhs rhs
+  (Double lhs, Double rhs) -> pure . Double $ iteRuntime cond lhs rhs
   _ -> throwError IllTyped
