@@ -52,11 +52,9 @@ import Symbolic.ADT
 --   SFunc :: Type -> SymWordN64 -> Func m n
 --   CFunc :: Type -> (Value m n -> m (Value m n)) -> Func m n
 
--- TODO: I think the Int and Word stuff should go under one constructor: Prim.
--- They all function pretty much the same anyway.
--- TODO: Could we adjust n to be a DataKind of the actualy word size data type
--- from Haskell? To me that seems a lot cleaner, as it represents more
--- accurately what Int and Word are exactly.
+-- TODO: Could we adjust n to be a DataKind of the actual word size data type
+-- from GHC? To me that seems a lot cleaner, as it represents more
+-- accurately what values n should range over are exactly.
 data Value m n where
   -- TODO: Add support for Char
   -- TODO: Add support for ByteArray (as this is how big integers are
@@ -119,7 +117,7 @@ typedValue
   :: forall m n
    . MonadError EvalError m
   => KnownPos n
-  => (forall c t. Solvable c t => LinkedRep c t => RuntimeValue t)
+  => (forall c t. Solvable' c t => LinkedRep c t => RuntimeValue t)
   -> Type
   -> m (Value m n)
 typedValue value ty
@@ -132,6 +130,8 @@ typedValue value ty
   | Just _ <- tcSplitTyConApp_maybe ty = do
     let adt = assumeRuntime (tagInRange @n ty value) value
     pure $ ADT ty adt
+  -- TODO: I think a symbolic function instance would work better here in most
+  -- cases.
   | Just (_, _, _, res) <- splitFunTy_maybe ty = do
     let fun _ = typedValue value res
     pure $ Fun fun
@@ -163,35 +163,7 @@ accessField'
   -> String
   -> Type
   -> m (Value m n)
-accessField' adt name ty
-  -- TODO: Why can we not pass 'construct' to 'typedValue'? I don't understand
-  -- why it has overlapping instances... For now, we just duplicate some code...
-  | ty `eqType` intPrimTy = pure . Primitive $ Int construct
-  | ty `eqType` int8PrimTy = pure . Primitive $ Int8 construct
-  | ty `eqType` int16PrimTy = pure . Primitive $ Int16 construct
-  | ty `eqType` int32PrimTy = pure . Primitive $ Int32 construct
-  | ty `eqType` int64PrimTy = pure . Primitive $ Int64 construct
-  | ty `eqType` wordPrimTy = pure . Primitive $ Word construct
-  | ty `eqType` word8PrimTy = pure . Primitive $ Word8 construct
-  | ty `eqType` word16PrimTy = pure . Primitive $ Word16 construct
-  | ty `eqType` word32PrimTy = pure . Primitive $ Word32 construct
-  | ty `eqType` word64PrimTy = pure . Primitive $ Word64 construct
-  | ty `eqType` floatPrimTy = pure . Primitive $ Float construct
-  | ty `eqType` doublePrimTy = pure . Primitive $ Double construct
-  | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
-  , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
-    value <- accessField' adt name ty'
-    let co' = mkSymCo co
-    pure $ mkCast' co' value
-  | Just _ <- tcSplitTyConApp_maybe ty = pure $ ADT ty construct
-  | otherwise = throwError UnsupportedExpr
-  where
-    construct
-      :: forall c t
-       . LinkedRep (ADT --> c) (SymADT -~> t)
-      => LinkedRep c t
-      => RuntimeValue t
-    construct = accessField adt name
+accessField' adt name ty = typedValue (accessField adt name) ty
 
 -- | Create a function with the arity of whatever we are folding over.
 --
@@ -327,7 +299,7 @@ typedPrimitive
   :: forall m n
    . MonadError EvalError m
   => KnownPos n
-  => (forall c t. Solvable c t => LinkedRep c t => RuntimeValue t)
+  => (forall c t. Solvable' c t => LinkedRep c t => RuntimeValue t)
   -> Type
   -> m (Primitive n)
 typedPrimitive value ty

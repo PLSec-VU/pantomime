@@ -213,6 +213,7 @@ assertEq = curry $ \case
 
   (Ty lhs, Ty rhs) -> pure . pure . con $ lhs `eqType` rhs
   (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
+  (Fun _, Fun _) -> throwError UnsupportedExpr
   _ -> throwError IllTyped
 
 -- FIXME: We should restrict ADT tags to actually be in range of their tag here!

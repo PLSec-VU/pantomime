@@ -180,4 +180,3 @@ concretePrimitive model = \case
       case concrete of
         Right value' -> Value $ ModelValue value'
         Left err -> Error err
-

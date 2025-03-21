@@ -13,6 +13,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE FunctionalDependencies #-}
 
 module Symbolic.ADT
   ( SymADT
@@ -26,6 +27,7 @@ module Symbolic.ADT
 
   , adtIsDataCon
   , accessTag
+  , Solvable' (..)
   , accessField
   , tagInRange
 
@@ -33,9 +35,14 @@ module Symbolic.ADT
   ) where
 
 import GHC.Plugins
+
 import Grisette
-import Data.String (IsString(..))
+import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim)
+
+import Data.Data (Typeable)
 import Data.Foldable (find)
+import Data.Hashable (Hashable)
+import Data.String (IsString(..))
 
 import Symbolic.Runtime
 import Symbolic.KnownPos
@@ -100,21 +107,50 @@ accessTag
   -> RuntimeValue (SymTag n)
 accessTag adt = accessField adt "!tag"
 
+-- class Solvable (c t => Solvable' c t | t -> c where
+--   sym' :: Symbol -> t
+
+-- instance (Solvable c t, LinkedRep c t, SupportedNonFuncPrim c, Show c, Hashable c, Typeable c) => Solvable' (ADT --> c) (SymADT -~> t) where
+--   sym' = sym
+
+-- | Solvable class to avoid overlapping instances on 'accessField'.
+-- TODO: Is this really the best way to resolve the overlapping instance? It
+-- works for now...
+class
+  ( Solvable c t
+  , LinkedRep c t
+  , SupportedNonFuncPrim c
+  , Show c
+  , Hashable c
+  , Typeable c
+  , Solvable (ADT --> c) (SymADT -~> t)
+  ) => Solvable' c t | t -> c where
+  sym' :: Symbol -> (SymADT -~> t)
+
+instance
+  ( Solvable c t
+  , LinkedRep c t
+  , SupportedNonFuncPrim c
+  , Show c
+  , Hashable c
+  , Typeable c
+  ) => Solvable' c t where
+  sym' = sym
+
 -- | Accessor for a field of an ADT.
 --
 -- Note that the result can be resolved to any type, so care should be taken
 -- to ensure the accessor is correctly typed.
 accessField
   :: forall c t
-   . LinkedRep (ADT --> c) (SymADT -~> t)
-  => LinkedRep c t
+   . Solvable' c t
   => RuntimeValue SymADT
   -> String
-  -- TODO: I think this input string should really be Text...
+  -- TODO: I think this input String should really be Text...
   -> RuntimeValue t
 accessField adt name = do
   let symbol = simple . identifier . fromString $ name
-  let accessor = sym @(ADT --> c) @(SymADT -~> t) symbol :: SymADT -~> t
+  let accessor = sym' @c @t symbol :: SymADT -~> t
   adt' <- adt
   pure $ accessor # adt'
 
