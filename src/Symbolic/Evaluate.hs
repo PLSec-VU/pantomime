@@ -32,9 +32,8 @@ import Control.Monad.State
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
 
--- TODO: There has to be a better way to not import pretty printing stuff from
--- grisette...
 import Grisette hiding (Rec)
+import Grisette.Unified (EvalModeTag (..))
 
 import Symbolic.Util
 import Symbolic.WordSize
@@ -54,24 +53,27 @@ newtype SymbolicState = SymbolicState
 -- | Get a fresh ADT identifier.
 freshADT
   :: forall m ws
-   . MonadState SymbolicState m
+   . MonadEval m
   => KnownWordSize ws
   => Type
-  -> m (RuntimeValue SymADT)
-freshADT ty = state $ \s -> do
-  -- Fetch index for identifier.
-  let idx = nextIdx s
-  let s' = s { nextIdx = idx + 1 }
+  -> m (ADT S)
+freshADT ty = do
+  (tyCon, tys) <- whyFail IllTyped $ splitTyConApp_maybe ty
+
+  idx <- state $ \s -> do
+    let idx = nextIdx s
+    let s' = s { nextIdx = idx + 1 }
+    (idx, s')
 
   -- Create a fresh ADT.
   let symbol = indexed "!ADT" idx
   let adt = pure $ sym symbol
 
   -- Ensure that the tag is within bounds.
-  let adt' = assumeRuntime (tagInRange @ws ty adt) adt
+  let adt' = mkADT @ws tyCon tys $ adt
 
   -- Return fresh ADT and the next index.
-  (adt', s')
+  pure adt'
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate
@@ -150,16 +152,16 @@ evalAlt
   => Environment m ws
   -> Value m ws
   -> CoreAlt
-  -> m (RuntimeValue SymBool, Value m ws)
+  -> m (RuntimeValue S SymBool, Value m ws)
 evalAlt env scrut = \case
   Alt (DataAlt dataCon) bndrs rhs -> do
     -- Ensure the scrutinee is actually an ADT.
     scrut' <- case scrut of
-      ADT _ adt -> pure adt
+      Data adt -> pure adt
       _ -> throwError IllTyped
 
     -- Whether the tag of this ADT is equivalent to the DataCon.
-    let conditional = adtIsDataCon @ws scrut' dataCon
+    conditional <- whyFail IllTyped $ adtIsDataCon @ws scrut' dataCon
 
     -- Gather field accessors for all binders.
     -- FIXME: I think the accessor names are returned in the same order as
@@ -171,7 +173,7 @@ evalAlt env scrut = \case
     let names = dataConAccessorNames dataCon
     let accessors = zip names bndrs
     fields <- forM accessors $ \(name, bndr) -> do
-      accessField' scrut' name (varType bndr)
+      accessField scrut' name (varType bndr)
 
     -- Extend the environment with field accessors for each binder.
     env' <- extendManyEnv env $ zip bndrs fields
@@ -251,12 +253,12 @@ evalDataConInst dataCon tys = do
 
   -- Gather the fields of the ADT.
   fields <- forM accessors $ \(name, fty) -> do
-    accessField' adt name fty
+    accessField adt name fty
 
   -- The root is an ADT that assumes the given conditional holds.
   let root cond = do
-        let value = assumeRuntime cond adt
-        pure $ ADT ty value
+        let adt' = assumeADT cond adt
+        pure $ Data adt'
 
   -- Accumulate a function that takes the fields as arguments. We pass a
   -- conditional to the root that states the field accessors are equal to the
@@ -267,7 +269,8 @@ evalDataConInst dataCon tys = do
     pure $ liftA2 (.&&) extra cond
 
   -- As a final constraint, the ADT tag should match the given DataCon.
-  final $ adtIsDataCon @ws adt dataCon
+  match <- whyFail IllTyped $ adtIsDataCon @ws adt dataCon
+  final match
 
 -- | Get the value corresponding to a literal.
 evalLiteral
@@ -293,7 +296,7 @@ evalLiteral = fmap Primitive . \case
     -- LitNumBigNat -> throwError ()
     _ -> throwError UnsupportedExpr
     where
-      num' :: Num a => RuntimeValue a
+      num' :: Num a => RuntimeValue S a
       num' = pure $ fromInteger num
 
   LitFloat num -> do
@@ -538,9 +541,13 @@ evalPrimOp = \case
     Ty ty -> pure . Fun $ \case
       Primitive (Int tag) -> do
         adt <- freshADT @m @ws ty
-        let cond = cmpRuntime tag $ accessTag @ws adt
+
+        let conditional = do
+              let Tag _ tag' = accessTag @ws adt
+              cmpRuntime tag tag'
         -- Assume that the ADT tag matches the given tag. Return the ADT.
-        pure . ADT ty $ assumeRuntime cond adt
+        let adt' = assumeADT conditional adt
+        pure $ Data adt'
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError UnsupportedExpr
@@ -605,97 +612,97 @@ evalPrimOp = \case
     symLe lhs rhs = SymInt $ symIte (lhs .<= rhs) 1 0
 
 binary
-  :: Wrap m ws (RuntimeValue a -> RuntimeValue b -> RuntimeValue c)
+  :: Wrap m ws (RuntimeValue S a -> RuntimeValue S b -> RuntimeValue S c)
   => (a -> b -> c)
   -> m (Value m ws)
-binary = pure . wrap . liftA2 @(ExceptT RuntimeError Union)
+binary = pure . wrap . liftA2 @(RuntimeValue S)
 
 unary
-  :: Wrap m ws (RuntimeValue a -> RuntimeValue b)
+  :: Wrap m ws (RuntimeValue S a -> RuntimeValue S b)
   => (a -> b)
   -> m (Value m ws)
-unary = pure . wrap . fmap @(ExceptT RuntimeError Union)
+unary = pure . wrap . fmap @(RuntimeValue S)
 
 -- TODO: This wrap stuff is probably better suited in a separate file.
 class MonadEval m => Wrap m ws a where
   wrap :: a -> Value m ws
 
-instance MonadEval m => Wrap m ws (RuntimeValue (SymInt ws)) where
+instance MonadEval m => Wrap m ws (RuntimeValue S (SymInt ws)) where
   wrap = Primitive . Int . fmap unSymInt
 
-instance MonadEval m => Wrap m ws (RuntimeValue SymIntN8) where
+instance MonadEval m => Wrap m ws (RuntimeValue S SymIntN8) where
   wrap = Primitive . Int8
 
-instance MonadEval m => Wrap m ws (RuntimeValue SymIntN16) where
+instance MonadEval m => Wrap m ws (RuntimeValue S SymIntN16) where
   wrap = Primitive . Int16
 
-instance MonadEval m => Wrap m ws (RuntimeValue SymIntN32) where
+instance MonadEval m => Wrap m ws (RuntimeValue S SymIntN32) where
   wrap = Primitive . Int32
 
-instance MonadEval m => Wrap m ws (RuntimeValue SymIntN64) where
+instance MonadEval m => Wrap m ws (RuntimeValue S SymIntN64) where
   wrap = Primitive . Int64
 
-instance (MonadEval m, KnownWordSize ws) => Wrap m ws (RuntimeValue (SymWord ws)) where
+instance (MonadEval m, KnownWordSize ws) => Wrap m ws (RuntimeValue S (SymWord ws)) where
   wrap = Primitive . Word . fmap unSymWord
 
-instance MonadEval m => Wrap m ws (RuntimeValue SymWordN8) where
+instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN8) where
   wrap = Primitive . Word8
 
-instance MonadEval m => Wrap m ws (RuntimeValue SymWordN16) where
+instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN16) where
   wrap = Primitive . Word16
 
-instance MonadEval m => Wrap m ws (RuntimeValue SymWordN32) where
+instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN32) where
   wrap = Primitive . Word32
 
-instance MonadEval m => Wrap m ws (RuntimeValue SymWordN64) where
+instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN64) where
   wrap = Primitive . Word64
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue (SymInt ws) -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S (SymInt ws) -> b) where
   wrap f = Fun $ \case
     Primitive (Int arg) -> pure $ wrap @m @ws (f $ arg <&> SymInt)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymIntN8 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN8 -> b) where
   wrap f = Fun $ \case
     Primitive (Int8 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymIntN16 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN16 -> b) where
   wrap f = Fun $ \case
     Primitive (Int16 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymIntN32 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN32 -> b) where
   wrap f = Fun $ \case
     Primitive (Int32 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymIntN64 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN64 -> b) where
   wrap f = Fun $ \case
     Primitive (Int64 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue (SymWord ws) -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S (SymWord ws) -> b) where
   wrap f = Fun $ \case
     Primitive (Word arg) -> pure $ wrap @m @ws (f $ arg <&> SymWord)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymWordN8 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN8 -> b) where
   wrap f = Fun $ \case
     Primitive (Word8 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymWordN16 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN16 -> b) where
   wrap f = Fun $ \case
     Primitive (Word16 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymWordN32 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN32 -> b) where
   wrap f = Fun $ \case
     Primitive (Word32 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue SymWordN64 -> b) where
+instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN64 -> b) where
   wrap f = Fun $ \case
     Primitive (Word64 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped

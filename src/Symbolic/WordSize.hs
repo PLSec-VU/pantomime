@@ -26,7 +26,6 @@ module Symbolic.WordSize
   , sizedBVResize
   ) where
 
-
 import Grisette
   ( SymIntN
   , SymWordN
@@ -36,6 +35,7 @@ import Grisette
   , SymFromIntegral (..)
   , SizedBV (..)
   , SignConversion (..)
+  , unsafeAxiom
   )
 
 import GHC.TypeLits (KnownNat, type (<=), Nat, OrderingI (..), cmpNat)
@@ -44,8 +44,6 @@ import GHC.Platform
 import Data.Bits (Bits)
 import Data.Data (type (:~:) (..), Proxy (..))
 import Data.Type.Ord (Compare)
-
-import Unsafe.Coerce (unsafeCoerce)
 
 -- import Grisette
 
@@ -71,6 +69,12 @@ type KnownPos n = (KnownNat n, 1 <= n)
 -- Note that in order to solve for this word-sized int, one needs to unwrap it.
 -- This is due to the functional dependency between symbolic and non-symbolic
 -- values in Grisette.
+-- TODO: We should really adjust SymInt to get a EvalModeTag which makes it
+-- select either the concrete or symbolic int (with of course the correct word
+-- size). I guess we don't need to create a new type family here, as we can just
+-- us GetIntN (and GetWordN respectively for the word size stuff). Maybe the
+-- new name for this would need to be PlatformInt (and PlatformWord). I'll have
+-- to think about it...
 newtype SymInt ws where
   SymInt :: { unSymInt :: SymIntN (WordBits ws) } -> SymInt ws
 
@@ -296,12 +300,12 @@ sizedBVResize
   => KnownPos r
   => bv l
   -> bv r
-sizedBVResize = case cmpNat (Proxy @l) (Proxy @r) of
+sizedBVResize = case cmpNat @l @r Proxy Proxy of
   LTI -> sizedBVExt $ Proxy @r
   EQI -> id
   -- SAFETY: The unsafe coerce is just to have 'r <= l' as Haskell cannot figure
   -- this out given the 'l >= r' that is already in context. Theoretically we
   -- should be able to do this without unsafeCoerce, but I'm not sure how.
   -- I'm not keen on importing the type level nat plugin for just one function.
-  GTI -> case unsafeCoerce Refl :: (Compare r l :~: 'LT) of
+  GTI -> case unsafeAxiom @(Compare r l) @LT  of
     Refl -> sizedBVSelect (Proxy @0) (Proxy @r)

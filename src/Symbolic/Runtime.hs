@@ -14,8 +14,9 @@
 {-# LANGUAGE StandaloneDeriving #-}
 
 module Symbolic.Runtime
-  ( RuntimeValue
+  ( RuntimeValue (..)
   , RuntimeError (..)
+
   , cmpRuntime
   , iteRuntime
   , assumeRuntime
@@ -24,20 +25,79 @@ module Symbolic.Runtime
 import GHC.Utils.Outputable (Outputable (..), text)
 import GHC.Generics (Generic)
 
-import Control.Monad.Except (ExceptT, MonadError (..))
+import Control.Monad.Except (ExceptT (..), MonadError)
 
+import Data.Functor.Classes (Show1)
+
+import Grisette.Lib.Control.Monad.Except (mrgThrowError)
+import Grisette.Unified (EvalModeTag (..), BaseMonad)
 import Grisette
-  ( Union
-  , Mergeable
+  ( Mergeable
   , SimpleMergeable (..)
   , EvalSym
   , SymEq (..)
   , SymBool
   , Default (..)
-  , mrgLiftA2
+  , TryMerge
+  , Mergeable1
+  , SymBranching
+  , ToSym (..)
+  , ToCon (..)
+  , mrgLiftA2, EvalSym1
   )
 
-type RuntimeValue a = ExceptT RuntimeError Union a
+newtype RuntimeValue mode a where
+  RuntimeValue ::
+    { unRuntimeValue :: ExceptT RuntimeError (BaseMonad mode) a
+    } -> RuntimeValue mode a
+
+deriving via ExceptT RuntimeError (BaseMonad mode)
+  instance Monad (BaseMonad mode)
+  => Functor (RuntimeValue mode)
+
+deriving via ExceptT RuntimeError (BaseMonad mode)
+  instance Monad (BaseMonad mode)
+  => Applicative (RuntimeValue mode)
+
+deriving via ExceptT RuntimeError (BaseMonad mode)
+  instance Monad (BaseMonad mode)
+  => Monad (RuntimeValue mode)
+
+deriving via ExceptT RuntimeError (BaseMonad mode)
+  instance TryMerge (BaseMonad mode)
+  => TryMerge (RuntimeValue mode)
+
+deriving via ExceptT RuntimeError (BaseMonad mode) a
+  instance (Mergeable1 (BaseMonad mode), Mergeable a)
+  => Mergeable (RuntimeValue mode a)
+
+deriving via ExceptT RuntimeError (BaseMonad mode) a
+  instance (SymBranching (BaseMonad mode), Mergeable a)
+  => SimpleMergeable (RuntimeValue mode a)
+
+deriving via ExceptT RuntimeError (BaseMonad mode)
+  instance Monad (BaseMonad mode)
+  => MonadError RuntimeError (RuntimeValue mode)
+
+deriving via ExceptT RuntimeError (BaseMonad mode) a
+  instance (Show1 (BaseMonad mode), Show a)
+  => Show (RuntimeValue mode a)
+
+deriving via ExceptT RuntimeError (BaseMonad mode) a
+  instance (EvalSym1 (BaseMonad mode), EvalSym a)
+  => EvalSym (RuntimeValue mode a)
+
+instance ToSym a b => ToSym (RuntimeValue C a) (RuntimeValue S b) where
+  toSym = RuntimeValue . toSym . unRuntimeValue
+
+instance ToSym a b => ToSym (RuntimeValue S a) (RuntimeValue S b) where
+  toSym = RuntimeValue . toSym . unRuntimeValue
+
+instance ToCon a b => ToCon (RuntimeValue S a) (RuntimeValue C b) where
+  toCon = fmap RuntimeValue . toCon . unRuntimeValue
+
+instance ToCon a b => ToCon (RuntimeValue C a) (RuntimeValue C b) where
+  toCon = fmap RuntimeValue . toCon . unRuntimeValue
 
 -- TODO: Add support for all primitive runtime errors.
 -- TODO: We could add support for bottom? I guess we would want an option to
@@ -70,12 +130,14 @@ instance Outputable RuntimeError where
 -- not want to compare error values. An error in a branch should be propagated
 -- the root. This function propagates errors in either value and compares them
 -- if both are non-error values.
+-- TODO: This (and the other runtime functions) should be polymorphic over the
+-- evaluation mode.
 cmpRuntime
   :: Mergeable a
   => SymEq a
-  => RuntimeValue a
-  -> RuntimeValue a
-  -> RuntimeValue SymBool
+  => RuntimeValue S a
+  -> RuntimeValue S a
+  -> RuntimeValue S SymBool
 cmpRuntime = mrgLiftA2 (.==)
 
 -- | Branch over a runtime symbolic boolean.
@@ -84,10 +146,10 @@ cmpRuntime = mrgLiftA2 (.==)
 -- before proceeding to choose either branch. This function captures that idea.
 iteRuntime
   :: SimpleMergeable a
-  => RuntimeValue SymBool
-  -> RuntimeValue a
-  -> RuntimeValue a
-  -> RuntimeValue a
+  => RuntimeValue S SymBool
+  -> RuntimeValue S a
+  -> RuntimeValue S a
+  -> RuntimeValue S a
 iteRuntime cond tr fl = do
   cond' <- cond
   mrgIte cond' tr fl
@@ -100,7 +162,7 @@ iteRuntime cond tr fl = do
 -- I'll have to think about it once I add support for bottom values.
 assumeRuntime
   :: SimpleMergeable a
-  => RuntimeValue SymBool
-  -> RuntimeValue a
-  -> RuntimeValue a
-assumeRuntime cond tr = iteRuntime cond tr $ throwError Invalid
+  => RuntimeValue S SymBool
+  -> RuntimeValue S a
+  -> RuntimeValue S a
+assumeRuntime cond tr = iteRuntime cond tr $ mrgThrowError Invalid

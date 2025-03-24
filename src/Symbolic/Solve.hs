@@ -28,6 +28,7 @@ import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Tc.Utils.TcType (eqType, tcSplitSigmaTy)
 import GHC.MonadCore
 
+import Grisette.Unified (EvalModeTag (..))
 import Grisette
   ( SymBool
   , LogicalOp (..)
@@ -118,7 +119,7 @@ exprSymEq' lhs rhs = runExceptT $ do
 
     lresult <- saturate lhs
     rresult <- saturate rhs
-    eq <- assertEq lresult rresult
+    eq <- unRuntimeValue <$> assertEq lresult rresult
     pure (bndrs, lresult, rresult, eq)
 
   -- TODO: We could let the user decide which solver no?
@@ -162,15 +163,15 @@ assertEq
   => KnownWordSize ws
   => Value m ws
   -> Value m ws
-  -> m (RuntimeValue SymBool)
+  -> m (RuntimeValue S SymBool)
 assertEq = curry $ \case
   (Primitive lhs, Primitive rhs) -> cmpPrimitive lhs rhs
-  (ADT lty lhs, ADT rty rhs) -> do
+  (Data lhs, Data rhs) -> do
     -- Ensure the equality is sound.
-    unless (lty `eqType` rty) $ throwError IllTyped
+    unless (lhs `eqTyADT` rhs) $ throwError IllTyped
 
     -- Gather type info.
-    (tyCon, tyArgs) <- whyFail IllTyped $ splitTyConApp_maybe lty
+    let ADT tyCon tyArgs _ = lhs
     let dataCons = tyConDataCons tyCon
 
     -- Gather the branches for each DataCon this ADT could be. This is a pair of
@@ -178,7 +179,10 @@ assertEq = curry $ \case
     branches <- forM dataCons $ \dataCon -> do
       -- Ensure that both ADTs match the current DataCon.
       let inBranch adt = adtIsDataCon @ws adt dataCon
-      let conditional = mrgLiftA2 (.&&) (inBranch lhs) (inBranch rhs)
+      conditional <- whyFail IllTyped $ do
+        lhs' <- inBranch lhs
+        rhs' <- inBranch rhs
+        pure $ mrgLiftA2 (.&&) lhs' rhs'
 
       -- Gather the field names.
       let names = dataConAccessorNames dataCon
@@ -187,8 +191,8 @@ assertEq = curry $ \case
 
       -- Assertion for every field that they are equal.
       assertions <- forM accessors $ \(name, ty) -> do
-        lfield <- accessField' @_ @ws lhs name ty
-        rfield <- accessField' rhs name ty
+        lfield <- accessField @_ @ws lhs name ty
+        rfield <- accessField rhs name ty
         assertEq lfield rfield
 
       -- Fold the assertions per-field into a single conjunct.
@@ -202,7 +206,10 @@ assertEq = curry $ \case
       pure $ mrgLiftA2 implies conditional assertion
 
     -- Ensure the tags are actually equal.
-    let eqTag = cmpRuntime (accessTag @ws lhs) (accessTag rhs)
+    let eqTag = do
+          let Tag _ lhs' = accessTag @ws lhs
+          let Tag _ rhs' = accessTag @ws rhs
+          cmpRuntime lhs' rhs'
 
     -- Merge the branches as a large if-then-else.
     pure $ foldl' (mrgLiftA2 (.&&)) eqTag branches
@@ -238,9 +245,9 @@ symbolicBndrs ty = do
     idx <- state (\s -> let s' = s + 1 in (s, s'))
 
     -- Create symbolic variable.
-    let symbolic :: Solvable c t => RuntimeValue t
-        symbolic = pure . sym $ indexed "!arg" idx
+    let untyped :: forall c t. Solvable c t => RuntimeValue S t
+        untyped = pure . sym $ indexed "!arg" idx
 
     -- Type the symbolic variable according to the argument type.
     let argTy' = scaledThing argTy
-    lift $ typedValue symbolic argTy'
+    lift $ typedValue untyped argTy'

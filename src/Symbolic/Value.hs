@@ -17,7 +17,7 @@ module Symbolic.Value
   ( Value (..)
   , EvalError (..)
   , mkCast'
-  , accessField'
+  , accessField
   , typedValue
   , invalidValue
   , nArity
@@ -38,7 +38,8 @@ import GHC.Core.TyCo.Compare (eqType)
 import GHC.Builtin.Types.Prim
 
 import Grisette.SymPrim
-import Grisette (Solvable (..))
+import Grisette.Unified (EvalModeTag (..))
+import Grisette (Solvable (..), Mergeable)
 
 import Control.Monad (unless, foldM)
 import Control.Monad.Except (MonadError (..))
@@ -48,6 +49,8 @@ import Symbolic.WordSize
 import Symbolic.Runtime
 import Symbolic.ADT
 import GHC.Platform (PlatformWordSize)
+import Grisette.Lib.Control.Monad.Except (mrgThrowError)
+import Symbolic.Identifier
 
 -- data Func m n where
 --   SFunc :: Type -> SymWordN64 -> Func m n
@@ -67,7 +70,7 @@ data Value m ws where
   -- TODO: I think it would be nice to have an ADT be already its TyCon and
   -- Type arguments split. This prevents us from making some class of ill-formed
   -- ADTs.
-  ADT :: Type -> RuntimeValue SymADT -> Value m ws
+  Data :: ADT S -> Value m ws
   -- TODO: I don't really like the prime on the name of Cast here. Maybe we
   -- could go for some other name? Perhaps just Newtype, as that's pretty much
   -- what we wrap in there anyway.
@@ -79,7 +82,7 @@ data Value m ws where
 instance KnownWordSize ws => Outputable (Value m ws) where
   ppr = \case
     Primitive prim -> ppr prim
-    ADT ty val -> ppr ty <+> "=>" <+> text (show val)
+    Data adt@(ADT _ _ val) -> ppr (adtType adt) <+> "=>" <+> text (show val)
     Cast' co val -> ppr co <+> "=>" <+> ppr val
     Fun _ -> text "Fun ??"
     Ty ty -> text "@" <+> ppr ty
@@ -112,13 +115,19 @@ mkCast' co = \case
       | isReflexiveCo co' = value
       | otherwise = cont co' value
 
+-- | Constraints for creating the symbolic values we require.
+--
+-- These cosntraints are picked such that we can avoid overlapping instances
+-- whilst allowing all values we require to be constructed.
+type Symbolisable t = (SolvableIdent (ConType t) t, Solvable (ConType t) t, Mergeable t)
+
 -- TODO: I guess this should just return a maybe, as there is only one reason
 -- why this would possibly fail.
 typedValue
   :: forall m ws
    . MonadError EvalError m
   => KnownWordSize ws
-  => (forall c t. Solvable' c t => LinkedRep c t => RuntimeValue t)
+  => (forall t. Symbolisable t => RuntimeValue S t)
   -> Type
   -> m (Value m ws)
 typedValue value ty
@@ -128,9 +137,9 @@ typedValue value ty
     value' <- typedValue value ty'
     let co' = mkSymCo co
     pure $ mkCast' co' value'
-  | Just _ <- tcSplitTyConApp_maybe ty = do
-    let adt = assumeRuntime (tagInRange @ws ty value) value
-    pure $ ADT ty adt
+  | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty = do
+    let adt = mkADT @ws tyCon tys value
+    pure $ Data adt
   -- TODO: I think a symbolic function instance would work better here in most
   -- cases.
   | Just (_, _, _, res) <- splitFunTy_maybe ty = do
@@ -147,7 +156,7 @@ invalidValue
   => KnownWordSize ws
   => Type
   -> m (Value m ws)
-invalidValue = typedValue $ throwError Invalid
+invalidValue = typedValue $ mrgThrowError Invalid
 
 -- | Accessor for a field of an ADT.
 --
@@ -156,15 +165,15 @@ invalidValue = typedValue $ throwError Invalid
 -- interconnected. It would make the calls of this function a bit cleaner.
 -- TODO: I don't like this as a primed name. We should probably change the name
 -- of the normal accessField function.
-accessField'
+accessField
   :: forall m ws
    . MonadError EvalError m
   => KnownWordSize ws
-  => RuntimeValue SymADT
+  => ADT S
   -> String
   -> Type
   -> m (Value m ws)
-accessField' adt name ty = typedValue (accessField adt name) ty
+accessField adt name = typedValue $ untypedField adt name
 
 -- | Create a function with the arity of whatever we are folding over.
 --
@@ -222,12 +231,10 @@ cmpValue
   => KnownWordSize ws
   => Value m' ws
   -> Value m' ws
-  -> m (RuntimeValue SymBool)
+  -> m (RuntimeValue S SymBool)
 cmpValue = curry $ \case
   (Primitive lhs, Primitive rhs) -> cmpPrimitive lhs rhs
-  (ADT lty lhs, ADT rty rhs) -> do
-    unless (lty `eqType` rty) $ throwError $ IllTyped
-    pure $ cmpRuntime lhs rhs
+  (Data lhs, Data rhs) -> whyFail IllTyped $ cmpADT lhs rhs
   (Cast' lco lhs, Cast' rco rhs) -> do
     unless (lco `eqCoercion` rco) $ throwError IllTyped
     cmpValue lhs rhs
@@ -243,15 +250,15 @@ cmpValue = curry $ \case
 iteValue
   :: MonadError EvalError m
   => KnownWordSize ws
-  => RuntimeValue SymBool
+  => RuntimeValue S SymBool
   -> Value m ws
   -> Value m ws
   -> m (Value m ws)
 iteValue cond = curry $ \case
   (Primitive lhs, Primitive rhs) -> Primitive <$> itePrimitive cond lhs rhs
-  (ADT lty lhs, ADT rty rhs) -> do
-    unless (lty `eqType` rty) $ throwError IllTyped
-    pure . ADT lty $ iteRuntime cond lhs rhs
+  (Data lhs, Data rhs) -> do
+    let result = iteADT cond lhs rhs
+    whyFail IllTyped $ fmap Data result
   (Cast' lco lhs, Cast' rco rhs) -> do
     unless (lco `eqCoercion` rco) $ throwError IllTyped
     result <- iteValue cond lhs rhs
@@ -267,18 +274,23 @@ iteValue cond = curry $ \case
 
 -- | Primitive values supported by the symbolic solver.
 data Primitive (ws :: PlatformWordSize) where
-  Int :: RuntimeValue (SymIntN (WordBits ws)) -> Primitive ws
-  Int8 :: RuntimeValue SymIntN8 -> Primitive ws
-  Int16 :: RuntimeValue SymIntN16 -> Primitive ws
-  Int32 :: RuntimeValue SymIntN32 -> Primitive ws
-  Int64 :: RuntimeValue SymIntN64 -> Primitive ws
-  Word :: RuntimeValue (SymWordN (WordBits ws)) -> Primitive ws
-  Word8 :: RuntimeValue SymWordN8 -> Primitive ws
-  Word16 :: RuntimeValue SymWordN16 -> Primitive ws
-  Word32 :: RuntimeValue SymWordN32 -> Primitive ws
-  Word64 :: RuntimeValue SymWordN64 -> Primitive ws
-  Float :: RuntimeValue SymFP32 -> Primitive ws
-  Double :: RuntimeValue SymFP64 -> Primitive ws
+  -- TODO: Shouldn't we be using the newtype SymInt we created here? We don't
+  -- need to wrap just solvables in RuntimeValue. In fact, RuntimeValue itself
+  -- wraps Either, which is non-solvable. I really think it would be best to use
+  -- the newtype wrapper here, it is a lot more clear! The same goes for Word
+  -- btw.
+  Int :: RuntimeValue S (SymIntN (WordBits ws)) -> Primitive ws
+  Int8 :: RuntimeValue S SymIntN8 -> Primitive ws
+  Int16 :: RuntimeValue S SymIntN16 -> Primitive ws
+  Int32 :: RuntimeValue S SymIntN32 -> Primitive ws
+  Int64 :: RuntimeValue S SymIntN64 -> Primitive ws
+  Word :: RuntimeValue S (SymWordN (WordBits ws)) -> Primitive ws
+  Word8 :: RuntimeValue S SymWordN8 -> Primitive ws
+  Word16 :: RuntimeValue S SymWordN16 -> Primitive ws
+  Word32 :: RuntimeValue S SymWordN32 -> Primitive ws
+  Word64 :: RuntimeValue S SymWordN64 -> Primitive ws
+  Float :: RuntimeValue S SymFP32 -> Primitive ws
+  Double :: RuntimeValue S SymFP64 -> Primitive ws
 
 instance KnownWordSize ws => Outputable (Primitive ws) where
   ppr = \case
@@ -300,7 +312,7 @@ typedPrimitive
   :: forall m ws
    . MonadError EvalError m
   => KnownWordSize ws
-  => (forall c t. Solvable' c t => LinkedRep c t => RuntimeValue t)
+  => (forall t. Symbolisable t => RuntimeValue S t)
   -> Type
   -> m (Primitive ws)
 typedPrimitive value ty
@@ -324,7 +336,7 @@ cmpPrimitive
   => KnownWordSize ws
   => Primitive ws
   -> Primitive ws
-  -> m (RuntimeValue SymBool)
+  -> m (RuntimeValue S SymBool)
 cmpPrimitive = curry $ \case
   (Int lhs, Int rhs) -> pure $ cmpRuntime lhs rhs
   (Int8 lhs, Int8 rhs) -> pure $ cmpRuntime lhs rhs
@@ -344,7 +356,7 @@ cmpPrimitive = curry $ \case
 itePrimitive
   :: MonadError EvalError m
   => KnownWordSize ws
-  => RuntimeValue SymBool
+  => RuntimeValue S SymBool
   -> Primitive ws
   -> Primitive ws
   -> m (Primitive ws)

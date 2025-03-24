@@ -16,21 +16,21 @@
 {-# LANGUAGE FunctionalDependencies #-}
 
 module Symbolic.ADT
-  ( SymADT
-  , ADT
+  ( ADT (..)
+  , mkADT
+  , adtType
+  , untypedField
+  , adtIsDataCon
+  , eqTyADT
+  , cmpADT
+  , iteADT
+  , assumeADT
 
-  , SymTag
-  , Tag
-
+  , Tag (..)
   , tagToDataCon
   , dataConToTag
-
-  , adtIsDataCon
-  , tagInRange
-
-  , Solvable' (..)
   , accessTag
-  , accessField
+  , tagInRange
 
   , dataConAccessorNames
   ) where
@@ -38,51 +38,76 @@ module Symbolic.ADT
 import GHC.Plugins
 
 import Grisette
-import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim)
+import Grisette.Unified (EvalModeTag (..), EvalModeAll, GetBool, BaseMonad)
 
-import Data.Data (Typeable)
 import Data.Foldable (find)
-import Data.Hashable (Hashable)
-import Data.String (IsString(..))
 
 import Symbolic.Runtime
 import Symbolic.WordSize
+import Symbolic.Identifier
+import Grisette.Internal.Unified.UnifiedBV (UnifiedBVImpl(..))
+import Data.Maybe (fromJust)
+import Control.Monad (guard)
+import Symbolic.Util
+import GHC.Core.TyCo.Compare (eqType)
 
--- TODO: I think it would be good to make the ADT type always carry its type.
--- Not just inside of a Value.
-
--- | Symbolic Abstract Data type.
-type SymADT = SymWordN64
-
--- | Concrete representation of Abstract Data type.
+-- | Abstract Data Type.
 --
--- Note, that this is the SMT encoded representation.
-type ADT = WordN64
+-- This may both be symbolic or concrete depending on its mode parameter. Note
+-- that this is more or less an SMT-like encoding.
+data ADT mode where
+  ADT
+    :: TyCon
+    -> [Type]
+    -> RuntimeValue mode (Ident mode)
+    -> ADT mode
 
--- | Symbolic ADT Tag to distinguish between constructors.
-type SymTag ws = SymIntN (WordBits ws)
+instance (EvalSym1 (BaseMonad mode), EvalSym (Ident mode)) => EvalSym (ADT mode) where
+  evalSym fillDefault model (ADT tyCon tys ident) = do
+    let ident' = evalSym fillDefault model ident
+    ADT tyCon tys ident'
 
--- | Conrete representation of ADT Tag.
+instance ToCon (ADT S) (ADT C) where
+  toCon (ADT tyCon tys value) = ADT tyCon tys <$> toCon value 
+
+instance ToSym (ADT C) (ADT S) where
+  toSym (ADT tyCon tys value) = ADT tyCon tys $ toSym value
+
+-- | Create an ADT.
 --
--- Note, that this is the SMT encoded representation.
-type Tag ws = IntN (WordBits ws)
-
--- | Get the DataCon from a Tag and the Type that should match the .
-tagToDataCon
+-- Prefer using this function over manual construction, as it additionally adds
+-- the assumption that its tag should be in range.
+mkADT
   :: forall ws
    . KnownWordSize ws
-  => Tag ws
-  -> Type
-  -> Maybe DataCon
-tagToDataCon tag ty = do
-  (tyCon, _) <- splitTyConApp_maybe ty
-  dataCons <- tyConDataCons_maybe tyCon
-  let cmp dataCon = dataConToTag dataCon == tag
-  find cmp dataCons
+  => TyCon
+  -> [Type]
+  -> RuntimeValue S (Ident S)
+  -> ADT S
+mkADT tyCon tys ident = do
+  let adt = ADT tyCon tys ident
+  let tag = accessTag @ws adt
+  let conditional = tagInRange tag
+  let value = assumeRuntime conditional ident
+  ADT tyCon tys value
 
--- | Get the symbolic representation of the DataCon.
-dataConToTag :: KnownWordSize ws => DataCon -> Tag ws
-dataConToTag = fromIntegral . dataConTagZ
+-- | Get the type of this ADT.
+adtType :: ADT mode -> Type
+adtType (ADT tyCon tys _) = mkTyConApp tyCon tys
+
+-- | Accessor for a field of an ADT.
+--
+-- Note that the result can be resolved to any type, so care should be taken
+-- to ensure the accessor is correctly typed.
+untypedField
+  :: forall t
+   . Mergeable t
+  => SolvableIdent (ConType t) t
+  => ADT S
+  -> String
+  -- TODO: I think this input String should really be Text...
+  -> RuntimeValue S t
+untypedField (ADT _ _ value) name = interpretWith value name
 
 -- | Whether the given ADT matches the DataCon.
 --
@@ -92,68 +117,119 @@ dataConToTag = fromIntegral . dataConTagZ
 adtIsDataCon
   :: forall ws
    . KnownWordSize ws
-  => RuntimeValue SymADT
+  => ADT S
   -> DataCon
-  -> RuntimeValue SymBool
+  -> Maybe (RuntimeValue S (GetBool S))
 adtIsDataCon adt dataCon = do
-  field <- accessTag @ws adt
-  let tag = con $ dataConToTag dataCon
-  mrgReturn $ field .== tag
+  -- Gather the field from the ADT and create a tag instance from the DataCon.
+  let Tag lty lhs = accessTag @ws adt
+  let Tag rty rhs = dataConToTag dataCon
+
+  -- Ensure the type constructors match.
+  guard $ lty == rty
+
+  -- The actual equality check.
+  pure $ do
+    lhs' <- lhs
+    rhs' <- rhs
+    mrgPure $ lhs' .== rhs'
+
+eqTyADT
+  :: ADT mode
+  -> ADT mode
+  -> Bool
+eqTyADT lhs rhs = adtType lhs `eqType` adtType rhs
+
+-- TODO: I see that multiple of the runtime carrying structures have functions
+-- like the compare, ite and assume. I think we should generalise this idea!
+cmpADT
+  :: ADT S
+  -> ADT S
+  -> Maybe (RuntimeValue S (GetBool S))
+cmpADT lhs@(ADT _ _ lval) rhs@(ADT _ _ rval) = do
+  guard $ eqTyADT lhs rhs
+  pure $ cmpRuntime lval rval
+
+iteADT
+  :: RuntimeValue S SymBool
+  -> ADT S
+  -> ADT S
+  -> Maybe (ADT S)
+iteADT cond tr@(ADT tc tys tval) fl@(ADT _ _ fval) = do
+  guard $ eqTyADT tr fl
+  let result = iteRuntime cond tval fval
+  pure $ ADT tc tys result
+
+assumeADT
+  :: RuntimeValue S SymBool
+  -> ADT S
+  -> ADT S
+assumeADT cond (ADT tyCon tys ident) = ADT tyCon tys $ assumeRuntime cond ident
+
+-- | Tag of an ADT, used to distinguish between constructors.
+--
+-- Note that this is more or less an SMT encoded DataCon. This can either be
+-- concrete or symbolic, based on its evaluation mode.
+data Tag mode ws where
+  Tag
+    :: TyCon
+    -> RuntimeValue mode (GetIntN mode (WordBits ws))
+    -- ^ We use the platform sized integer as tag, since Haskell specifically
+    -- has a primitive function to convert these into a typed DataCon.
+    --
+    -- TODO: I think we should use our platform width newtype here, once we add
+    -- support for its eval mode.
+    -> Tag mode ws
+
+instance (EvalSym1 (BaseMonad mode), EvalSym (GetIntN mode (WordBits ws))) => EvalSym (Tag mode ws) where
+  evalSym fillDefault model (Tag tyCon value) = do
+    let value' = evalSym fillDefault model value
+    Tag tyCon value'
+
+instance KnownWordSize ws => ToCon (Tag S ws) (Tag C ws) where
+  toCon (Tag tyCon value) = Tag tyCon <$> toCon value
+
+instance KnownWordSize ws => ToSym (Tag C ws) (Tag S ws) where
+  toSym (Tag tyCon value) = Tag tyCon $ toSym value
+
+-- | Get the DataCon from a Tag and the Type that should match the .
+tagToDataCon
+  :: forall ws
+   . KnownWordSize ws
+  => Tag C ws
+  -> RuntimeValue C DataCon
+tagToDataCon (Tag tyCon tag) = do
+  -- Tags should only have type constructors with DataCons. If this fails, it is
+  -- a bug and we might as well fail fast.
+  let dataCons = fromJust $ tyConDataCons_maybe tyCon
+  tag' <- tag
+  let cmp = (tag' ==) . fromIntegral . dataConTagZ
+
+  -- An invalid tag should be unreachable. Note that this actually makes sense
+  -- as a valid return for vacuous types.
+  whyFail Invalid $ find cmp dataCons
+
+-- | Get the symbolic representation of the DataCon.
+dataConToTag
+  :: forall mode ws
+   . EvalModeAll mode
+  => KnownWordSize ws
+  => DataCon
+  -> Tag mode ws
+dataConToTag dataCon = do
+  let tyCon = dataConTyCon dataCon
+  let val = fromIntegral $ dataConTagZ dataCon
+  Tag tyCon $ pure val
 
 -- | Accessor for the tag of an ADT.
 accessTag
   :: forall ws
    . KnownWordSize ws
-  => RuntimeValue SymADT
-  -> RuntimeValue (SymTag ws)
-accessTag adt = accessField adt "!tag"
-
--- class Solvable (c t => Solvable' c t | t -> c where
---   sym' :: Symbol -> t
-
--- instance (Solvable c t, LinkedRep c t, SupportedNonFuncPrim c, Show c, Hashable c, Typeable c) => Solvable' (ADT --> c) (SymADT -~> t) where
---   sym' = sym
-
--- | Solvable class to avoid overlapping instances on 'accessField'.
--- TODO: Is this really the best way to resolve the overlapping instance? It
--- works for now...
-class
-  ( Solvable c t
-  , LinkedRep c t
-  , SupportedNonFuncPrim c
-  , Show c
-  , Hashable c
-  , Typeable c
-  , Solvable (ADT --> c) (SymADT -~> t)
-  ) => Solvable' c t | t -> c where
-  sym' :: Symbol -> (SymADT -~> t)
-
-instance
-  ( Solvable c t
-  , LinkedRep c t
-  , SupportedNonFuncPrim c
-  , Show c
-  , Hashable c
-  , Typeable c
-  ) => Solvable' c t where
-  sym' = sym
-
--- | Accessor for a field of an ADT.
---
--- Note that the result can be resolved to any type, so care should be taken
--- to ensure the accessor is correctly typed.
-accessField
-  :: forall c t
-   . Solvable' c t
-  => RuntimeValue SymADT
-  -> String
-  -- TODO: I think this input String should really be Text...
-  -> RuntimeValue t
-accessField adt name = do
-  let symbol = simple . identifier . fromString $ name
-  let accessor = sym' symbol :: SymADT -~> t
-  adt' <- adt
-  pure $ accessor # adt'
+  => ADT S
+  -> Tag S ws
+accessTag adt = do
+  let (ADT tyCon _ _) = adt
+  Tag tyCon $ untypedField adt "!tag"
 
 -- | Boolean denoting when an ADT has a tag that is in-range.
 --
@@ -162,14 +238,15 @@ accessField adt name = do
 tagInRange
   :: forall ws
    . KnownWordSize ws
-  => Type
-  -> RuntimeValue SymADT
-  -> RuntimeValue SymBool
-tagInRange ty adt = do
-  let (tyCon, _) = splitTyConApp ty
+  => Tag S ws
+  -> RuntimeValue S (GetBool S)
+tagInRange (Tag tyCon value) = do
   let amount = length $ tyConDataCons tyCon
-  tag <- accessTag @ws adt
-  mrgPure $ 0 .<= tag .&& tag .< fromIntegral amount
+  value' <- value
+  -- TODO: Once Grisette adds support for (.&&), we could parameterise on the
+  -- evaluation mode. We could of course implement this (.&&) ourselves already,
+  -- but we leave it for now.
+  mrgPure $ 0 .<= value' .&& value' .< fromIntegral amount
 
 -- | Get the accessor names of this DataCon.
 --
@@ -184,4 +261,3 @@ dataConAccessorNames dataCon = do
   if
     | arity > length names -> show <$> [0..arity-1]
     | otherwise -> names
-

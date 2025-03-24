@@ -26,10 +26,12 @@ import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy, eqType)
 import GHC.Core.Unify (tcMatchTy)
 
 import Grisette (ToCon (..), EvalSym (..), evalSymToCon)
+import Grisette.Unified (EvalModeTag (..))
 import Grisette.SymPrim
 import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..))
 
-import Control.Monad.Except (MonadError (..))
+import Control.Monad.Identity (Identity (..))
+import Control.Monad.Except (MonadError (..), runExceptT)
 import Control.Monad (forM)
 
 import Symbolic.WordSize
@@ -105,27 +107,29 @@ concretize
 concretize model = \case
   Primitive prim -> pure $ concretePrimitive model prim
   -- TODO: Clean this horrible piece of code up!
-  ADT ty adt -> case evalSymToCon @_ @(Either RuntimeError (Tag ws)) model $ accessTag @ws adt of
-    Right tag -> do
-      case tagToDataCon tag ty of
-        Just dataCon -> do
+  Data adt -> do
+    let stag = accessTag @ws adt
+    let ctag = evalSymToCon @(Tag S ws) @(Tag C ws) model stag
+    let runRuntime = runIdentity . runExceptT . unRuntimeValue
+
+    case runRuntime $ tagToDataCon ctag of
+      Right dataCon -> do
           let (_, _, funTy) = tcSplitSigmaTy $ dataConRepType dataCon
           let (argTys, resTy) = splitFunTys funTy
 
           -- We try to match the result type of the constructor to the case binder.
           -- Really, this should never fail.
-          subst <- whyFail IllTyped $ tcMatchTy resTy ty
+          subst <- whyFail IllTyped $ tcMatchTy resTy (adtType adt)
           let argTys' = substTy subst . scaledThing <$> argTys
           let names = dataConAccessorNames dataCon
           let accessors = zip names argTys'
           fields <- forM accessors $ \(name, ty') -> do
-            field <- accessField' @m @ws adt name ty'
+            field <- accessField @m @ws adt name ty'
             concretize model field
 
           pure $ Record dataCon fields
-        Nothing -> pure Unknown
 
-    Left err -> pure $ Error err
+      Left err -> pure $ Error err
 
   -- TODO: Clean this horrible piece of code up!
   Cast' co value' -> go value' $ coercionRKind co
@@ -173,10 +177,12 @@ concretePrimitive model = \case
        . ToCon a b
       => EvalSym a
       => SupportedPrim b
-      => RuntimeValue a
+      => RuntimeValue S a
       -> Concrete
     prim value = do
-      let concrete = evalSymToCon @_ @(Either RuntimeError b) model value
-      case concrete of
+      let concrete = evalSymToCon @_ @(RuntimeValue C b) model value
+      -- TODO: I think we should either add an instance of ToCon from Runtime to
+      -- Either, or we should expose a runRuntime function. This is bad!
+      case runIdentity . runExceptT . unRuntimeValue $ concrete of
         Right value' -> Value $ ModelValue value'
         Left err -> Error err

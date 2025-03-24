@@ -35,12 +35,12 @@ library
       Symbolic.Concrete
       Symbolic.Environment
       Symbolic.Evaluate
+      Symbolic.Identifier
       Symbolic.Runtime
       Symbolic.Solve
       Symbolic.Util
       Symbolic.Value
       Symbolic.WordSize
-      SymUtil
       Transform
       Types
       UC
