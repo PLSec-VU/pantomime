@@ -119,6 +119,8 @@ concretize model = \case
 
           -- We try to match the result type of the constructor to the case binder.
           -- Really, this should never fail.
+          -- TODO: We can just get the type of the argument via the dataCon and
+          -- the type arguments stored in the ADT. This is very roundabout.
           subst <- whyFail IllTyped $ tcMatchTy resTy (adtType adt)
           let argTys' = substTy subst . scaledThing <$> argTys
           let names = dataConAccessorNames dataCon

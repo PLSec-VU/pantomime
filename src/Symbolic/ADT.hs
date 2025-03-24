@@ -22,9 +22,6 @@ module Symbolic.ADT
   , untypedField
   , adtIsDataCon
   , eqTyADT
-  , cmpADT
-  , iteADT
-  , assumeADT
 
   , Tag (..)
   , tagToDataCon
@@ -73,6 +70,17 @@ instance ToCon (ADT S) (ADT C) where
 instance ToSym (ADT C) (ADT S) where
   toSym (ADT tyCon tys value) = ADT tyCon tys $ toSym value
 
+instance RuntimeOps (ADT S) where
+  cmpRuntime lhs@(ADT _ _ lval) rhs@(ADT _ _ rval) = do
+    guard $ eqTyADT lhs rhs
+    cmpRuntime lval rval
+
+  iteRuntime cond tr@(ADT tc tys tval) fl@(ADT _ _ fval) = do
+    guard $ eqTyADT tr fl
+    ADT tc tys <$> iteRuntime cond tval fval
+
+  assumeRuntime cond (ADT tyCon tys ident) = ADT tyCon tys $ assumeRuntime cond ident
+
 -- | Create an ADT.
 --
 -- Prefer using this function over manual construction, as it additionally adds
@@ -88,8 +96,7 @@ mkADT tyCon tys ident = do
   let adt = ADT tyCon tys ident
   let tag = accessTag @ws adt
   let conditional = tagInRange tag
-  let value = assumeRuntime conditional ident
-  ADT tyCon tys value
+  assumeRuntime conditional adt
 
 -- | Get the type of this ADT.
 adtType :: ADT mode -> Type
@@ -140,32 +147,6 @@ eqTyADT
   -> Bool
 eqTyADT lhs rhs = adtType lhs `eqType` adtType rhs
 
--- TODO: I see that multiple of the runtime carrying structures have functions
--- like the compare, ite and assume. I think we should generalise this idea!
-cmpADT
-  :: ADT S
-  -> ADT S
-  -> Maybe (RuntimeValue S (GetBool S))
-cmpADT lhs@(ADT _ _ lval) rhs@(ADT _ _ rval) = do
-  guard $ eqTyADT lhs rhs
-  pure $ cmpRuntime lval rval
-
-iteADT
-  :: RuntimeValue S SymBool
-  -> ADT S
-  -> ADT S
-  -> Maybe (ADT S)
-iteADT cond tr@(ADT tc tys tval) fl@(ADT _ _ fval) = do
-  guard $ eqTyADT tr fl
-  let result = iteRuntime cond tval fval
-  pure $ ADT tc tys result
-
-assumeADT
-  :: RuntimeValue S SymBool
-  -> ADT S
-  -> ADT S
-assumeADT cond (ADT tyCon tys ident) = ADT tyCon tys $ assumeRuntime cond ident
-
 -- | Tag of an ADT, used to distinguish between constructors.
 --
 -- Note that this is more or less an SMT encoded DataCon. This can either be
@@ -191,6 +172,17 @@ instance KnownWordSize ws => ToCon (Tag S ws) (Tag C ws) where
 
 instance KnownWordSize ws => ToSym (Tag C ws) (Tag S ws) where
   toSym (Tag tyCon value) = Tag tyCon $ toSym value
+
+instance KnownWordSize ws => RuntimeOps (Tag S ws) where
+  cmpRuntime (Tag ltc lval) (Tag rtc rval) = do
+    guard $ ltc == rtc
+    cmpRuntime lval rval
+
+  iteRuntime cond (Tag ttc tval) (Tag ftc fval) = do
+    guard $ ttc == ftc
+    Tag ttc <$> iteRuntime cond tval fval
+
+  assumeRuntime cond (Tag tyCon value) = Tag tyCon $ assumeRuntime cond value
 
 -- | Get the DataCon from a Tag and the Type that should match the .
 tagToDataCon

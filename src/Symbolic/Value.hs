@@ -24,13 +24,9 @@ module Symbolic.Value
 
   , applyValue
   , applyValues
-  , cmpValue
-  , iteValue
 
   , Primitive (..)
   , typedPrimitive
-  , cmpPrimitive
-  , itePrimitive
   ) where
 
 import GHC.Plugins hiding (empty)
@@ -41,7 +37,7 @@ import Grisette.SymPrim
 import Grisette.Unified (EvalModeTag (..))
 import Grisette (Solvable (..), Mergeable)
 
-import Control.Monad (unless, foldM)
+import Control.Monad (foldM, guard)
 import Control.Monad.Except (MonadError (..))
 
 import Symbolic.Util
@@ -51,6 +47,7 @@ import Symbolic.ADT
 import GHC.Platform (PlatformWordSize)
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 import Symbolic.Identifier
+import Control.Applicative (Alternative(..))
 
 -- data Func m n where
 --   SFunc :: Type -> SymWordN64 -> Func m n
@@ -87,6 +84,55 @@ instance KnownWordSize ws => Outputable (Value m ws) where
     Fun _ -> text "Fun ??"
     Ty ty -> text "@" <+> ppr ty
     Co co -> ppr co
+
+instance (MonadError EvalError m, KnownWordSize ws) => RuntimeOps (Value m ws) where
+  cmpRuntime = curry $ \case
+    (Primitive lhs, Primitive rhs) -> cmpRuntime lhs rhs
+    (Data lhs, Data rhs) -> cmpRuntime lhs rhs
+    (Cast' lco lhs, Cast' rco rhs) -> do
+      guard $ lco `eqCoercion` rco
+      cmpRuntime lhs rhs
+    (Ty lhs, Ty rhs) -> pure . pure . con $ lhs `eqType` rhs
+    (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
+    -- TODO: We should add support for functions here!
+    _ -> empty
+
+  -- | Compare two values.
+  --
+  -- Care must be taken for ADT comparison. We do not check whether the fields of
+  -- an ADT match the fields of another ADT. Instead, we return an equality of the
+  -- ADT identifiers. This is a stronger property than just matching fields. Thus,
+  -- this is only fit as an assumption and not as a final assertion.
+  -- TODO: I guess this should be like 'strongCmpValue' (as the property we are
+  -- checking for is strong, i.e. ADT identifier equivalence)
+  iteRuntime cond = curry $ \case
+    (Primitive lhs, Primitive rhs) -> Primitive <$> iteRuntime cond lhs rhs
+    (Data lhs, Data rhs) -> Data <$> iteRuntime cond lhs rhs
+    (Cast' lco lhs, Cast' rco rhs) -> do
+      guard $ lco `eqCoercion` rco
+      result <- iteRuntime cond lhs rhs
+      pure $ Cast' lco result
+    (Fun lhs, Fun rhs) -> do
+      pure . Fun $ \arg -> do
+        lhs' <- lhs arg
+        rhs' <- rhs arg
+        whyFail IllTyped $ iteRuntime cond lhs' rhs'
+    -- (Fun _, ADT ty _) -> pprPanic "wow..." $ ppr ty
+    -- (lhs, rhs) -> pprPanic ":(" $ ppr lhs <+> "/=" <+> ppr rhs
+    _ -> empty
+
+  assumeRuntime cond = \case
+    Primitive prim -> Primitive $ assumeRuntime cond prim
+    Data adt -> Data $ assumeRuntime cond adt
+    Cast' co val -> Cast' co $ assumeRuntime cond val
+    Fun fun -> do
+      Fun $ \arg -> do
+        assumeRuntime cond <$> fun arg
+    -- TODO: I guess there is nothing to assume in these cases. Still this seems
+    -- like it could introduce some unexpected behaviour if we're not careful.
+    -- I think we should change this. We shouldn't just drop assumptions...
+    Ty ty -> Ty ty
+    Co co -> Co co
 
 -- TODO: These errors give very little information on what went actually wrong.
 -- I should allow some information to be tagged onto them...
@@ -218,60 +264,6 @@ applyValues
   -> m (Value m n)
 applyValues = foldM applyValue
 
--- | Compare two values.
---
--- Care must be taken for ADT comparison. We do not check whether the fields of
--- an ADT match the fields of another ADT. Instead, we return an equality of the
--- ADT identifiers. This is a stronger property than just matching fields. Thus,
--- this is only fit as an assumption and not as a final assertion.
--- TODO: I guess this should be like 'strongCmpValue' (as the property we are
--- checking for is strong, i.e. ADT identifier equivalence)
-cmpValue
-  :: MonadError EvalError m
-  => KnownWordSize ws
-  => Value m' ws
-  -> Value m' ws
-  -> m (RuntimeValue S SymBool)
-cmpValue = curry $ \case
-  (Primitive lhs, Primitive rhs) -> cmpPrimitive lhs rhs
-  (Data lhs, Data rhs) -> whyFail IllTyped $ cmpADT lhs rhs
-  (Cast' lco lhs, Cast' rco rhs) -> do
-    unless (lco `eqCoercion` rco) $ throwError IllTyped
-    cmpValue lhs rhs
-  (Ty lhs, Ty rhs) -> pure . pure . con $ lhs `eqType` rhs
-  (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
-  _ -> throwError IllTyped
-
--- | If then else for symbolic values.
---
--- Note that since types and coercions are not symbolically evaluated, this does
--- not work for these. As Haskell does not have dependent types, this should not
--- be a problem.
-iteValue
-  :: MonadError EvalError m
-  => KnownWordSize ws
-  => RuntimeValue S SymBool
-  -> Value m ws
-  -> Value m ws
-  -> m (Value m ws)
-iteValue cond = curry $ \case
-  (Primitive lhs, Primitive rhs) -> Primitive <$> itePrimitive cond lhs rhs
-  (Data lhs, Data rhs) -> do
-    let result = iteADT cond lhs rhs
-    whyFail IllTyped $ fmap Data result
-  (Cast' lco lhs, Cast' rco rhs) -> do
-    unless (lco `eqCoercion` rco) $ throwError IllTyped
-    result <- iteValue cond lhs rhs
-    pure $ Cast' lco result
-  (Fun lhs, Fun rhs) -> do
-    pure . Fun $ \arg -> do
-      lhs' <- lhs arg
-      rhs' <- rhs arg
-      iteValue cond lhs' rhs'
-  -- (Fun _, ADT ty _) -> pprPanic "wow..." $ ppr ty
-  -- (lhs, rhs) -> pprPanic ":(" $ ppr lhs <+> "/=" <+> ppr rhs
-  _ -> throwError IllTyped
-
 -- | Primitive values supported by the symbolic solver.
 data Primitive (ws :: PlatformWordSize) where
   -- TODO: Shouldn't we be using the newtype SymInt we created here? We don't
@@ -307,6 +299,51 @@ instance KnownWordSize ws => Outputable (Primitive ws) where
     Float val -> text "Float# =>" <+> text (show val)
     Double val -> text "Double# =>" <+> text (show val)
 
+instance KnownWordSize ws => RuntimeOps (Primitive ws) where
+  cmpRuntime = curry $ \case
+    (Int lhs, Int rhs) -> cmpRuntime lhs rhs
+    (Int8 lhs, Int8 rhs) -> cmpRuntime lhs rhs
+    (Int16 lhs, Int16 rhs) -> cmpRuntime lhs rhs
+    (Int32 lhs, Int32 rhs) -> cmpRuntime lhs rhs
+    (Int64 lhs, Int64 rhs) -> cmpRuntime lhs rhs
+    (Word lhs, Word rhs) -> cmpRuntime lhs rhs
+    (Word8 lhs, Word8 rhs) -> cmpRuntime lhs rhs
+    (Word16 lhs, Word16 rhs) -> cmpRuntime lhs rhs
+    (Word32 lhs, Word32 rhs) -> cmpRuntime lhs rhs
+    (Word64 lhs, Word64 rhs) -> cmpRuntime lhs rhs
+    (Float lhs, Float rhs) -> cmpRuntime lhs rhs
+    (Double lhs, Double rhs) -> cmpRuntime lhs rhs
+    _ -> empty
+
+  iteRuntime cond = curry $ \case
+    (Int lhs, Int rhs) -> Int <$> iteRuntime cond lhs rhs
+    (Int8 lhs, Int8 rhs) -> Int8 <$> iteRuntime cond lhs rhs
+    (Int16 lhs, Int16 rhs) -> Int16 <$> iteRuntime cond lhs rhs
+    (Int32 lhs, Int32 rhs) -> Int32 <$> iteRuntime cond lhs rhs
+    (Int64 lhs, Int64 rhs) -> Int64 <$> iteRuntime cond lhs rhs
+    (Word lhs, Word rhs) -> Word <$> iteRuntime cond lhs rhs
+    (Word8 lhs, Word8 rhs) -> Word8 <$> iteRuntime cond lhs rhs
+    (Word16 lhs, Word16 rhs) -> Word16 <$> iteRuntime cond lhs rhs
+    (Word32 lhs, Word32 rhs) -> Word32 <$> iteRuntime cond lhs rhs
+    (Word64 lhs, Word64 rhs) -> Word64 <$> iteRuntime cond lhs rhs
+    (Float lhs, Float rhs) -> Float <$> iteRuntime cond lhs rhs
+    (Double lhs, Double rhs) -> Double <$> iteRuntime cond lhs rhs
+    _ -> empty
+
+  assumeRuntime cond = \case
+    Int value -> Int $ assumeRuntime cond value
+    Int8 value -> Int8 $ assumeRuntime cond value
+    Int16 value -> Int16 $ assumeRuntime cond value
+    Int32 value -> Int32 $ assumeRuntime cond value
+    Int64 value -> Int64 $ assumeRuntime cond value
+    Word value -> Word $ assumeRuntime cond value
+    Word8 value -> Word8 $ assumeRuntime cond value
+    Word16 value -> Word16 $ assumeRuntime cond value
+    Word32 value -> Word32 $ assumeRuntime cond value
+    Word64 value -> Word64 $ assumeRuntime cond value
+    Float value -> Float $ assumeRuntime cond value
+    Double value -> Double $ assumeRuntime cond value
+
 -- | Construct a primitive, symbolic value with the given type.
 typedPrimitive
   :: forall m ws
@@ -329,48 +366,3 @@ typedPrimitive value ty
   | ty `eqType` floatPrimTy = pure $ Float value
   | ty `eqType` doublePrimTy = pure $ Double value
   | otherwise = throwError UnsupportedExpr
-
--- | Compare primitives values.
-cmpPrimitive
-  :: MonadError EvalError m
-  => KnownWordSize ws
-  => Primitive ws
-  -> Primitive ws
-  -> m (RuntimeValue S SymBool)
-cmpPrimitive = curry $ \case
-  (Int lhs, Int rhs) -> pure $ cmpRuntime lhs rhs
-  (Int8 lhs, Int8 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int16 lhs, Int16 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int32 lhs, Int32 rhs) -> pure $ cmpRuntime lhs rhs
-  (Int64 lhs, Int64 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word lhs, Word rhs) -> pure $ cmpRuntime lhs rhs
-  (Word8 lhs, Word8 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word16 lhs, Word16 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word32 lhs, Word32 rhs) -> pure $ cmpRuntime lhs rhs
-  (Word64 lhs, Word64 rhs) -> pure $ cmpRuntime lhs rhs
-  (Float lhs, Float rhs) -> pure $ cmpRuntime lhs rhs
-  (Double lhs, Double rhs) -> pure $ cmpRuntime lhs rhs
-  _ -> throwError IllTyped
-
--- If-then-else for primitive values.
-itePrimitive
-  :: MonadError EvalError m
-  => KnownWordSize ws
-  => RuntimeValue S SymBool
-  -> Primitive ws
-  -> Primitive ws
-  -> m (Primitive ws)
-itePrimitive cond = curry $ \case
-  (Int lhs, Int rhs) -> pure . Int $ iteRuntime cond lhs rhs
-  (Int8 lhs, Int8 rhs) -> pure . Int8 $ iteRuntime cond lhs rhs
-  (Int16 lhs, Int16 rhs) -> pure . Int16 $ iteRuntime cond lhs rhs
-  (Int32 lhs, Int32 rhs) -> pure . Int32 $ iteRuntime cond lhs rhs
-  (Int64 lhs, Int64 rhs) -> pure . Int64 $ iteRuntime cond lhs rhs
-  (Word lhs, Word rhs) -> pure . Word $ iteRuntime cond lhs rhs
-  (Word8 lhs, Word8 rhs) -> pure . Word8 $ iteRuntime cond lhs rhs
-  (Word16 lhs, Word16 rhs) -> pure . Word16 $ iteRuntime cond lhs rhs
-  (Word32 lhs, Word32 rhs) -> pure . Word32 $ iteRuntime cond lhs rhs
-  (Word64 lhs, Word64 rhs) -> pure . Word64 $ iteRuntime cond lhs rhs
-  (Float lhs, Float rhs) -> pure . Float $ iteRuntime cond lhs rhs
-  (Double lhs, Double rhs) -> pure . Double $ iteRuntime cond lhs rhs
-  _ -> throwError IllTyped

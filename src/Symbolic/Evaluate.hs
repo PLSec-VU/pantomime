@@ -67,13 +67,10 @@ freshADT ty = do
 
   -- Create a fresh ADT.
   let symbol = indexed "!ADT" idx
-  let adt = pure $ sym symbol
-
-  -- Ensure that the tag is within bounds.
-  let adt' = mkADT @ws tyCon tys $ adt
+  let ident = pure $ sym symbol
 
   -- Return fresh ADT and the next index.
-  pure adt'
+  pure $ mkADT @ws tyCon tys ident
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate
@@ -122,7 +119,7 @@ evaluate env = \case
     invalid <- invalidValue ty
 
     foldM' invalid alts' $ \fl (cond, rhs) -> do
-      iteValue cond rhs fl
+      whyFail IllTyped $ iteRuntime cond rhs fl
 
   Cast expr co -> do
     value <- evaluate env expr
@@ -187,7 +184,7 @@ evalAlt env scrut = \case
   Alt (LitAlt lit) [] rhs -> do
     -- Compare the literal, to the scrutinee.
     lit' <- evalLiteral lit
-    conditional <- cmpValue scrut lit'
+    conditional <- whyFail IllTyped $ cmpRuntime scrut lit'
 
     -- Evaluate the rhs.
     rhs' <- evaluate env rhs
@@ -257,7 +254,7 @@ evalDataConInst dataCon tys = do
 
   -- The root is an ADT that assumes the given conditional holds.
   let root cond = do
-        let adt' = assumeADT cond adt
+        let adt' = assumeRuntime cond adt
         pure $ Data adt'
 
   -- Accumulate a function that takes the fields as arguments. We pass a
@@ -265,7 +262,7 @@ evalDataConInst dataCon tys = do
   -- actual arguments.
   final <- nArity root fields $ \cond field arg -> do
     -- Constraint the field of the ADT to be equivalent to the argument.
-    extra <- cmpValue field arg
+    extra <- whyFail IllTyped $ cmpRuntime field arg
     pure $ liftA2 (.&&) extra cond
 
   -- As a final constraint, the ADT tag should match the given DataCon.
@@ -540,13 +537,15 @@ evalPrimOp = \case
   TagToEnumOp -> pure . Fun $ \case
     Ty ty -> pure . Fun $ \case
       Primitive (Int tag) -> do
+        -- Gather a new adt and its tag.
         adt <- freshADT @m @ws ty
+        let Tag _ tag' = accessTag @ws adt
 
-        let conditional = do
-              let Tag _ tag' = accessTag @ws adt
-              cmpRuntime tag tag'
-        -- Assume that the ADT tag matches the given tag. Return the ADT.
-        let adt' = assumeADT conditional adt
+        -- Assume that the fresh adt tag is equivalent to the function argument.
+        let conditional = liftA2 (.==) tag tag'
+        let adt' = assumeRuntime conditional adt
+
+        -- Return the new ADT with assumption.
         pure $ Data adt'
       _ -> throwError IllTyped
     _ -> throwError IllTyped

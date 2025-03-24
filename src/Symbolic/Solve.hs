@@ -112,6 +112,7 @@ exprSymEq' lhs rhs = runExceptT $ do
 
   (bndrs, lres, rres, eq) <- flip evalStateT st . modifyError EvalError $ do
     bndrs <- symbolicBndrs $ exprType lhs
+    dbg bndrs
 
     let saturate expr = do
           value <- evaluate @_ @ws emptyEnv expr
@@ -165,7 +166,7 @@ assertEq
   -> Value m ws
   -> m (RuntimeValue S SymBool)
 assertEq = curry $ \case
-  (Primitive lhs, Primitive rhs) -> cmpPrimitive lhs rhs
+  (Primitive lhs, Primitive rhs) -> whyFail IllTyped $ cmpRuntime lhs rhs
   (Data lhs, Data rhs) -> do
     -- Ensure the equality is sound.
     unless (lhs `eqTyADT` rhs) $ throwError IllTyped
@@ -205,11 +206,8 @@ assertEq = curry $ \case
       -- If the tags match, then the fields should also match.
       pure $ mrgLiftA2 implies conditional assertion
 
-    -- Ensure the tags are actually equal.
-    let eqTag = do
-          let Tag _ lhs' = accessTag @ws lhs
-          let Tag _ rhs' = accessTag @ws rhs
-          cmpRuntime lhs' rhs'
+    -- Ensure the tags are actually equal and valid.
+    eqTag <- whyFail IllTyped $ cmpRuntime (accessTag @ws lhs) (accessTag rhs)
 
     -- Merge the branches as a large if-then-else.
     pure $ foldl' (mrgLiftA2 (.&&)) eqTag branches
