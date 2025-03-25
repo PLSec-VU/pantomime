@@ -33,20 +33,23 @@ module Symbolic.ADT
   ) where
 
 import GHC.Plugins
+import GHC.Core.TyCo.Compare (eqType)
 
 import Grisette
 import Grisette.Unified (EvalModeTag (..), EvalModeAll, GetBool, BaseMonad)
+import Grisette.Internal.Unified.UnifiedBV (UnifiedBVImpl(..))
 
 import Data.Foldable (find)
+import Data.Maybe (fromJust)
+
+import Control.Monad.Except (MonadError(..))
+import Control.Monad (guard, unless)
 
 import Symbolic.Runtime
 import Symbolic.WordSize
 import Symbolic.Identifier
-import Grisette.Internal.Unified.UnifiedBV (UnifiedBVImpl(..))
-import Data.Maybe (fromJust)
-import Control.Monad (guard)
 import Symbolic.Util
-import GHC.Core.TyCo.Compare (eqType)
+import Symbolic.MonadEval
 
 -- | Abstract Data Type.
 --
@@ -70,16 +73,18 @@ instance ToCon (ADT S) (ADT C) where
 instance ToSym (ADT C) (ADT S) where
   toSym (ADT tyCon tys value) = ADT tyCon tys $ toSym value
 
-instance RuntimeOps (ADT S) where
-  cmpRuntime lhs@(ADT _ _ lval) rhs@(ADT _ _ rval) = do
-    guard $ eqTyADT lhs rhs
-    cmpRuntime lval rval
+instance MonadEval m => EvalEq m (ADT S) where
+  evalEq lhs@(ADT _ _ lval) rhs@(ADT _ _ rval) = do
+    unless (eqTyADT lhs rhs) $ throwError IllTyped
+    evalEq lval rval
 
-  iteRuntime cond tr@(ADT tc tys tval) fl@(ADT _ _ fval) = do
-    guard $ eqTyADT tr fl
-    ADT tc tys <$> iteRuntime cond tval fval
+instance MonadEval m => EvalIte m (ADT S) where
+  evalIte cond tr@(ADT tc tys tval) fl@(ADT _ _ fval) = do
+    unless (eqTyADT tr fl) $ throwError IllTyped
+    ADT tc tys <$> evalIte cond tval fval
 
-  assumeRuntime cond (ADT tyCon tys ident) = ADT tyCon tys $ assumeRuntime cond ident
+instance EvalAssume (ADT S) where
+  evalAssume cond (ADT tyCon tys ident) = ADT tyCon tys $ evalAssume cond ident
 
 -- | Create an ADT.
 --
@@ -96,7 +101,7 @@ mkADT tyCon tys ident = do
   let adt = ADT tyCon tys ident
   let tag = accessTag @ws adt
   let conditional = tagInRange tag
-  assumeRuntime conditional adt
+  evalAssume conditional adt
 
 -- | Get the type of this ADT.
 adtType :: ADT mode -> Type
@@ -173,16 +178,18 @@ instance KnownWordSize ws => ToCon (Tag S ws) (Tag C ws) where
 instance KnownWordSize ws => ToSym (Tag C ws) (Tag S ws) where
   toSym (Tag tyCon value) = Tag tyCon $ toSym value
 
-instance KnownWordSize ws => RuntimeOps (Tag S ws) where
-  cmpRuntime (Tag ltc lval) (Tag rtc rval) = do
-    guard $ ltc == rtc
-    cmpRuntime lval rval
+instance (MonadEval m, KnownWordSize ws) => EvalEq m (Tag S ws) where
+  evalEq (Tag ltc lval) (Tag rtc rval) = do
+    unless (ltc == rtc) $ throwError IllTyped
+    evalEq lval rval
 
-  iteRuntime cond (Tag ttc tval) (Tag ftc fval) = do
-    guard $ ttc == ftc
-    Tag ttc <$> iteRuntime cond tval fval
+instance (MonadEval m, KnownWordSize ws) => EvalIte m (Tag S ws) where
+  evalIte cond (Tag ttc tval) (Tag ftc fval) = do
+    unless (ttc == ftc) $ throwError IllTyped
+    Tag ttc <$> evalIte cond tval fval
 
-  assumeRuntime cond (Tag tyCon value) = Tag tyCon $ assumeRuntime cond value
+instance KnownWordSize ws => EvalAssume (Tag S ws) where
+  evalAssume cond (Tag tyCon value) = Tag tyCon $ evalAssume cond value
 
 -- | Get the DataCon from a Tag and the Type that should match the .
 tagToDataCon

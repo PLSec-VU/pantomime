@@ -37,7 +37,7 @@ import Grisette.SymPrim
 import Grisette.Unified (EvalModeTag (..))
 import Grisette (Solvable (..), Mergeable)
 
-import Control.Monad (foldM, guard)
+import Control.Monad (foldM, unless)
 import Control.Monad.Except (MonadError (..))
 
 import Symbolic.Util
@@ -47,7 +47,7 @@ import Symbolic.ADT
 import GHC.Platform (PlatformWordSize)
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 import Symbolic.Identifier
-import Control.Applicative (Alternative(..))
+import Symbolic.MonadEval
 
 -- data Func m n where
 --   SFunc :: Type -> SymWordN64 -> Func m n
@@ -85,19 +85,20 @@ instance KnownWordSize ws => Outputable (Value m ws) where
     Ty ty -> text "@" <+> ppr ty
     Co co -> ppr co
 
-instance (MonadError EvalError m, KnownWordSize ws) => RuntimeOps (Value m ws) where
-  cmpRuntime = curry $ \case
-    (Primitive lhs, Primitive rhs) -> cmpRuntime lhs rhs
-    (Data lhs, Data rhs) -> cmpRuntime lhs rhs
+instance (MonadEval m, KnownWordSize ws) => EvalEq m (Value m ws) where
+  evalEq = curry $ \case
+    (Primitive lhs, Primitive rhs) -> evalEq lhs rhs
+    (Data lhs, Data rhs) -> evalEq lhs rhs
     (Cast' lco lhs, Cast' rco rhs) -> do
-      guard $ lco `eqCoercion` rco
-      cmpRuntime lhs rhs
+      unless (lco `eqCoercion` rco) $ throwError IllTyped
+      evalEq lhs rhs
     (Ty lhs, Ty rhs) -> pure . pure . con $ lhs `eqType` rhs
     (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
     -- TODO: We should add support for functions here!
-    _ -> empty
+    _ -> throwError IllTyped
 
-  -- | Compare two values.
+instance (MonadEval m, KnownWordSize ws) => EvalIte m (Value m ws) where
+  -- Compare two values.
   --
   -- Care must be taken for ADT comparison. We do not check whether the fields of
   -- an ADT match the fields of another ADT. Instead, we return an equality of the
@@ -105,48 +106,35 @@ instance (MonadError EvalError m, KnownWordSize ws) => RuntimeOps (Value m ws) w
   -- this is only fit as an assumption and not as a final assertion.
   -- TODO: I guess this should be like 'strongCmpValue' (as the property we are
   -- checking for is strong, i.e. ADT identifier equivalence)
-  iteRuntime cond = curry $ \case
-    (Primitive lhs, Primitive rhs) -> Primitive <$> iteRuntime cond lhs rhs
-    (Data lhs, Data rhs) -> Data <$> iteRuntime cond lhs rhs
+  evalIte cond = curry $ \case
+    (Primitive lhs, Primitive rhs) -> Primitive <$> evalIte cond lhs rhs
+    (Data lhs, Data rhs) -> Data <$> evalIte cond lhs rhs
     (Cast' lco lhs, Cast' rco rhs) -> do
-      guard $ lco `eqCoercion` rco
-      result <- iteRuntime cond lhs rhs
+      unless (lco `eqCoercion` rco) $ throwError IllTyped
+      result <- evalIte cond lhs rhs
       pure $ Cast' lco result
     (Fun lhs, Fun rhs) -> do
       pure . Fun $ \arg -> do
         lhs' <- lhs arg
         rhs' <- rhs arg
-        whyFail IllTyped $ iteRuntime cond lhs' rhs'
-    -- (Fun _, ADT ty _) -> pprPanic "wow..." $ ppr ty
+        evalIte cond lhs' rhs'
+    -- (Fun _, Data adt) -> pprPanic "wow..." $ ppr (adtType adt)
     -- (lhs, rhs) -> pprPanic ":(" $ ppr lhs <+> "/=" <+> ppr rhs
-    _ -> empty
+    _ -> throwError IllTyped
 
-  assumeRuntime cond = \case
-    Primitive prim -> Primitive $ assumeRuntime cond prim
-    Data adt -> Data $ assumeRuntime cond adt
-    Cast' co val -> Cast' co $ assumeRuntime cond val
+instance (MonadEval m, KnownWordSize ws) => EvalAssume (Value m ws) where
+  evalAssume cond = \case
+    Primitive prim -> Primitive $ evalAssume cond prim
+    Data adt -> Data $ evalAssume cond adt
+    Cast' co val -> Cast' co $ evalAssume cond val
     Fun fun -> do
       Fun $ \arg -> do
-        assumeRuntime cond <$> fun arg
+        evalAssume cond <$> fun arg
     -- TODO: I guess there is nothing to assume in these cases. Still this seems
     -- like it could introduce some unexpected behaviour if we're not careful.
     -- I think we should change this. We shouldn't just drop assumptions...
     Ty ty -> Ty ty
     Co co -> Co co
-
--- TODO: These errors give very little information on what went actually wrong.
--- I should allow some information to be tagged onto them...
-data EvalError where
-  IllTyped :: EvalError
-  UnsupportedExpr :: EvalError
-  UnboundVariable :: EvalError
-  deriving Show
-
-instance Outputable EvalError where
-  ppr = \case
-    IllTyped -> text "ill-typed"
-    UnsupportedExpr -> text "unsupported expression"
-    UnboundVariable -> text "unbound variable"
 
 -- | Create a cast.
 --
@@ -299,50 +287,52 @@ instance KnownWordSize ws => Outputable (Primitive ws) where
     Float val -> text "Float# =>" <+> text (show val)
     Double val -> text "Double# =>" <+> text (show val)
 
-instance KnownWordSize ws => RuntimeOps (Primitive ws) where
-  cmpRuntime = curry $ \case
-    (Int lhs, Int rhs) -> cmpRuntime lhs rhs
-    (Int8 lhs, Int8 rhs) -> cmpRuntime lhs rhs
-    (Int16 lhs, Int16 rhs) -> cmpRuntime lhs rhs
-    (Int32 lhs, Int32 rhs) -> cmpRuntime lhs rhs
-    (Int64 lhs, Int64 rhs) -> cmpRuntime lhs rhs
-    (Word lhs, Word rhs) -> cmpRuntime lhs rhs
-    (Word8 lhs, Word8 rhs) -> cmpRuntime lhs rhs
-    (Word16 lhs, Word16 rhs) -> cmpRuntime lhs rhs
-    (Word32 lhs, Word32 rhs) -> cmpRuntime lhs rhs
-    (Word64 lhs, Word64 rhs) -> cmpRuntime lhs rhs
-    (Float lhs, Float rhs) -> cmpRuntime lhs rhs
-    (Double lhs, Double rhs) -> cmpRuntime lhs rhs
-    _ -> empty
+instance (MonadEval m, KnownWordSize ws) => EvalEq m (Primitive ws) where
+  evalEq = curry $ \case
+    (Int lhs, Int rhs) -> evalEq lhs rhs
+    (Int8 lhs, Int8 rhs) -> evalEq lhs rhs
+    (Int16 lhs, Int16 rhs) -> evalEq lhs rhs
+    (Int32 lhs, Int32 rhs) -> evalEq lhs rhs
+    (Int64 lhs, Int64 rhs) -> evalEq lhs rhs
+    (Word lhs, Word rhs) -> evalEq lhs rhs
+    (Word8 lhs, Word8 rhs) -> evalEq lhs rhs
+    (Word16 lhs, Word16 rhs) -> evalEq lhs rhs
+    (Word32 lhs, Word32 rhs) -> evalEq lhs rhs
+    (Word64 lhs, Word64 rhs) -> evalEq lhs rhs
+    (Float lhs, Float rhs) -> evalEq lhs rhs
+    (Double lhs, Double rhs) -> evalEq lhs rhs
+    _ -> throwError IllTyped
 
-  iteRuntime cond = curry $ \case
-    (Int lhs, Int rhs) -> Int <$> iteRuntime cond lhs rhs
-    (Int8 lhs, Int8 rhs) -> Int8 <$> iteRuntime cond lhs rhs
-    (Int16 lhs, Int16 rhs) -> Int16 <$> iteRuntime cond lhs rhs
-    (Int32 lhs, Int32 rhs) -> Int32 <$> iteRuntime cond lhs rhs
-    (Int64 lhs, Int64 rhs) -> Int64 <$> iteRuntime cond lhs rhs
-    (Word lhs, Word rhs) -> Word <$> iteRuntime cond lhs rhs
-    (Word8 lhs, Word8 rhs) -> Word8 <$> iteRuntime cond lhs rhs
-    (Word16 lhs, Word16 rhs) -> Word16 <$> iteRuntime cond lhs rhs
-    (Word32 lhs, Word32 rhs) -> Word32 <$> iteRuntime cond lhs rhs
-    (Word64 lhs, Word64 rhs) -> Word64 <$> iteRuntime cond lhs rhs
-    (Float lhs, Float rhs) -> Float <$> iteRuntime cond lhs rhs
-    (Double lhs, Double rhs) -> Double <$> iteRuntime cond lhs rhs
-    _ -> empty
+instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive ws) where
+  evalIte cond = curry $ \case
+    (Int lhs, Int rhs) -> Int <$> evalIte cond lhs rhs
+    (Int8 lhs, Int8 rhs) -> Int8 <$> evalIte cond lhs rhs
+    (Int16 lhs, Int16 rhs) -> Int16 <$> evalIte cond lhs rhs
+    (Int32 lhs, Int32 rhs) -> Int32 <$> evalIte cond lhs rhs
+    (Int64 lhs, Int64 rhs) -> Int64 <$> evalIte cond lhs rhs
+    (Word lhs, Word rhs) -> Word <$> evalIte cond lhs rhs
+    (Word8 lhs, Word8 rhs) -> Word8 <$> evalIte cond lhs rhs
+    (Word16 lhs, Word16 rhs) -> Word16 <$> evalIte cond lhs rhs
+    (Word32 lhs, Word32 rhs) -> Word32 <$> evalIte cond lhs rhs
+    (Word64 lhs, Word64 rhs) -> Word64 <$> evalIte cond lhs rhs
+    (Float lhs, Float rhs) -> Float <$> evalIte cond lhs rhs
+    (Double lhs, Double rhs) -> Double <$> evalIte cond lhs rhs
+    _ -> throwError IllTyped
 
-  assumeRuntime cond = \case
-    Int value -> Int $ assumeRuntime cond value
-    Int8 value -> Int8 $ assumeRuntime cond value
-    Int16 value -> Int16 $ assumeRuntime cond value
-    Int32 value -> Int32 $ assumeRuntime cond value
-    Int64 value -> Int64 $ assumeRuntime cond value
-    Word value -> Word $ assumeRuntime cond value
-    Word8 value -> Word8 $ assumeRuntime cond value
-    Word16 value -> Word16 $ assumeRuntime cond value
-    Word32 value -> Word32 $ assumeRuntime cond value
-    Word64 value -> Word64 $ assumeRuntime cond value
-    Float value -> Float $ assumeRuntime cond value
-    Double value -> Double $ assumeRuntime cond value
+instance KnownWordSize ws => EvalAssume (Primitive ws) where
+  evalAssume cond = \case
+    Int value -> Int $ evalAssume cond value
+    Int8 value -> Int8 $ evalAssume cond value
+    Int16 value -> Int16 $ evalAssume cond value
+    Int32 value -> Int32 $ evalAssume cond value
+    Int64 value -> Int64 $ evalAssume cond value
+    Word value -> Word $ evalAssume cond value
+    Word8 value -> Word8 $ evalAssume cond value
+    Word16 value -> Word16 $ evalAssume cond value
+    Word32 value -> Word32 $ evalAssume cond value
+    Word64 value -> Word64 $ evalAssume cond value
+    Float value -> Float $ evalAssume cond value
+    Double value -> Double $ evalAssume cond value
 
 -- | Construct a primitive, symbolic value with the given type.
 typedPrimitive

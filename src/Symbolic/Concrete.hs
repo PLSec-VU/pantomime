@@ -95,7 +95,7 @@ pprConcrete addHeader addParens = \case
   -- TODO: I don't want to print the type here.
   Value value -> addHeader $ text (show value)
   Error err -> addHeader $ "RUNTIME ERROR" <+> ppr err
-  Unknown -> addHeader $ text "???"
+  Unknown -> addHeader $ text "undefined"
 
 concretize
   :: forall m m' ws
@@ -131,6 +131,7 @@ concretize model = \case
 
           pure $ Record dataCon fields
 
+      Left Invalid -> pure Unknown
       Left err -> pure $ Error err
 
   -- TODO: Clean this horrible piece of code up!

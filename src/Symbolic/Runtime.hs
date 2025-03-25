@@ -16,7 +16,6 @@
 module Symbolic.Runtime
   ( RuntimeValue (..)
   , RuntimeError (..)
-  , RuntimeOps (..)
   ) where
 
 import GHC.Utils.Outputable (Outputable (..), text)
@@ -26,23 +25,20 @@ import Control.Monad.Except (ExceptT (..), MonadError)
 
 import Data.Functor.Classes (Show1)
 
-import Grisette.Lib.Control.Monad.Except (mrgThrowError)
-import Grisette.Unified (EvalModeTag (..), BaseMonad, GetBool)
+import Grisette.Unified (EvalModeTag (..), BaseMonad)
 import Grisette
   ( Mergeable
   , SimpleMergeable (..)
   , EvalSym
   , SymEq (..)
-  , SymBool
   , Default (..)
   , TryMerge
   , Mergeable1
   , SymBranching
   , ToSym (..)
   , ToCon (..)
-  , mrgLiftA2, EvalSym1
+  , EvalSym1
   )
-import Data.Composition ((.:), (.:.))
 
 newtype RuntimeValue mode a where
   RuntimeValue ::
@@ -121,68 +117,3 @@ instance Outputable RuntimeError where
   ppr = \case
     DivideByZero -> text "divide-by-zero"
     Invalid -> text "invalid"
-
--- | A typeclass for operations common for data types with runtime values.
---
--- The main purpose is to allow for error propagation when performing common
--- operations on data types containing runtime values. As this is an ideom
--- that requires a lot of wrapping/unwrapping from these data types, we instead
--- capture it in this way.
---
--- Note that most compositions of these runtime values may fail.
--- TODO: We should be polymorphic over the eval mode.
-class RuntimeOps a where
-  -- | Compare two runtime values.
-  --
-  -- Note that this is different from normal symbolic equivalence in that we do
-  -- not want to compare error values. An error in a branch should be propagated
-  -- to the root. This function propagates errors in either value and compares
-  -- them if both are non-error values.
-  cmpRuntime
-    :: a
-    -> a
-    -> Maybe (RuntimeValue S (GetBool S))
-
-  -- | Branch over a runtime symbolic boolean.
-  --
-  -- If the conditional of an if statement can fail, we first wish to check
-  -- this before proceeding to choose either branch. This function captures
-  -- that idea.
-  iteRuntime
-    :: RuntimeValue S (GetBool S)
-    -> a
-    -> a
-    -> Maybe a
-
-  -- | Assume that the given condition holds.
-  --
-  -- TODO: I'm unsure if this should force the conditional or not..
-  assumeRuntime
-    :: RuntimeValue S (GetBool S)
-    -> a
-    -> a
-
-instance (SimpleMergeable a, SymEq a) => RuntimeOps (RuntimeValue S a) where
-  cmpRuntime = pure .: mrgLiftA2 (.==)
-  iteRuntime = pure .:. iteRuntime'
-  -- FIXME: This should respect lazy semantics. The current implementation
-  -- forces the conditional, which is not what we want from an assert.
-  -- Assertions should not force evaluation, but just restrict computation
-  -- given no failure occurred. Maybe the problem is in the comparison function
-  -- cmpRuntime btw. I'll have to think about it once I add support for bottom
-  -- values.
-  assumeRuntime cond tr = iteRuntime' cond tr $ mrgThrowError Invalid
-
--- | Branch over a runtime symbolic boolean.
---
--- If the conditional of an if statement can fail, we first wish to check this
--- before proceeding to choose either branch. This function captures that idea.
-iteRuntime'
-  :: SimpleMergeable a
-  => RuntimeValue S SymBool
-  -> RuntimeValue S a
-  -> RuntimeValue S a
-  -> RuntimeValue S a
-iteRuntime' cond tr fl = do
-  cond' <- cond
-  mrgIte cond' tr fl

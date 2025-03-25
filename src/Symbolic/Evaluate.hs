@@ -23,11 +23,9 @@ import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.TyCo.Subst (substTy)
 import GHC.Builtin.PrimOps (PrimOp (..))
-import GHC.MonadCore
 
 import Control.Monad (forM)
 import Control.Monad.Except
-import Control.Monad.State
 
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
@@ -41,14 +39,7 @@ import Symbolic.Runtime
 import Symbolic.ADT
 import Symbolic.Value
 import Symbolic.Environment
-
--- TODO: Remove MonadCore from the requirements.
-type MonadEval m = (MonadError EvalError m, MonadState SymbolicState m, MonadCore m)
-
--- | State to track the next unique index for a symbolic identifier.
-newtype SymbolicState = SymbolicState
-  { nextIdx :: Int
-  }
+import Symbolic.MonadEval
 
 -- | Get a fresh ADT identifier.
 freshADT
@@ -60,10 +51,7 @@ freshADT
 freshADT ty = do
   (tyCon, tys) <- whyFail IllTyped $ splitTyConApp_maybe ty
 
-  idx <- state $ \s -> do
-    let idx = nextIdx s
-    let s' = s { nextIdx = idx + 1 }
-    (idx, s')
+  idx <- freshIdx
 
   -- Create a fresh ADT.
   let symbol = indexed "!ADT" idx
@@ -119,7 +107,7 @@ evaluate env = \case
     invalid <- invalidValue ty
 
     foldM' invalid alts' $ \fl (cond, rhs) -> do
-      whyFail IllTyped $ iteRuntime cond rhs fl
+      evalIte cond rhs fl
 
   Cast expr co -> do
     value <- evaluate env expr
@@ -184,7 +172,7 @@ evalAlt env scrut = \case
   Alt (LitAlt lit) [] rhs -> do
     -- Compare the literal, to the scrutinee.
     lit' <- evalLiteral lit
-    conditional <- whyFail IllTyped $ cmpRuntime scrut lit'
+    conditional <- evalEq scrut lit'
 
     -- Evaluate the rhs.
     rhs' <- evaluate env rhs
@@ -254,7 +242,7 @@ evalDataConInst dataCon tys = do
 
   -- The root is an ADT that assumes the given conditional holds.
   let root cond = do
-        let adt' = assumeRuntime cond adt
+        let adt' = evalAssume cond adt
         pure $ Data adt'
 
   -- Accumulate a function that takes the fields as arguments. We pass a
@@ -262,7 +250,7 @@ evalDataConInst dataCon tys = do
   -- actual arguments.
   final <- nArity root fields $ \cond field arg -> do
     -- Constraint the field of the ADT to be equivalent to the argument.
-    extra <- whyFail IllTyped $ cmpRuntime field arg
+    extra <- evalEq field arg
     pure $ liftA2 (.&&) extra cond
 
   -- As a final constraint, the ADT tag should match the given DataCon.
@@ -543,7 +531,7 @@ evalPrimOp = \case
 
         -- Assume that the fresh adt tag is equivalent to the function argument.
         let conditional = liftA2 (.==) tag tag'
-        let adt' = assumeRuntime conditional adt
+        let adt' = evalAssume conditional adt
 
         -- Return the new ADT with assumption.
         pure $ Data adt'

@@ -59,6 +59,7 @@ import Symbolic.Value
 import Symbolic.Concrete
 import Symbolic.Runtime
 import Data.Foldable (forM_)
+import Symbolic.MonadEval
 
 -- TODO: Rename this thing.
 data NonEq
@@ -112,7 +113,6 @@ exprSymEq' lhs rhs = runExceptT $ do
 
   (bndrs, lres, rres, eq) <- flip evalStateT st . modifyError EvalError $ do
     bndrs <- symbolicBndrs $ exprType lhs
-    dbg bndrs
 
     let saturate expr = do
           value <- evaluate @_ @ws emptyEnv expr
@@ -159,14 +159,13 @@ exprSymEq' lhs rhs = runExceptT $ do
 -- two expressions fail, it should be non-equal.
 assertEq
   :: forall m ws
-   . MonadError EvalError m
-  => MonadCore m
+   . MonadEval m
   => KnownWordSize ws
   => Value m ws
   -> Value m ws
   -> m (RuntimeValue S SymBool)
 assertEq = curry $ \case
-  (Primitive lhs, Primitive rhs) -> whyFail IllTyped $ cmpRuntime lhs rhs
+  (Primitive lhs, Primitive rhs) -> evalEq lhs rhs
   (Data lhs, Data rhs) -> do
     -- Ensure the equality is sound.
     unless (lhs `eqTyADT` rhs) $ throwError IllTyped
@@ -207,7 +206,7 @@ assertEq = curry $ \case
       pure $ mrgLiftA2 implies conditional assertion
 
     -- Ensure the tags are actually equal and valid.
-    eqTag <- whyFail IllTyped $ cmpRuntime (accessTag @ws lhs) (accessTag rhs)
+    eqTag <- evalEq (accessTag @ws lhs) (accessTag rhs)
 
     -- Merge the branches as a large if-then-else.
     pure $ foldl' (mrgLiftA2 (.&&)) eqTag branches
