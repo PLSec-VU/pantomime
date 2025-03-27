@@ -40,6 +40,7 @@ import Symbolic.ADT
 import Symbolic.Value
 import Symbolic.Environment
 import Symbolic.MonadEval
+import GHC.Builtin.Types.Prim
 
 -- | Get a fresh ADT identifier.
 freshADT
@@ -76,11 +77,13 @@ evaluate env = \case
 
   Lit lit -> evalLiteral lit
 
-  Lam bndr body -> pure . Fun $ \arg -> do
-    -- TODO: I think it would be good to have a check here to ensure that the
-    -- argument has the correct type.
-    env' <- extendEnv env bndr arg
-    evaluate env' body
+  Lam bndr body -> do
+    let argTy = varType bndr
+    pure . Fun argTy $ \arg -> do
+      -- TODO: I think it would be good to have a check here to ensure that the
+      -- argument has the correct type.
+      env' <- extendEnv env bndr arg
+      evaluate env' body
 
   App fun arg -> do
     fun' <- evaluate env fun
@@ -94,7 +97,7 @@ evaluate env = \case
 
   -- Perhaps we could handle these by allowing a Tick annotation to specify an
   -- invariant. Otherwise though, we don't really care about recursive
-  -- definitions. I guess bounded recursion would be nice to have, but lets
+  -- definitions. I guess bounded recursion would be nice to have, but let's
   -- leave this for now.
   Let (Rec _) _ -> throwError UnsupportedExpr
 
@@ -198,11 +201,11 @@ evalDataCon dataCon = do
   let root = evalDataConInst dataCon
 
   -- The number of type arguments we actually require.
-  let nUnivTys = const () <$> dataConUnivTyVars dataCon
+  let kinds = ((),) . tyVarKind <$> dataConUnivTyVars dataCon
 
   -- Create an n-ary function accepting types, which will be used to instantiate
   -- the data constructor.
-  final <- nArity root nUnivTys $ \univ _ -> \case
+  final <- nArity root kinds $ \univ _ -> \case
     Ty ty -> pure $ univ <> [ty]
     _ -> throwError IllTyped
 
@@ -238,7 +241,8 @@ evalDataConInst dataCon tys = do
 
   -- Gather the fields of the ADT.
   fields <- forM accessors $ \(name, fty) -> do
-    accessField adt name fty
+    field <- accessField adt name fty
+    pure (field, fty)
 
   -- The root is an ADT that assumes the given conditional holds.
   let root cond = do
@@ -522,8 +526,8 @@ evalPrimOp = \case
   WordNeOp -> binary $ symNe @(SymWord ws)
   WordLtOp -> binary $ symLt @(SymWord ws)
   WordLeOp -> binary $ symLe @(SymWord ws)
-  TagToEnumOp -> pure . Fun $ \case
-    Ty ty -> pure . Fun $ \case
+  TagToEnumOp -> pure . Fun (tyVarKind alphaTyVar) $ \case
+    Ty ty -> pure . Fun intPrimTy $ \case
       Primitive (Int tag) -> do
         -- Gather a new adt and its tag.
         adt <- freshADT @m @ws ty
@@ -610,7 +614,6 @@ unary
   -> m (Value m ws)
 unary = pure . wrap . fmap @(RuntimeValue S)
 
--- TODO: This wrap stuff is probably better suited in a separate file.
 class MonadEval m => Wrap m ws a where
   wrap :: a -> Value m ws
 
@@ -645,51 +648,51 @@ instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN64) where
   wrap = Primitive . Word64
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S (SymInt ws) -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun intPrimTy $ \case
     Primitive (Int arg) -> pure $ wrap @m @ws (f $ arg <&> SymInt)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN8 -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun int8PrimTy $ \case
     Primitive (Int8 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN16 -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun int16PrimTy $ \case
     Primitive (Int16 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN32 -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun int32PrimTy $ \case
     Primitive (Int32 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN64 -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun int64PrimTy $ \case
     Primitive (Int64 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S (SymWord ws) -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun wordPrimTy $ \case
     Primitive (Word arg) -> pure $ wrap @m @ws (f $ arg <&> SymWord)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN8 -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun word8PrimTy $ \case
     Primitive (Word8 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN16 -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun word16PrimTy $ \case
     Primitive (Word16 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN32 -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun word32PrimTy $ \case
     Primitive (Word32 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped
 
 instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN64 -> b) where
-  wrap f = Fun $ \case
+  wrap f = Fun word64PrimTy $ \case
     Primitive (Word64 arg) -> pure $ wrap @m @ws (f arg)
     _ -> throwError IllTyped

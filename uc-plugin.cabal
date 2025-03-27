@@ -36,6 +36,7 @@ library
       Symbolic.Environment
       Symbolic.Evaluate
       Symbolic.Identifier
+      Symbolic.MonadEval
       Symbolic.Runtime
       Symbolic.Solve
       Symbolic.Util
@@ -75,7 +76,6 @@ library
     , containers
     , ghc >=9.6.4
     , grisette >=0.11.0.0
-    , hashable
     , microlens
     , mtl
     , syb >=0.7.2.4
@@ -126,7 +126,6 @@ executable uc-plugin-exe
     , containers
     , ghc >=9.6.4
     , grisette >=0.11.0.0
-    , hashable
     , microlens
     , mtl
     , syb >=0.7.2.4
@@ -170,7 +169,6 @@ test-suite uc-plugin-test
     , ghc >=9.6.4
     , ghc-paths
     , grisette >=0.11.0.0
-    , hashable
     , hspec
     , microlens
     , mtl

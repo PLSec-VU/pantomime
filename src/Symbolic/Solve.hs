@@ -44,8 +44,7 @@ import Grisette
   )
 
 import Control.Monad.Except (MonadError (..), modifyError, runExceptT)
-import Control.Monad.State (evalStateT, MonadState (..))
-import Control.Monad.Trans (MonadTrans(..))
+import Control.Monad.State (evalStateT)
 import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
@@ -69,14 +68,15 @@ data NonEq
   | EvalError EvalError
   -- TODO: Add in the actualy solver error. We don't want to directly copy the
   -- solver result, as Unsat shows validity on our case.
-  | SolveError
+  | SolveError SolvingFailure
 
 instance Outputable NonEq where
   ppr = \case
     Counterexample values -> vcat $ values <&> ppr
     EvalError err -> text "eval-error: " <+> ppr err
-    -- TODO: More details what failed for the solver!
-    SolveError -> text "solver error"
+    -- TODO: Unsat is not an error in this case, so we should not return it as
+    -- a possible outcome.
+    SolveError err -> text "solver error: " <+> text (show err)
 
 exprSymEq
   :: forall m
@@ -102,20 +102,15 @@ exprSymEq'
   => CoreExpr
   -> CoreExpr
   -> m (Either NonEq ())
-exprSymEq' lhs rhs = runExceptT $ do
-  dbg lhs
+exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
   unless (exprType lhs `eqType` exprType rhs) $ do
     throwError $ EvalError IllTyped
 
-  let st = SymbolicState
-        { nextIdx = 0
-        }
-
-  (bndrs, lres, rres, eq) <- flip evalStateT st . modifyError EvalError $ do
+  (bndrs, lres, rres, eq) <- modifyError EvalError $ do
     bndrs <- symbolicBndrs $ exprType lhs
 
     let saturate expr = do
-          value <- evaluate @_ @ws emptyEnv expr
+          value <- evaluate emptyEnv expr
           applyValues @_ @ws value bndrs
 
     lresult <- saturate lhs
@@ -140,10 +135,11 @@ exprSymEq' lhs rhs = runExceptT $ do
   result <- liftCore . liftIO $ solveExcept z3' translate eq
   case result of
     Right model -> do
-      let concretize' = modifyError EvalError . concretize model
-      bndrs' <- forM bndrs concretize'
-      lres' <- concretize' lres
-      rres' <- concretize' rres
+      let concretise' = modifyError EvalError . concretise model
+      bndrs' <- forM bndrs concretise'
+      lres' <- concretise' lres
+      rres' <- concretise' rres
+      dbg' "-------------"
       forM_ bndrs' dbg
       dbg' "-------------"
       dbg lres'
@@ -153,7 +149,7 @@ exprSymEq' lhs rhs = runExceptT $ do
 
       throwError $ Counterexample bndrs'
     Left Unsat -> pure ()
-    Left _ -> throwError $ SolveError
+    Left err -> throwError $ SolveError err
 
 -- FIXME: I don't think this works for divide by zero. I.e. if only one of the
 -- two expressions fail, it should be non-equal.
@@ -191,9 +187,9 @@ assertEq = curry $ \case
 
       -- Assertion for every field that they are equal.
       assertions <- forM accessors $ \(name, ty) -> do
-        lfield <- accessField @_ @ws lhs name ty
+        lfield <- accessField lhs name ty
         rfield <- accessField rhs name ty
-        assertEq lfield rfield
+        assertEq @m @ws lfield rfield
 
       -- Fold the assertions per-field into a single conjunct.
       let assertion = foldl' (mrgLiftA2 (.&&)) (pure true) assertions
@@ -210,20 +206,25 @@ assertEq = curry $ \case
 
     -- Merge the branches as a large if-then-else.
     pure $ foldl' (mrgLiftA2 (.&&)) eqTag branches
-
   (Cast' lco lhs, Cast' rco rhs) -> do
     unless (lco `eqCoercion` rco) $ throwError IllTyped
     assertEq lhs rhs
 
+  (Fun lty lhs, Fun rty rhs) -> do
+    unless (lty `eqType` rty) $ throwError IllTyped
+    arg <- freshValue lty
+    lhs' <- lhs arg
+    rhs' <- rhs arg
+    assertEq lhs' rhs'
+
   (Ty lhs, Ty rhs) -> pure . pure . con $ lhs `eqType` rhs
   (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
-  (Fun _, Fun _) -> throwError UnsupportedExpr
   _ -> throwError IllTyped
 
 -- FIXME: We should restrict ADT tags to actually be in range of their tag here!
 symbolicBndrs
   :: forall m ws
-   . MonadError EvalError m
+   . MonadEval m
   => KnownWordSize ws
   => Type
   -> m [Value m ws]
@@ -237,9 +238,9 @@ symbolicBndrs ty = do
   let (argTys, _) = splitFunTys ty'
 
   -- Use state monad to track unique identifier for arguments.
-  flip evalStateT 0 . forM argTys $ \argTy -> do
+  forM argTys $ \argTy -> do
     -- Get next identifier.
-    idx <- state (\s -> let s' = s + 1 in (s, s'))
+    idx <- freshIdx
 
     -- Create symbolic variable.
     let untyped :: forall c t. Solvable c t => RuntimeValue S t
@@ -247,4 +248,4 @@ symbolicBndrs ty = do
 
     -- Type the symbolic variable according to the argument type.
     let argTy' = scaledThing argTy
-    lift $ typedValue untyped argTy'
+    typedValue untyped argTy'

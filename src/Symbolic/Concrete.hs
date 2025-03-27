@@ -15,7 +15,7 @@
 
 module Symbolic.Concrete
   ( Concrete (..)
-  , concretize
+  , concretise
   ) where
 
 import Prelude hiding ((<>))
@@ -25,10 +25,10 @@ import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy, eqType)
 import GHC.Core.Unify (tcMatchTy)
 
-import Grisette (ToCon (..), EvalSym (..), evalSymToCon)
+import Grisette (ToCon (..), EvalSym (..), evalSymToCon, indexed, Symbol)
 import Grisette.Unified (EvalModeTag (..))
 import Grisette.SymPrim
-import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..))
+import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..), SupportedPrim (..))
 
 import Control.Monad.Identity (Identity (..))
 import Control.Monad.Except (MonadError (..), runExceptT)
@@ -39,11 +39,14 @@ import Symbolic.Value
 import Symbolic.Runtime
 import Symbolic.ADT
 import Symbolic.Util
+import Symbolic.Evaluate
+import Symbolic.MonadEval
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.
 data Concrete where
   Record :: DataCon -> [Concrete] -> Concrete
+  Function :: Symbol -> Type -> Concrete -> Concrete
   Value :: ModelValue -> Concrete
   Error :: RuntimeError -> Concrete
   Unknown :: Concrete
@@ -55,7 +58,7 @@ data Concrete where
 -- x :: Type
 -- x = value
 instance Outputable Concrete where
-  ppr = pprConcrete ("??? =" <+>) id
+  ppr = pprConcrete ("? =" <+>) id
 
 pprConcrete
   :: (SDoc -> SDoc)
@@ -92,19 +95,36 @@ pprConcrete addHeader addParens = \case
       let fields' = sep $ pprConcrete id parens <$> fields
       addParens $ hang header 2 fields'
 
-  -- TODO: I don't want to print the type here.
-  Value value -> addHeader $ text (show value)
-  Error err -> addHeader $ "RUNTIME ERROR" <+> ppr err
-  Unknown -> addHeader $ text "undefined"
+  expr@(Function _ _ _) -> do
+    let pprFun name ty = parens $ text (show name) <+> "::" <+> ppr ty
 
-concretize
-  :: forall m m' ws
-   . MonadError EvalError m
+    let collectFuns (Function name ty inner) = do
+          let (bndrs, body) = collectFuns inner
+          ((name, ty):bndrs, body)
+        collectFuns body = ([], body)
+
+    let (bndrs, body) = collectFuns expr
+
+    let args = sep $ uncurry pprFun <$> bndrs
+    let header = addHeader $ "\\" <+> args <+> arrow
+
+    let body' = pprConcrete id id body
+    addParens $ hang header 2 body'
+
+  Value (ModelValue value) -> addHeader $ text (pformatCon value)
+  Error err -> addHeader $ "RUNTIME ERROR" <+> ppr err
+  Unknown -> addHeader $ "undefined"
+
+-- TODO: I should be able to reconstruct a full CoreExpr from a Value. That
+-- would be the ideal concrete form!
+concretise
+  :: forall m ws
+   . MonadEval m
   => KnownWordSize ws
   => Model
-  -> Value m' ws
+  -> Value m ws
   -> m Concrete
-concretize model = \case
+concretise model = \case
   Primitive prim -> pure $ concretePrimitive model prim
   -- TODO: Clean this horrible piece of code up!
   Data adt -> do
@@ -127,7 +147,7 @@ concretize model = \case
           let accessors = zip names argTys'
           fields <- forM accessors $ \(name, ty') -> do
             field <- accessField @m @ws adt name ty'
-            concretize model field
+            concretise model field
 
           pure $ Record dataCon fields
 
@@ -139,19 +159,34 @@ concretize model = \case
     where
       go value ty | not $ ty `eqType` coercionLKind co = do
         (tyCon, tys) <- whyFail IllTyped $ splitTyConApp_maybe ty
-        dataCon <- whyFail undefined $ tyConSingleDataCon_maybe tyCon
+        dataCon <- whyFail IllTyped $ tyConSingleDataCon_maybe tyCon
         argTy <- case dataConInstArgTys dataCon tys of
           [argTy] -> pure $ scaledThing argTy
           _ -> throwError IllTyped
         arg' <- go value argTy
         pure $ Record dataCon [arg']
-      go value _ = concretize model value
+      go value _ = concretise model value
+
+  Fun argTy _ -> do
+    idx <- freshIdx
+    let symbol = indexed "arg" idx
+    -- TODO: We should actually create a concrete body. It's not very trivial
+    -- though, as fetching the concrete instance of function accessors and such
+    -- is completely bogus as output. Ideally, we just reconstruct a CoreExpr.
+    -- let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
+        -- untyped = pure $ sym symbol
+
+    -- arg <- typedValue @m @ws untyped argTy
+    -- res <- fun arg
+
+    -- body <- concretise model res
+    let body = Unknown
+    pure $ Function symbol argTy body
 
   -- TODO: There should be a better error to emit than this no? Maybe we
   -- should make a new one... Maybe we should make an error for concrete lookup
   -- failures. Alternatively, I guess we could actually just return the type as
   -- is no? It is actually also a concrete version in a sense.
-  Fun _ -> throwError IllTyped
   Ty _ -> throwError IllTyped
   Co _ -> throwError IllTyped
 
@@ -162,28 +197,28 @@ concretePrimitive
   -> Primitive ws
   -> Concrete
 concretePrimitive model = \case
-  Int value -> prim @_ @(IntN (WordBits ws)) value
-  Int8 value -> prim @_ @IntN8 value
-  Int16 value -> prim @_ @IntN16 value
-  Int32 value -> prim @_ @IntN32 value
-  Int64 value -> prim @_ @IntN64 value
-  Word value -> prim @_ @(WordN (WordBits ws)) value
-  Word8 value -> prim @_ @WordN8 value
-  Word16 value -> prim @_ @WordN16 value
-  Word32 value -> prim @_ @WordN32 value
-  Word64 value -> prim @_ @WordN64 value
-  Float value -> prim @_ @FP32 value
-  Double value -> prim @_ @FP64 value
+  Int value -> prim value
+  Int8 value -> prim value
+  Int16 value -> prim value
+  Int32 value -> prim value
+  Int64 value -> prim value
+  Word value -> prim value
+  Word8 value -> prim value
+  Word16 value -> prim value
+  Word32 value -> prim value
+  Word64 value -> prim value
+  Float value -> prim value
+  Double value -> prim value
   where
     prim
-      :: forall a b
-       . ToCon a b
+      :: forall a
+       . ToCon a (ConType a)
       => EvalSym a
-      => SupportedPrim b
+      => SupportedPrim (ConType a)
       => RuntimeValue S a
       -> Concrete
     prim value = do
-      let concrete = evalSymToCon @_ @(RuntimeValue C b) model value
+      let concrete = evalSymToCon @_ @(RuntimeValue C (ConType a)) model value
       -- TODO: I think we should either add an instance of ToCon from Runtime to
       -- Either, or we should expose a runRuntime function. This is bad!
       case runIdentity . runExceptT . unRuntimeValue $ concrete of

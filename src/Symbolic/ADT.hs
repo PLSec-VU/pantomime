@@ -114,7 +114,7 @@ adtType (ADT tyCon tys _) = mkTyConApp tyCon tys
 untypedField
   :: forall t
    . Mergeable t
-  => SolvableIdent (ConType t) t
+  => Interpretable t
   => ADT S
   -> String
   -- TODO: I think this input String should really be Text...
@@ -146,6 +146,7 @@ adtIsDataCon adt dataCon = do
     rhs' <- rhs
     mrgPure $ lhs' .== rhs'
 
+-- | Check whether the ADT have matching types.
 eqTyADT
   :: ADT mode
   -> ADT mode

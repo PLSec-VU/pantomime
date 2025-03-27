@@ -14,6 +14,7 @@ import Control.Applicative (Alternative(..))
 
 import Symbolic.Value
 import Symbolic.Util
+import Symbolic.MonadEval
 
 data Environment m n = Environment
   { idSubst :: IdEnv (Value m n)

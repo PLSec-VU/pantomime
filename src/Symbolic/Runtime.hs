@@ -28,16 +28,16 @@ import Data.Functor.Classes (Show1)
 import Grisette.Unified (EvalModeTag (..), BaseMonad)
 import Grisette
   ( Mergeable
-  , SimpleMergeable (..)
-  , EvalSym
-  , SymEq (..)
-  , Default (..)
-  , TryMerge
   , Mergeable1
+  , SimpleMergeable (..)
+  , TryMerge
+  , EvalSym
+  , EvalSym1
+  , SymEq (..)
   , SymBranching
   , ToSym (..)
   , ToCon (..)
-  , EvalSym1
+  , Default (..), PPrint
   )
 
 newtype RuntimeValue mode a where
@@ -112,6 +112,7 @@ data RuntimeError where
   deriving Mergeable via (Default RuntimeError)
   deriving EvalSym via (Default RuntimeError)
   deriving SymEq via (Default RuntimeError)
+  deriving PPrint via (Default RuntimeError)
 
 instance Outputable RuntimeError where
   ppr = \case
