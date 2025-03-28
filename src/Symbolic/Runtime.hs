@@ -29,15 +29,17 @@ import Grisette.Unified (EvalModeTag (..), BaseMonad)
 import Grisette
   ( Mergeable
   , Mergeable1
-  , SimpleMergeable (..)
+  , SimpleMergeable
   , TryMerge
   , EvalSym
   , EvalSym1
-  , SymEq (..)
+  , SymEq
+  , SymEq1
   , SymBranching
   , ToSym (..)
   , ToCon (..)
-  , Default (..), PPrint
+  , Default (..)
+  , PPrint
   )
 
 newtype RuntimeValue mode a where
@@ -81,6 +83,10 @@ deriving via ExceptT RuntimeError (BaseMonad mode) a
   instance (EvalSym1 (BaseMonad mode), EvalSym a)
   => EvalSym (RuntimeValue mode a)
 
+deriving via ExceptT RuntimeError (BaseMonad mode) a
+  instance (SymEq1 (BaseMonad mode), SymEq a)
+  => SymEq (RuntimeValue mode a)
+
 instance ToSym a b => ToSym (RuntimeValue C a) (RuntimeValue S b) where
   toSym = RuntimeValue . toSym . unRuntimeValue
 
@@ -109,10 +115,10 @@ data RuntimeError where
   deriving Show
   deriving Generic
   deriving Eq
-  deriving Mergeable via (Default RuntimeError)
-  deriving EvalSym via (Default RuntimeError)
-  deriving SymEq via (Default RuntimeError)
-  deriving PPrint via (Default RuntimeError)
+  deriving Mergeable via Default RuntimeError
+  deriving EvalSym via Default RuntimeError
+  deriving SymEq via Default RuntimeError
+  deriving PPrint via Default RuntimeError
 
 instance Outputable RuntimeError where
   ppr = \case

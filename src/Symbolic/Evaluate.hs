@@ -23,6 +23,7 @@ import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.TyCo.Subst (substTy)
 import GHC.Builtin.PrimOps (PrimOp (..))
+import GHC.Builtin.Types.Prim
 
 import Control.Monad (forM)
 import Control.Monad.Except
@@ -40,7 +41,6 @@ import Symbolic.ADT
 import Symbolic.Value
 import Symbolic.Environment
 import Symbolic.MonadEval
-import GHC.Builtin.Types.Prim
 
 -- | Get a fresh ADT identifier.
 freshADT
@@ -75,7 +75,7 @@ evaluate env = \case
   Var var | Just dataCon <- isDataConId_maybe var -> evalDataCon dataCon
   Var var -> lookupEnv env var
 
-  Lit lit -> evalLiteral lit
+  Lit lit -> Primitive <$> evalLiteral lit
 
   Lam bndr body -> do
     let argTy = varType bndr
@@ -110,7 +110,7 @@ evaluate env = \case
     invalid <- invalidValue ty
 
     foldM' invalid alts' $ \fl (cond, rhs) -> do
-      evalIte cond rhs fl
+      strictIte cond rhs fl
 
   Cast expr co -> do
     value <- evaluate env expr
@@ -173,9 +173,16 @@ evalAlt env scrut = \case
     pure (conditional, rhs')
 
   Alt (LitAlt lit) [] rhs -> do
+    -- The scrutinee has to be a primitive to match the literal alt.
+    scrut' <- case scrut of
+      Primitive prim -> pure prim
+      _ -> throwError IllTyped
+
     -- Compare the literal, to the scrutinee.
     lit' <- evalLiteral lit
-    conditional <- evalEq scrut lit'
+    -- TODO: This equivalence needs to force the scrutinee. We should probably
+    -- differentiate between the type of equality we support.
+    conditional <- strictPrimEq scrut' lit'
 
     -- Evaluate the rhs.
     rhs' <- evaluate env rhs
@@ -188,6 +195,28 @@ evalAlt env scrut = \case
     pure (pure true, rhs')
 
   _ -> throwError UnsupportedExpr
+
+strictPrimEq
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => Primitive ws
+  -> Primitive ws
+  -> m (RuntimeValue S SymBool)
+strictPrimEq = curry $ \case
+  (Int lhs, Int rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Int8 lhs, Int8 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Int16 lhs, Int16 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Int32 lhs, Int32 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Int64 lhs, Int64 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Word lhs, Word rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Word8 lhs, Word8 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Word16 lhs, Word16 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Word32 lhs, Word32 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Word64 lhs, Word64 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Float lhs, Float rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Double lhs, Double rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  _ -> throwError IllTyped
 
 evalDataCon
   :: forall m ws
@@ -246,7 +275,7 @@ evalDataConInst dataCon tys = do
 
   -- The root is an ADT that assumes the given conditional holds.
   let root cond = do
-        let adt' = evalAssume cond adt
+        let adt' = assume cond adt
         pure $ Data adt'
 
   -- Accumulate a function that takes the fields as arguments. We pass a
@@ -254,12 +283,17 @@ evalDataConInst dataCon tys = do
   -- actual arguments.
   final <- nArity root fields $ \cond field arg -> do
     -- Constraint the field of the ADT to be equivalent to the argument.
-    extra <- evalEq field arg
-    pure $ liftA2 (.&&) extra cond
+    -- TODO: This is a (partial) assumption. Change it accordingly with the new
+    -- interface.
+    extra <- strongEq field arg
+    pure $ extra .&& cond
 
   -- As a final constraint, the ADT tag should match the given DataCon.
   match <- whyFail IllTyped $ adtIsDataCon @ws adt dataCon
-  final match
+  -- TODO: Not sure if this is the cleanest way to make the assumption. Perhaps
+  -- we should just let adtIsDataCon do the .== pure true itself. I'll have to
+  -- check the callsites.
+  final $ match .== pure true
 
 -- | Get the value corresponding to a literal.
 evalLiteral
@@ -267,8 +301,8 @@ evalLiteral
    . MonadError EvalError m
   => KnownWordSize ws
   => Literal
-  -> m (Value m ws)
-evalLiteral = fmap Primitive . \case
+  -> m (Primitive ws)
+evalLiteral = \case
   LitNumber ty num -> case ty of
     LitNumInt -> pure $ Int num'
     LitNumInt8 -> pure $ Int8 num'
@@ -534,8 +568,10 @@ evalPrimOp = \case
         let Tag _ tag' = accessTag @ws adt
 
         -- Assume that the fresh adt tag is equivalent to the function argument.
-        let conditional = liftA2 (.==) tag tag'
-        let adt' = evalAssume conditional adt
+        -- TODO: I guess this assumes that the new ADT is always valid? I'll
+        -- have to ensure this is sound!
+        let conditional = tag .== tag'
+        let adt' = assume conditional adt
 
         -- Return the new ADT with assumption.
         pure $ Data adt'

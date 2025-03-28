@@ -1,6 +1,5 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Symbolic.MonadEval
   ( MonadEval
@@ -9,26 +8,38 @@ module Symbolic.MonadEval
   , SymbolicState (..)
   , freshIdx
 
-  , EvalEq (..)
-  , EvalIte (..)
-  , EvalAssume (..)
+  , StrictIte (..)
+  , StrongEq (..)
+  , WeakEq (..)
+  , Assume (..)
   ) where
 
 import GHC.Plugins
 import GHC.MonadCore
 
-import Grisette (SymBool, SimpleMergeable (..), mrgLiftA2, SymEq (..), Mergeable)
 import Grisette.Unified (GetBool, EvalModeTag (..))
+import Grisette 
+  ( SymBool
+  , LogicalOp (..)
+  , SymEq (..)
+  , Mergeable
+  , SimpleMergeable (..)
+  , simpleMerge
+  )
 
-import Control.Monad.Except (MonadError)
+import Control.Monad.Except (MonadError, runExceptT)
 import Control.Monad.State (MonadState (..))
 
 import Symbolic.Runtime
-import Data.Composition ((.:), (.:.))
+import Data.Composition ((.:))
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 
 -- TODO: Remove MonadCore from the requirements.
-type MonadEval m = (MonadError EvalError m, MonadState SymbolicState m, MonadCore m)
+type MonadEval m =
+  ( MonadError EvalError m
+  , MonadState SymbolicState m
+  , MonadCore m
+  )
 
 -- TODO: These errors give very little information on what went actually wrong.
 -- I should allow some information to be tagged onto them...
@@ -54,64 +65,45 @@ freshIdx = state $ \s -> do
     let s' = s { nextIdx = idx + 1 }
     (idx, s')
 
--- | A typeclass for operations that are symbolically checked for equivalence.
---
--- The main purpose is to allow for error propagation when performing common
--- operations on data types containing runtime values. As this is an ideom
--- that requires a lot of wrapping/unwrapping from these data types, we instead
--- capture it in this way.
-class MonadEval m => EvalEq m a where
-  evalEq
-    :: a
-    -> a
-    -> m (RuntimeValue S (GetBool S))
+class MonadEval m => StrictIte m a where
+  strictIte :: RuntimeValue S (GetBool S) -> a -> a -> m a
 
-instance (MonadEval m, Mergeable a, SymEq a) => EvalEq m (RuntimeValue S a) where
-  evalEq = pure .: mrgLiftA2 (.==)
+instance (MonadEval m, Mergeable a) => StrictIte m (RuntimeValue S a) where
+  strictIte cond tr fl = pure $ do
+    cond' <- cond
+    mrgIte cond' tr fl
 
--- | A typeclass for operations that are symbolically branched.
---
--- The main purpose is to allow for error propagation when performing common
--- operations on data types containing runtime values. As this is an ideom
--- that requires a lot of wrapping/unwrapping from these data types, we instead
--- capture it in this way.
-class MonadEval m => EvalIte m a where
-  evalIte
-    :: RuntimeValue S (GetBool S)
-    -> a
-    -> a
-    -> m a
+-- TODO: Comment on why we need a strong and weak equvalence.
+class MonadEval m => StrongEq m a where
+  strongEq :: a -> a -> m SymBool
 
-instance (MonadEval m, SimpleMergeable a) => EvalIte m (RuntimeValue S a) where
-  evalIte = pure .:. iteRuntime
+instance (MonadEval m, SymEq a) => StrongEq m (RuntimeValue S a) where
+  strongEq = pure .: (.==)
+
+class MonadEval m => WeakEq m a where
+  weakEq :: a -> a -> m SymBool
+
+instance (MonadEval m, SymEq a) => WeakEq m (RuntimeValue S a) where
+  weakEq lhs rhs = do
+    let cmp = curry $ \case
+          (Left Invalid, _) -> true
+          (_, Left Invalid) -> true
+          (lhs', rhs') -> lhs' .== rhs'
+
+    let unwrap = runExceptT . unRuntimeValue
+
+    let lhs' = unwrap lhs
+    let rhs' = unwrap rhs
+    let result = liftA2 cmp lhs' rhs'
+
+    pure $ simpleMerge result
 
 -- | A typeclass for operations that allow for symbolic assumptions.
-class EvalAssume a where
-  -- TODO: Unsure if this should support lazy semantics actually?
-  evalAssume
-    :: RuntimeValue S (GetBool S)
-    -> a
-    -> a
-
--- FIXME: This should respect lazy semantics. The current implementation
--- forces the conditional, which is not what we want from an assumption no?
--- Assumptions should not force evaluation, but just restrict computation
--- given no failure occurred. Maybe the problem is in the comparison function
--- cmpRuntime btw. I'll have to think about it once I add support for bottom
--- values.
-instance SimpleMergeable a => EvalAssume (RuntimeValue S a) where
-  evalAssume cond tr = iteRuntime cond tr $ mrgThrowError Invalid
-
--- | Branch over a runtime symbolic boolean.
 --
--- If the conditional of an if statement can fail, we first wish to check this
--- before proceeding to choose either branch. This function captures that idea.
-iteRuntime
-  :: SimpleMergeable a
-  => RuntimeValue S SymBool
-  -> RuntimeValue S a
-  -> RuntimeValue S a
-  -> RuntimeValue S a
-iteRuntime cond tr fl = do
-  cond' <- cond
-  mrgIte cond' tr fl
+-- Note that it does not take a RuntimeValue as its conditional, as an assume
+-- should not force any values.
+class Assume a where
+  assume :: GetBool S -> a -> a
+
+instance SimpleMergeable a => Assume (RuntimeValue S a) where
+  assume cond tr = mrgIte cond tr $ mrgThrowError Invalid

@@ -18,6 +18,7 @@
 module Symbolic.Value
   ( Value (..)
   , mkCast'
+  , weakEq
 
   , typedValue
   , freshValue
@@ -37,7 +38,6 @@ import GHC.Plugins hiding (empty)
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Builtin.Types.Prim
 import GHC.Platform (PlatformWordSize)
-import GHC.MonadCore
 
 import Grisette.SymPrim
 import Grisette.Unified (EvalModeTag (..))
@@ -47,11 +47,13 @@ import Grisette
   , Mergeable
   , Function (..)
   , Symbol
+  , SymEq (..)
   , SymbolSetRep (..)
   , indexed
+  , LogicalOp (..)
   )
 
-import Control.Monad (foldM, unless)
+import Control.Monad (foldM, unless, forM)
 import Control.Monad.Except (MonadError (..))
 
 import Symbolic.Util
@@ -61,6 +63,7 @@ import Symbolic.ADT
 import Symbolic.Identifier
 import Symbolic.MonadEval
 import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim)
+import GHC.Core.TyCo.Rep (scaledThing)
 
 -- TODO: I feel like we don't really need this. It is literally only passed to
 -- the 'applyULam' function.
@@ -69,6 +72,7 @@ data ULam mode where
 
 -- | Apply an uninterpreted function.
 --
+-- TODO: Move this thing next to typedValue, as it is closely tied to it.
 -- TODO: Can't we make this function a little bit smaller?
 --
 -- Yes, this function is big. This has everything to do with overlapping
@@ -225,7 +229,7 @@ applyULam (ULam argTy resTy ident) = \case
   -- TODO: Implement this!
   -- FIXME: Should we substitute a type variable into the result type? I think
   -- we really should!!!
-  Fun innerArgTy fun -> do
+  Fun _innerArgTy _fun -> do
     -- FIXME: This check doesn't make sense. We want to ensure that the entire
     -- function has the same type as the ULam argument. Or at the very least,
     -- that the ULam expects a function whose type matches that of the given
@@ -233,11 +237,11 @@ applyULam (ULam argTy resTy ident) = \case
     -- Ensure that the given value argument (which is itself a function) matches
     -- the expected argument of the function. Since a value Fun only carries its
     -- input type, we just check whether this matches.
-    (_, _, innerArgTy', _) <- whyFail IllTyped $ splitFunTy_maybe argTy
-    unless (innerArgTy `eqType` innerArgTy') $ throwError IllTyped
+    -- (_, _, innerArgTy', _) <- whyFail IllTyped $ splitFunTy_maybe argTy
+    -- unless (innerArgTy `eqType` innerArgTy') $ throwError IllTyped
 
-    arg <- freshValue @m @ws argTy
-    _assumption <- evalEq (Fun innerArgTy fun) arg
+    -- arg <- freshValue @m @ws argTy
+    -- _assumption <- strongEq (Fun innerArgTy fun) arg
     -- TODO: This should create a typed value for the argument. Then do an
     -- equivalence assumption where the arg should be equal to the fun. After
     -- we should compose the symbolic function application with the identifier
@@ -290,21 +294,13 @@ instance KnownWordSize ws => Outputable (Value m ws) where
     Ty ty -> text "@" <+> ppr ty
     Co co -> ppr co
 
-instance (MonadEval m, KnownWordSize ws) => EvalEq m (Value m ws) where
-  -- Compare two values.
-  --
-  -- Care must be taken for ADT comparison. We do not check whether the fields of
-  -- an ADT match the fields of another ADT. Instead, we return an equality of the
-  -- ADT identifiers. This is a stronger property than just matching fields. Thus,
-  -- this is only fit as an assumption and not as a final assertion.
-  -- TODO: I guess this should be like 'strongCmpValue' (as the property we are
-  -- checking for is strong, i.e. ADT identifier equivalence)
-  evalEq = curry $ \case
-    (Primitive lhs, Primitive rhs) -> evalEq lhs rhs
-    (Data lhs, Data rhs) -> evalEq lhs rhs
+instance (MonadEval m, KnownWordSize ws) => StrongEq m (Value m ws) where
+  strongEq = curry $ \case
+    (Primitive lhs, Primitive rhs) -> strongEq lhs rhs
+    (Data lhs, Data rhs) -> strongEq lhs rhs
     (Cast' lco lhs, Cast' rco rhs) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
-      evalEq lhs rhs
+      strongEq lhs rhs
 
     (Fun lty lhs, Fun rty rhs) -> do
       -- TODO: This thing is very messy!
@@ -317,53 +313,121 @@ instance (MonadEval m, KnownWordSize ws) => EvalEq m (Value m ws) where
 
       lhs' <- lhs arg
       rhs' <- rhs arg
-      eq <- evalEq lhs' rhs'
+      eq <- strongEq lhs' rhs'
 
       typed <- valueSymbol @m @ws symbol lty
       let quantifier = buildSymbolSet typed
-      dbg' $ show quantifier
       -- FIXME: The quantifier is escaping its definition. This is because the
       -- quantifier is used in the guard, but the forall only applies to the
       -- Right branch. It appears that leaking underconstraints the output.
       -- How would I quantify the entire union? I'm not sure this is possible...
       -- I'll have to think what the meaning is even of the quantification.
-      pure $ forallSet quantifier <$> eq
+      pure $ forallSet quantifier eq
 
-    (Ty lhs, Ty rhs) -> pure . pure . con $ lhs `eqType` rhs
-    (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
+    (Ty lhs, Ty rhs) -> pure . con $ lhs `eqType` rhs
+    (Co lhs, Co rhs) -> pure . con $ lhs `eqCoercion` rhs
     _ -> throwError IllTyped
 
-instance (MonadEval m, KnownWordSize ws) => EvalIte m (Value m ws) where
-  evalIte cond = curry $ \case
-    (Primitive lhs, Primitive rhs) -> Primitive <$> evalIte cond lhs rhs
-    (Data lhs, Data rhs) -> Data <$> evalIte cond lhs rhs
+instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
+  strictIte cond = curry $ \case
+    (Primitive lhs, Primitive rhs) -> Primitive <$> strictIte cond lhs rhs
+    (Data lhs, Data rhs) -> Data <$> strictIte cond lhs rhs
     (Cast' lco lhs, Cast' rco rhs) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
-      result <- evalIte cond lhs rhs
+      result <- strictIte cond lhs rhs
       pure $ Cast' lco result
     (Fun larg lhs, Fun rarg rhs) -> do
       unless (larg `eqType` rarg) $ throwError IllTyped
       pure . Fun larg $ \arg -> do
         lhs' <- lhs arg
         rhs' <- rhs arg
-        evalIte cond lhs' rhs'
+        strictIte cond lhs' rhs'
     (Ty _, Ty _) -> throwError UnsupportedExpr
     (Co _, Co _) -> throwError UnsupportedExpr
     _ -> throwError IllTyped
 
-instance (MonadEval m, KnownWordSize ws) => EvalAssume (Value m ws) where
-  evalAssume cond = \case
-    Primitive prim -> Primitive $ evalAssume cond prim
-    Data adt -> Data $ evalAssume cond adt
-    Cast' co val -> Cast' co $ evalAssume cond val
+instance (MonadEval m, KnownWordSize ws) => Assume (Value m ws) where
+  assume cond = \case
+    Primitive prim -> Primitive $ assume cond prim
+    Data adt -> Data $ assume cond adt
+    Cast' co val -> Cast' co $ assume cond val
     Fun argTy fun -> do
       Fun argTy $ \arg -> do
-        evalAssume cond <$> fun arg
+        assume cond <$> fun arg
     -- TODO: I guess there is nothing to assume in these cases. Still this seems
     -- like it could introduce some unexpected behaviour if we're not careful.
     -- I think we should change this. We shouldn't just drop assumptions...
     Ty ty -> Ty ty
     Co co -> Co co
+
+-- TODO: Explain why we distinguish between strong and weak equality.
+instance (MonadEval m, KnownWordSize ws) => WeakEq m (Value m ws) where
+  weakEq = curry $ \case
+    (Data lhs, Data rhs) -> do
+      -- Ensure the equality is sound.
+      unless (lhs `eqTyADT` rhs) $ throwError IllTyped
+
+      -- Gather type info.
+      let ADT tyCon tyArgs _ = lhs
+      let dataCons = tyConDataCons tyCon
+
+      -- Gather the branches for each DataCon this ADT could be. This is a pair of
+      -- conditional (i.e. the DataCon matches) and the inner assertion.
+      branches <- forM dataCons $ \dataCon -> do
+        -- Ensure that both ADTs match the current DataCon.
+        let inBranch adt = do
+              cond <- adtIsDataCon @ws adt dataCon
+              pure $ cond .== pure true
+        conditional <- whyFail IllTyped $ do
+          lhs' <- inBranch lhs
+          rhs' <- inBranch rhs
+          pure $ lhs' .&& rhs'
+
+        -- let inBranch adt = adtIsDataCon @ws adt dataCon
+        -- conditional <- whyFail IllTyped $ do
+        --   lhs' <- inBranch lhs
+        --   rhs' <- inBranch rhs
+        --   pure $ mrgLiftA2 (.&&) lhs' rhs'
+        -- -- let inBranch adt = adtIsDataCon @ws adt dataCon
+
+        -- Gather the field names.
+        let names = dataConAccessorNames dataCon
+        let tys = scaledThing <$> dataConInstArgTys dataCon tyArgs
+        let accessors = zip names tys
+
+        -- Assertion for every field that they are equal.
+        assertions <- forM accessors $ \(name, ty) -> do
+          lfield <- accessField @m @ws lhs name ty
+          rfield <- accessField rhs name ty
+          weakEq lfield rfield
+
+        -- Fold the assertions per-field into a single conjunct.
+        let assertion = foldl' (.&&) true assertions
+
+        -- -- If the tags match, then the fields should also match.
+        pure $ symImplies conditional assertion
+
+      -- Ensure the tags are actually equal.
+      eqTag <- weakEq (accessTag @ws lhs) (accessTag rhs)
+
+      -- Merge the branches as a large if-then-else.
+      pure $ foldl' (.&&) eqTag branches
+
+    (Cast' lco lhs, Cast' rco rhs) -> do
+      unless (lco `eqCoercion` rco) $ throwError IllTyped
+      weakEq lhs rhs
+
+    (Fun lty lhs, Fun rty rhs) -> do
+      unless (lty `eqType` rty) $ throwError IllTyped
+      arg <- freshValue lty
+      lhs' <- lhs arg
+      rhs' <- rhs arg
+      weakEq lhs' rhs'
+
+    -- The remaining cases do not distinguish between weak and strong equivalence.
+    -- TODO: I think I want to individually implement weakEq for Primitive and
+    -- call that instead. That seems better to me!
+    (lhs, rhs) -> strongEq lhs rhs
 
 -- | Create a cast.
 --
@@ -415,45 +479,22 @@ typedValue
 typedValue value ty
   | Right prim <- typedPrimitive value ty = pure $ Primitive prim
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
-  , Just (_, co) <- instNewTyCon_maybe tyCon tys = do
-    value' <- typedValue value ty
+  , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
+    value' <- typedValue value ty'
     let co' = mkSymCo co
     pure $ mkCast' co' value'
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
   , isDataTyCon tyCon = do
     let adt = mkADT @ws tyCon tys value
     pure $ Data adt
-  -- TODO: I think a symbolic function instance would work better here in most
-  -- cases.
   | Just (_, _, argTy, resTy) <- splitFunTy_maybe ty = do
-
-    -- idx <- freshIdx
-    -- let symbol = indexed "!FUN" idx
-    -- let ident = pure $ sym symbol
-
-    -- TODO: Clean this stuff up!
+    -- TODO: Get rid of the ULam, we just use it for this one function call.
     let x = ULam @S argTy resTy value
-
-    -- let fun = Fun argTy $ applyULam x
-    -- eq <- evalEq ident value
-    -- dbg' $ show eq
-    -- pure $ evalAssume eq fun
     pure . Fun argTy $ applyULam x
 
-    -- FIXME: This function type really doesn't make sense. We are ignoring the
-    -- argument here. We should use the ULam type we created to make an
-    -- uninterpreted function here!
-    --
-    -- The next step would be to implement a the comparison between this
-    -- symbolic version and an actual implementation. Perhaps, we could do it
-    -- in two steps. First, the ULam should be wrapped inside of a Fun always.
-    -- Then we only need to implement the compare between two Fun types. The
-    -- comparison would need to saturate the functions and then check the
-    -- output. This would mean that ULam will actually not be a part of Value
-    -- btw.
-    -- pure $ Fun argTy fun
   | otherwise = throwError UnsupportedExpr
 
+-- TODO: I really should elaborate on this (and why we need it).
 valueSymbol
   :: forall m ws
    . MonadEval m
@@ -464,12 +505,10 @@ valueSymbol
 valueSymbol symbol ty
   | Right prim <- primitiveSymbol @_ @ws symbol ty = pure prim
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
-  , Just (_, co) <- instNewTyCon_maybe tyCon tys = do
-    let ty' = coercionRKind co
+  , Just (ty', _) <- instNewTyCon_maybe tyCon tys = do
     valueSymbol @m @ws symbol ty'
   | Just (tyCon, _) <- tcSplitTyConApp_maybe ty
   , isDataTyCon tyCon = symbol' @(Ident C)
-  -- cases.
   | Just (_, _, _, _) <- splitFunTy_maybe ty = symbol' @(Ident C)
   | otherwise = throwError UnsupportedExpr
   where
@@ -604,52 +643,52 @@ instance KnownWordSize ws => Outputable (Primitive ws) where
       pprRuntime :: Show a => RuntimeValue S a -> SDoc
       pprRuntime = text . show 
 
-instance (MonadEval m, KnownWordSize ws) => EvalEq m (Primitive ws) where
-  evalEq = curry $ \case
-    (Int lhs, Int rhs) -> evalEq lhs rhs
-    (Int8 lhs, Int8 rhs) -> evalEq lhs rhs
-    (Int16 lhs, Int16 rhs) -> evalEq lhs rhs
-    (Int32 lhs, Int32 rhs) -> evalEq lhs rhs
-    (Int64 lhs, Int64 rhs) -> evalEq lhs rhs
-    (Word lhs, Word rhs) -> evalEq lhs rhs
-    (Word8 lhs, Word8 rhs) -> evalEq lhs rhs
-    (Word16 lhs, Word16 rhs) -> evalEq lhs rhs
-    (Word32 lhs, Word32 rhs) -> evalEq lhs rhs
-    (Word64 lhs, Word64 rhs) -> evalEq lhs rhs
-    (Float lhs, Float rhs) -> evalEq lhs rhs
-    (Double lhs, Double rhs) -> evalEq lhs rhs
+instance (MonadEval m, KnownWordSize ws) => StrongEq m (Primitive ws) where
+  strongEq = curry $ \case
+    (Int lhs, Int rhs) -> pure $ lhs .== rhs
+    (Int8 lhs, Int8 rhs) -> pure $ lhs .== rhs
+    (Int16 lhs, Int16 rhs) -> pure $ lhs .== rhs
+    (Int32 lhs, Int32 rhs) -> pure $ lhs .== rhs
+    (Int64 lhs, Int64 rhs) -> pure $ lhs .== rhs
+    (Word lhs, Word rhs) -> pure $ lhs .== rhs
+    (Word8 lhs, Word8 rhs) -> pure $ lhs .== rhs
+    (Word16 lhs, Word16 rhs) -> pure $ lhs .== rhs
+    (Word32 lhs, Word32 rhs) -> pure $ lhs .== rhs
+    (Word64 lhs, Word64 rhs) -> pure $ lhs .== rhs
+    (Float lhs, Float rhs) -> pure $ lhs .== rhs
+    (Double lhs, Double rhs) -> pure $ lhs .== rhs
     _ -> throwError IllTyped
 
-instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive ws) where
-  evalIte cond = curry $ \case
-    (Int lhs, Int rhs) -> Int <$> evalIte cond lhs rhs
-    (Int8 lhs, Int8 rhs) -> Int8 <$> evalIte cond lhs rhs
-    (Int16 lhs, Int16 rhs) -> Int16 <$> evalIte cond lhs rhs
-    (Int32 lhs, Int32 rhs) -> Int32 <$> evalIte cond lhs rhs
-    (Int64 lhs, Int64 rhs) -> Int64 <$> evalIte cond lhs rhs
-    (Word lhs, Word rhs) -> Word <$> evalIte cond lhs rhs
-    (Word8 lhs, Word8 rhs) -> Word8 <$> evalIte cond lhs rhs
-    (Word16 lhs, Word16 rhs) -> Word16 <$> evalIte cond lhs rhs
-    (Word32 lhs, Word32 rhs) -> Word32 <$> evalIte cond lhs rhs
-    (Word64 lhs, Word64 rhs) -> Word64 <$> evalIte cond lhs rhs
-    (Float lhs, Float rhs) -> Float <$> evalIte cond lhs rhs
-    (Double lhs, Double rhs) -> Double <$> evalIte cond lhs rhs
+instance (MonadEval m, KnownWordSize ws) => StrictIte m (Primitive ws) where
+  strictIte cond = curry $ \case
+    (Int lhs, Int rhs) -> Int <$> strictIte cond lhs rhs
+    (Int8 lhs, Int8 rhs) -> Int8 <$> strictIte cond lhs rhs
+    (Int16 lhs, Int16 rhs) -> Int16 <$> strictIte cond lhs rhs
+    (Int32 lhs, Int32 rhs) -> Int32 <$> strictIte cond lhs rhs
+    (Int64 lhs, Int64 rhs) -> Int64 <$> strictIte cond lhs rhs
+    (Word lhs, Word rhs) -> Word <$> strictIte cond lhs rhs
+    (Word8 lhs, Word8 rhs) -> Word8 <$> strictIte cond lhs rhs
+    (Word16 lhs, Word16 rhs) -> Word16 <$> strictIte cond lhs rhs
+    (Word32 lhs, Word32 rhs) -> Word32 <$> strictIte cond lhs rhs
+    (Word64 lhs, Word64 rhs) -> Word64 <$> strictIte cond lhs rhs
+    (Float lhs, Float rhs) -> Float <$> strictIte cond lhs rhs
+    (Double lhs, Double rhs) -> Double <$> strictIte cond lhs rhs
     _ -> throwError IllTyped
 
-instance KnownWordSize ws => EvalAssume (Primitive ws) where
-  evalAssume cond = \case
-    Int value -> Int $ evalAssume cond value
-    Int8 value -> Int8 $ evalAssume cond value
-    Int16 value -> Int16 $ evalAssume cond value
-    Int32 value -> Int32 $ evalAssume cond value
-    Int64 value -> Int64 $ evalAssume cond value
-    Word value -> Word $ evalAssume cond value
-    Word8 value -> Word8 $ evalAssume cond value
-    Word16 value -> Word16 $ evalAssume cond value
-    Word32 value -> Word32 $ evalAssume cond value
-    Word64 value -> Word64 $ evalAssume cond value
-    Float value -> Float $ evalAssume cond value
-    Double value -> Double $ evalAssume cond value
+instance KnownWordSize ws => Assume (Primitive ws) where
+  assume cond = \case
+    Int value -> Int $ assume cond value
+    Int8 value -> Int8 $ assume cond value
+    Int16 value -> Int16 $ assume cond value
+    Int32 value -> Int32 $ assume cond value
+    Int64 value -> Int64 $ assume cond value
+    Word value -> Word $ assume cond value
+    Word8 value -> Word8 $ assume cond value
+    Word16 value -> Word16 $ assume cond value
+    Word32 value -> Word32 $ assume cond value
+    Word64 value -> Word64 $ assume cond value
+    Float value -> Float $ assume cond value
+    Double value -> Double $ assume cond value
 
 -- | Construct a primitive, symbolic value with the given type.
 typedPrimitive

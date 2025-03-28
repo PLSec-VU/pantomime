@@ -35,9 +35,19 @@ module Symbolic.ADT
 import GHC.Plugins
 import GHC.Core.TyCo.Compare (eqType)
 
-import Grisette
 import Grisette.Unified (EvalModeTag (..), EvalModeAll, GetBool, BaseMonad)
 import Grisette.Internal.Unified.UnifiedBV (UnifiedBVImpl(..))
+import Grisette
+  ( EvalSym (..)
+  , EvalSym1
+  , ToCon (..)
+  , ToSym (..)
+  , Mergeable
+  , LogicalOp (..)
+  , SymEq (..)
+  , SymOrd (..)
+  , mrgPure
+  )
 
 import Data.Foldable (find)
 import Data.Maybe (fromJust)
@@ -62,6 +72,12 @@ data ADT mode where
     -> RuntimeValue mode (Ident mode)
     -> ADT mode
 
+instance Outputable (ADT C) where
+  ppr adt@(ADT _ _ value) = ppr (adtType adt) <+> "=>" <+> text (show value)
+
+instance Outputable (ADT S) where
+  ppr adt@(ADT _ _ value) = ppr (adtType adt) <+> "=>" <+> text (show value)
+
 instance (EvalSym1 (BaseMonad mode), EvalSym (Ident mode)) => EvalSym (ADT mode) where
   evalSym fillDefault model (ADT tyCon tys ident) = do
     let ident' = evalSym fillDefault model ident
@@ -73,18 +89,18 @@ instance ToCon (ADT S) (ADT C) where
 instance ToSym (ADT C) (ADT S) where
   toSym (ADT tyCon tys value) = ADT tyCon tys $ toSym value
 
-instance MonadEval m => EvalEq m (ADT S) where
-  evalEq lhs@(ADT _ _ lval) rhs@(ADT _ _ rval) = do
-    unless (eqTyADT lhs rhs) $ throwError IllTyped
-    evalEq lval rval
-
-instance MonadEval m => EvalIte m (ADT S) where
-  evalIte cond tr@(ADT tc tys tval) fl@(ADT _ _ fval) = do
+instance MonadEval m => StrictIte m (ADT S) where
+  strictIte cond tr@(ADT tc tys tval) fl@(ADT _ _ fval) = do
     unless (eqTyADT tr fl) $ throwError IllTyped
-    ADT tc tys <$> evalIte cond tval fval
+    ADT tc tys <$> strictIte cond tval fval
 
-instance EvalAssume (ADT S) where
-  evalAssume cond (ADT tyCon tys ident) = ADT tyCon tys $ evalAssume cond ident
+instance MonadEval m => StrongEq m (ADT S) where
+  strongEq lhs@(ADT _ _ lval) rhs@(ADT _ _ rval) = do
+    unless (eqTyADT lhs rhs) $ throwError IllTyped
+    strongEq lval rval
+
+instance Assume (ADT S) where
+  assume cond (ADT tyCon tys ident) = ADT tyCon tys $ assume cond ident
 
 -- | Create an ADT.
 --
@@ -100,8 +116,10 @@ mkADT
 mkADT tyCon tys ident = do
   let adt = ADT tyCon tys ident
   let tag = accessTag @ws adt
-  let conditional = tagInRange tag
-  evalAssume conditional adt
+  -- TODO: I'm unsure about this conditional. I think it is too strict, as it
+  -- does not allow for the ADT iself to be invalid.
+  let conditional = tagInRange tag .== pure true
+  assume conditional adt
 
 -- | Get the type of this ADT.
 adtType :: ADT mode -> Type
@@ -124,8 +142,6 @@ untypedField (ADT _ _ value) name = interpretWith value name
 -- | Whether the given ADT matches the DataCon.
 --
 -- Note, this does not typecheck whether the ADT actually matches the DataCon.
--- TODO: I do want this to perform a typecheck! I would need to include the
--- type on an ADT first.
 adtIsDataCon
   :: forall ws
    . KnownWordSize ws
@@ -168,6 +184,12 @@ data Tag mode ws where
     -- support for its eval mode.
     -> Tag mode ws
 
+instance KnownWordSize ws => Outputable (Tag C ws) where
+  ppr (Tag tyCon value) = ppr tyCon <+> "=>" <+> text (show value)
+
+instance KnownWordSize ws => Outputable (Tag S ws) where
+  ppr (Tag tyCon value) = ppr tyCon <+> "=>" <+> text (show value)
+
 instance (EvalSym1 (BaseMonad mode), EvalSym (GetIntN mode (WordBits ws))) => EvalSym (Tag mode ws) where
   evalSym fillDefault model (Tag tyCon value) = do
     let value' = evalSym fillDefault model value
@@ -179,18 +201,23 @@ instance KnownWordSize ws => ToCon (Tag S ws) (Tag C ws) where
 instance KnownWordSize ws => ToSym (Tag C ws) (Tag S ws) where
   toSym (Tag tyCon value) = Tag tyCon $ toSym value
 
-instance (MonadEval m, KnownWordSize ws) => EvalEq m (Tag S ws) where
-  evalEq (Tag ltc lval) (Tag rtc rval) = do
-    unless (ltc == rtc) $ throwError IllTyped
-    evalEq lval rval
-
-instance (MonadEval m, KnownWordSize ws) => EvalIte m (Tag S ws) where
-  evalIte cond (Tag ttc tval) (Tag ftc fval) = do
+instance (MonadEval m, KnownWordSize ws) => StrictIte m (Tag S ws) where
+  strictIte cond (Tag ttc tval) (Tag ftc fval) = do
     unless (ttc == ftc) $ throwError IllTyped
-    Tag ttc <$> evalIte cond tval fval
+    Tag ttc <$> strictIte cond tval fval
 
-instance KnownWordSize ws => EvalAssume (Tag S ws) where
-  evalAssume cond (Tag tyCon value) = Tag tyCon $ evalAssume cond value
+instance (MonadEval m, KnownWordSize ws) => StrongEq m (Tag S ws) where
+  strongEq (Tag ltc lval) (Tag rtc rval) = do
+    unless (ltc == rtc) $ throwError IllTyped
+    strongEq lval rval
+
+instance (MonadEval m, KnownWordSize ws) => WeakEq m (Tag S ws) where
+  weakEq (Tag ltc lval) (Tag rtc rval) = do
+    unless (ltc == rtc) $ throwError IllTyped
+    weakEq lval rval
+
+instance KnownWordSize ws => Assume (Tag S ws) where
+  assume cond (Tag tyCon value) = Tag tyCon $ assume cond value
 
 -- | Get the DataCon from a Tag and the Type that should match the .
 tagToDataCon

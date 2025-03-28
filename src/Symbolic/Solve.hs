@@ -30,16 +30,14 @@ import GHC.MonadCore
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
-  ( SymBool
-  , LogicalOp (..)
-  , GrisetteSMTConfig (..)
+  ( GrisetteSMTConfig (..)
   , SMTConfig (..)
   , Timing (..)
   , Solvable (..)
   , SolvingFailure (..)
+  , LogicalOp (..)
   , z3
-  , solveExcept
-  , mrgLiftA2
+  , solve
   , indexed
   )
 
@@ -48,16 +46,14 @@ import Control.Monad.State (evalStateT)
 import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
+import Data.Foldable (forM_)
 
 import Symbolic.WordSize
 import Symbolic.Evaluate
 import Symbolic.Environment
-import Symbolic.ADT
-import Symbolic.Util
 import Symbolic.Value
 import Symbolic.Concrete
 import Symbolic.Runtime
-import Data.Foldable (forM_)
 import Symbolic.MonadEval
 
 -- TODO: Rename this thing.
@@ -74,8 +70,6 @@ instance Outputable NonEq where
   ppr = \case
     Counterexample values -> vcat $ values <&> ppr
     EvalError err -> text "eval-error: " <+> ppr err
-    -- TODO: Unsat is not an error in this case, so we should not return it as
-    -- a possible outcome.
     SolveError err -> text "solver error: " <+> text (show err)
 
 exprSymEq
@@ -115,8 +109,8 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
 
     lresult <- saturate lhs
     rresult <- saturate rhs
-    eq <- unRuntimeValue <$> assertEq lresult rresult
-    pure (bndrs, lresult, rresult, eq)
+    neq <- symNot <$> weakEq lresult rresult
+    pure (bndrs, lresult, rresult, neq)
 
   -- TODO: We could let the user decide which solver no?
   let z3' = z3
@@ -126,13 +120,8 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
           }
         }
 
-  -- result <- liftCore . liftIO $ solve z3' eq
-  let translate = \case
-        Left Invalid -> false
-        Right val -> symNot val
-        _ -> false
+  result <- liftCore . liftIO $ solve z3' eq
 
-  result <- liftCore . liftIO $ solveExcept z3' translate eq
   case result of
     Right model -> do
       let concretise' = modifyError EvalError . concretise model
@@ -151,77 +140,9 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
     Left Unsat -> pure ()
     Left err -> throwError $ SolveError err
 
--- FIXME: I don't think this works for divide by zero. I.e. if only one of the
--- two expressions fail, it should be non-equal.
-assertEq
-  :: forall m ws
-   . MonadEval m
-  => KnownWordSize ws
-  => Value m ws
-  -> Value m ws
-  -> m (RuntimeValue S SymBool)
-assertEq = curry $ \case
-  (Primitive lhs, Primitive rhs) -> evalEq lhs rhs
-  (Data lhs, Data rhs) -> do
-    -- Ensure the equality is sound.
-    unless (lhs `eqTyADT` rhs) $ throwError IllTyped
-
-    -- Gather type info.
-    let ADT tyCon tyArgs _ = lhs
-    let dataCons = tyConDataCons tyCon
-
-    -- Gather the branches for each DataCon this ADT could be. This is a pair of
-    -- conditional (i.e. the DataCon matches) and the inner assertion.
-    branches <- forM dataCons $ \dataCon -> do
-      -- Ensure that both ADTs match the current DataCon.
-      let inBranch adt = adtIsDataCon @ws adt dataCon
-      conditional <- whyFail IllTyped $ do
-        lhs' <- inBranch lhs
-        rhs' <- inBranch rhs
-        pure $ mrgLiftA2 (.&&) lhs' rhs'
-
-      -- Gather the field names.
-      let names = dataConAccessorNames dataCon
-      let tys = scaledThing <$> dataConInstArgTys dataCon tyArgs
-      let accessors = zip names tys
-
-      -- Assertion for every field that they are equal.
-      assertions <- forM accessors $ \(name, ty) -> do
-        lfield <- accessField lhs name ty
-        rfield <- accessField rhs name ty
-        assertEq @m @ws lfield rfield
-
-      -- Fold the assertions per-field into a single conjunct.
-      let assertion = foldl' (mrgLiftA2 (.&&)) (pure true) assertions
-
-      -- TODO: Maybe this should go somewhere else? Is there not a standard
-      -- function for this?
-      let implies x y = symNot x .|| y
-
-      -- If the tags match, then the fields should also match.
-      pure $ mrgLiftA2 implies conditional assertion
-
-    -- Ensure the tags are actually equal and valid.
-    eqTag <- evalEq (accessTag @ws lhs) (accessTag rhs)
-
-    -- Merge the branches as a large if-then-else.
-    pure $ foldl' (mrgLiftA2 (.&&)) eqTag branches
-  (Cast' lco lhs, Cast' rco rhs) -> do
-    unless (lco `eqCoercion` rco) $ throwError IllTyped
-    assertEq lhs rhs
-
-  (Fun lty lhs, Fun rty rhs) -> do
-    unless (lty `eqType` rty) $ throwError IllTyped
-    arg <- freshValue lty
-    lhs' <- lhs arg
-    rhs' <- rhs arg
-    assertEq lhs' rhs'
-
-  (Ty lhs, Ty rhs) -> pure . pure . con $ lhs `eqType` rhs
-  (Co lhs, Co rhs) -> pure . pure . con $ lhs `eqCoercion` rhs
-  _ -> throwError IllTyped
-
--- FIXME: We should restrict ADT tags to actually be in range of their tag here!
+-- TODO: We have a function to create a fresh typed value now, together with
+-- types attached to function values. We should be able to saturate a value
+-- without being given its type separately.
 symbolicBndrs
   :: forall m ws
    . MonadEval m
