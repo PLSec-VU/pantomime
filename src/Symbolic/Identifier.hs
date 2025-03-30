@@ -35,6 +35,7 @@ import Grisette.Internal.Unified.EvalModeTag (EvalModeTag(..))
 -- functions. We refer to this as a 'View'.
 type Ident mode = GetWordN mode 64
 
+-- | A Constraint alias that captures interpretations on an identifier.
 type Interpretable t = Solvable (Ident C --> ConType t) (Ident S -~> t)
 
 -- | Interpret an identifier.

@@ -63,7 +63,10 @@ import Symbolic.ADT
 import Symbolic.Identifier
 import Symbolic.MonadEval
 import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim)
-import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Core.TyCo.Rep (scaledThing, Coercion (..))
+import GHC.Core.Type (substTy)
+import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
+import GHC.Core.Coercion.Opt
 
 -- TODO: I feel like we don't really need this. It is literally only passed to
 -- the 'applyULam' function.
@@ -226,41 +229,45 @@ applyULam (ULam argTy resTy ident) = \case
     let innerTy = coercionLKind co
     applyULam (ULam innerTy resTy ident) value
 
-  -- TODO: Implement this!
-  -- FIXME: Should we substitute a type variable into the result type? I think
-  -- we really should!!!
-  Fun _innerArgTy _fun -> do
-    -- FIXME: This check doesn't make sense. We want to ensure that the entire
-    -- function has the same type as the ULam argument. Or at the very least,
-    -- that the ULam expects a function whose type matches that of the given
-    -- Fun.
+  fun@(Fun innerArgTy _) -> do
     -- Ensure that the given value argument (which is itself a function) matches
     -- the expected argument of the function. Since a value Fun only carries its
     -- input type, we just check whether this matches.
-    -- (_, _, innerArgTy', _) <- whyFail IllTyped $ splitFunTy_maybe argTy
-    -- unless (innerArgTy `eqType` innerArgTy') $ throwError IllTyped
+    (_, _, innerArgTy', _) <- whyFail IllTyped $ splitFunTy_maybe argTy
+    unless (innerArgTy `eqType` innerArgTy') $ throwError IllTyped
 
-    -- arg <- freshValue @m @ws argTy
-    -- _assumption <- strongEq (Fun innerArgTy fun) arg
-    -- TODO: This should create a typed value for the argument. Then do an
-    -- equivalence assumption where the arg should be equal to the fun. After
-    -- we should compose the symbolic function application with the identifier
-    -- for the function.
-    --
-    -- Now I'm unsure what exactly to return here. I would like to apply the
-    -- identifier in 'arg' to form something of the following form:
-    --
-    -- let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
-    --     untyped = do
-    --       let apply = sym name :: Ident S -~> Ident S -~> t
-    --       liftApply apply ident funIdent
+    -- First, create an identifier that represents the function argument.
+    idx <- freshIdx
+    let argIdent :: forall t. Solvable (ConType t) t => RuntimeValue S t
+        argIdent = pure . sym $ indexed "!FUN" idx
 
-    -- typedValue untyped resTy
-    --
-    -- But how do I get the funIdent. It should somehow be extracted from the
-    -- 'arg' no?
+    -- Then we get an equivalence statement between this fresh argument and the
+    -- one we actually received as input.
+    arg <- typedValue argIdent argTy
+    eq <- strongEq arg fun
 
-    throwError UnsupportedExpr
+    -- Now, we can use the fresh identifier as function argument for the final
+    -- value. Note that we are required to do it in this roundabout way, as
+    -- function do not always carry an identifier (and it is in general not
+    -- extractable).
+    let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
+        untyped = do
+          let apply = sym name :: Ident S -~> Ident S -~> t
+          liftApply apply ident argIdent
+
+    -- The actual result of the computation, assuming the equivalence of the
+    -- input and the fresh identifier.
+    assume eq <$> typedValue untyped resTy
+
+  Poly ty poly -> do
+    guardType ty
+
+    let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
+        untyped = do
+          let apply = sym name :: Ident S -~> Ident S -~> t
+          liftApply apply ident poly
+
+    typedValue untyped resTy
 
   _ -> throwError UnsupportedExpr
   where
@@ -276,10 +283,13 @@ applyULam (ULam argTy resTy ident) = \case
 -- accurately what values n should range over are exactly.
 data Value m ws where
   Primitive :: Primitive ws -> Value m ws
+  Poly :: Type -> RuntimeValue S (Ident S) -> Value m ws
   Data :: ADT S -> Value m ws
   -- TODO: I don't really like the prime on the name of Cast here. Maybe we
   -- could go for some other name? Perhaps just Newtype, as that's pretty much
-  -- what we wrap in there anyway.
+  -- what we wrap in there anyway. The alternative would be to just prefix all
+  -- options with something like 'V'. Then we can also use VType instead of Ty,
+  -- VLam instead of Fun, etc.
   Cast' :: Coercion -> Value m ws -> Value m ws
   Fun :: Kind  -> (Value m ws -> m (Value m ws)) -> Value m ws
   Ty :: Type -> Value m ws
@@ -288,15 +298,20 @@ data Value m ws where
 instance KnownWordSize ws => Outputable (Value m ws) where
   ppr = \case
     Primitive prim -> ppr prim
-    Data adt@(ADT _ _ val) -> ppr (adtType adt) <+> "=>" <+> text (show val)
-    Cast' co val -> ppr co <+> "=>" <+> ppr val
-    Fun argTy _ -> ppr argTy <+> "-> ? => ?"
+    Poly ty _ -> ppr ty
+    Data adt -> ppr (adtType adt)
+    Cast' co val -> ppr val <+> "<->" <+> ppr (coercionKindRole co)
+    Fun argTy _ -> ppr argTy <+> "-> ?"
     Ty ty -> text "@" <+> ppr ty
     Co co -> ppr co
 
 instance (MonadEval m, KnownWordSize ws) => StrongEq m (Value m ws) where
   strongEq = curry $ \case
     (Primitive lhs, Primitive rhs) -> strongEq lhs rhs
+    (Poly lty lhs, Poly rty rhs) -> do
+      unless (lty `eqType` rty) $ throwError IllTyped
+      strongEq lhs rhs
+
     (Data lhs, Data rhs) -> strongEq lhs rhs
     (Cast' lco lhs, Cast' rco rhs) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
@@ -315,13 +330,10 @@ instance (MonadEval m, KnownWordSize ws) => StrongEq m (Value m ws) where
       rhs' <- rhs arg
       eq <- strongEq lhs' rhs'
 
+      -- FIXME: This equivalence we are building is absolutely terrible. It's
+      -- huge and capturates way too many variables that we do not require...
       typed <- valueSymbol @m @ws symbol lty
       let quantifier = buildSymbolSet typed
-      -- FIXME: The quantifier is escaping its definition. This is because the
-      -- quantifier is used in the guard, but the forall only applies to the
-      -- Right branch. It appears that leaking underconstraints the output.
-      -- How would I quantify the entire union? I'm not sure this is possible...
-      -- I'll have to think what the meaning is even of the quantification.
       pure $ forallSet quantifier eq
 
     (Ty lhs, Ty rhs) -> pure . con $ lhs `eqType` rhs
@@ -331,6 +343,9 @@ instance (MonadEval m, KnownWordSize ws) => StrongEq m (Value m ws) where
 instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
   strictIte cond = curry $ \case
     (Primitive lhs, Primitive rhs) -> Primitive <$> strictIte cond lhs rhs
+    (Poly lty lhs, Poly rty rhs) -> do
+      unless (lty `eqType` rty) $ throwError IllTyped
+      Poly lty <$> strictIte cond lhs rhs
     (Data lhs, Data rhs) -> Data <$> strictIte cond lhs rhs
     (Cast' lco lhs, Cast' rco rhs) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
@@ -349,6 +364,7 @@ instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
 instance (MonadEval m, KnownWordSize ws) => Assume (Value m ws) where
   assume cond = \case
     Primitive prim -> Primitive $ assume cond prim
+    Poly ty value -> Poly ty $ assume cond value
     Data adt -> Data $ assume cond adt
     Cast' co val -> Cast' co $ assume cond val
     Fun argTy fun -> do
@@ -382,13 +398,6 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (Value m ws) where
           lhs' <- inBranch lhs
           rhs' <- inBranch rhs
           pure $ lhs' .&& rhs'
-
-        -- let inBranch adt = adtIsDataCon @ws adt dataCon
-        -- conditional <- whyFail IllTyped $ do
-        --   lhs' <- inBranch lhs
-        --   rhs' <- inBranch rhs
-        --   pure $ mrgLiftA2 (.&&) lhs' rhs'
-        -- -- let inBranch adt = adtIsDataCon @ws adt dataCon
 
         -- Gather the field names.
         let names = dataConAccessorNames dataCon
@@ -424,23 +433,61 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (Value m ws) where
       rhs' <- rhs arg
       weakEq lhs' rhs'
 
+    (Poly lty lhs, Poly rty rhs) -> do
+      unless (lty `eqType` rty) $ throwError IllTyped
+      weakEq lhs rhs
+
     -- The remaining cases do not distinguish between weak and strong equivalence.
     -- TODO: I think I want to individually implement weakEq for Primitive and
     -- call that instead. That seems better to me!
+    -- FIXME: I don't actually think the strongEq is the same as weakEq for
+    -- primitives!
     (lhs, rhs) -> strongEq lhs rhs
 
 -- | Create a cast.
 --
 -- Merges nested casts. This should always be preferred over manually creating
 -- a cast.
-mkCast' :: Coercion -> Value m n -> Value m n
-mkCast' co = \case
-  Cast' co' value -> go (mkTransCo co' co) value mkCast'
-  value -> go co value Cast'
+mkCast'
+  -- :: MonadError EvalError m
+  :: MonadEval m
+  => KnownWordSize ws
+  => Coercion
+  -> Value m ws
+  -> m (Value m ws)
+mkCast' c v = case (optCoercion' c, v) of
+  (co@ForAllCo { fco_kind }, Fun argTy fun) -> do
+    let argTy' = coercionRKind fco_kind
+    unless (argTy `eqType` coercionLKind fco_kind) $ throwError IllTyped
+
+    pure . Fun argTy' $ \case
+      Ty arg -> do
+        let arg' = mkCastTy arg $ SymCo fco_kind
+        result <- fun $ Ty arg'
+        let resCo = mkInstCo co $ mkNomReflCo arg'
+        mkCast' resCo result
+      _ -> throwError IllTyped
+
+  (FunCo { fco_arg, fco_res }, Fun argTy fun) -> do
+    let argTy' = coercionRKind fco_arg
+    unless (argTy `eqType` coercionLKind fco_arg) $ throwError IllTyped
+
+    pure . Fun argTy' $ \arg -> do
+      arg' <- mkCast' (SymCo fco_arg) arg
+      result <- fun arg'
+      mkCast' fco_res result
+
+  (co, Cast' co' value) -> do
+    -- TODO: Check whether the casts actually can be transitively applied.
+    let trans = mkTransCo co' co
+    mkCast' trans value
+
+  -- TODO: Check whether the coercion actually fits the value.
+  (co, value)
+    | isReflexiveCo co -> pure value
+    | otherwise -> pure $ Cast' co value
   where
-    go co' value cont
-      | isReflexiveCo co' = value
-      | otherwise = cont co' value
+    optCoercion' = optCoercion (OptCoercionOpts True) emptySubst
 
 -- | Constraints for creating the symbolic values we require.
 --
@@ -478,21 +525,51 @@ typedValue
   -> m (Value m ws)
 typedValue value ty
   | Right prim <- typedPrimitive value ty = pure $ Primitive prim
+
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
   , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
     value' <- typedValue value ty'
     let co' = mkSymCo co
-    pure $ mkCast' co' value'
+    mkCast' co' value'
+
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
   , isDataTyCon tyCon = do
     let adt = mkADT @ws tyCon tys value
     pure $ Data adt
+
   | Just (_, _, argTy, resTy) <- splitFunTy_maybe ty = do
     -- TODO: Get rid of the ULam, we just use it for this one function call.
     let x = ULam @S argTy resTy value
     pure . Fun argTy $ applyULam x
 
-  | otherwise = throwError UnsupportedExpr
+  | Just (tyCoVar, resTy) <- splitForAllTyCoVar_maybe ty = do
+    let vars = shallowTyCoVarsOfType ty
+    let subst = mkEmptySubst $ InScope vars
+
+    let argKind = tyVarKind tyCoVar
+    -- TODO: I guess we should make sure we actually get a correctly kinded type
+    -- or coercion argument.
+    pure . Fun argKind $ \case
+      Ty arg -> do
+        let subst' = extendTvSubst subst tyCoVar arg
+        let resTy' = substTy subst' resTy
+        typedValue value resTy'
+
+      Co arg -> do
+        let subst' = extendCvSubst subst tyCoVar arg
+        let resTy' = substTy subst' resTy
+        typedValue value resTy'
+
+      _ -> throwError IllTyped
+
+  -- TODO: Is this correct? My guess is that any type variable should do.
+  | isTypeLikeKind ty = pure $ Ty alphaTy
+
+  | isTyVarTy ty = pure $ Poly ty value
+  | Just _ <- splitTyConApp_maybe ty = pure $ Poly ty value
+
+  | otherwise = do
+    throwError UnsupportedExpr
 
 -- TODO: I really should elaborate on this (and why we need it).
 valueSymbol
@@ -510,6 +587,8 @@ valueSymbol symbol ty
   | Just (tyCon, _) <- tcSplitTyConApp_maybe ty
   , isDataTyCon tyCon = symbol' @(Ident C)
   | Just (_, _, _, _) <- splitFunTy_maybe ty = symbol' @(Ident C)
+  | isTyVarTy ty = symbol' @(Ident C)
+  | Just _ <- splitTyConApp_maybe ty = symbol' @(Ident C)
   | otherwise = throwError UnsupportedExpr
   where
     symbol' :: forall t. SupportedNonFuncPrim t => m SomeTypedConstantSymbol
@@ -559,16 +638,16 @@ accessField adt name = typedValue $ untypedField adt name
 -- Use the accumulation function to pass data to the root value of the function.
 -- We do it in this way as we cannot just pass values into a Haskell lambda.
 nArity
-  :: forall m t n a b
+  :: forall m t ws a b
    . Monad m
   => Foldable t
-  => (b -> m (Value m n))
+  => (b -> m (Value m ws))
   -- ^ Root value and what we accumulate.
   -> t (a, Kind)
   -- ^ What we fold over. Decides the arity of the function.
-  -> (b -> a -> Value m n -> m b)
+  -> (b -> a -> Value m ws -> m b)
   -- ^ Accumulation function
-  -> m (b -> m (Value m n))
+  -> m (b -> m (Value m ws))
 nArity acc xs f = foldrM' acc xs $ \(x, argTy) acc' -> do
   pure $ \y -> pure . Fun argTy $ \arg -> do
     res <- f y x arg
@@ -579,22 +658,22 @@ nArity acc xs f = foldrM' acc xs $ \(x, argTy) acc' -> do
 -- This will fail if the first value is not a function, or if the inner function
 -- throws upon receiving the argument.
 applyValue
-  :: MonadError EvalError m
-  => Value m n
-  -> Value m n
-  -> m (Value m n)
-applyValue fun arg = case fun of
-  Fun _ fun' -> fun' arg
+  :: MonadEval m
+  => Value m ws
+  -> Value m ws
+  -> m (Value m ws)
+applyValue = curry $ \case
+  (Fun _ fun, arg) -> fun arg
   _ -> throwError IllTyped
 
 -- | Apply the given arguments.
 --
 -- A foldM over a call of 'applyValue'.
 applyValues
-  :: MonadError EvalError m
-  => Value m n
-  -> [Value m n]
-  -> m (Value m n)
+  :: MonadEval m
+  => Value m ws
+  -> [Value m ws]
+  -> m (Value m ws)
 applyValues = foldM applyValue
 
 -- | Primitive values supported by the symbolic solver.
@@ -625,23 +704,18 @@ data Primitive (ws :: PlatformWordSize) where
 
 instance KnownWordSize ws => Outputable (Primitive ws) where
   ppr = \case
-    Int val -> text "Int# =>" <+> pprRuntime val
-    Int8 val -> text "Int8# =>" <+> pprRuntime val
-    Int16 val -> text "Int16# =>" <+> pprRuntime val
-    Int32 val -> text "Int32# =>" <+> pprRuntime val
-    Int64 val -> text "Int64# =>" <+> pprRuntime val
-    Word val -> text "Word# =>" <+> pprRuntime val
-    Word8 val -> text "Word8# =>" <+> pprRuntime val
-    Word16 val -> text "Word16# =>" <+> pprRuntime val
-    Word32 val -> text "Word32# =>" <+> pprRuntime val
-    Word64 val -> text "Word64# =>" <+> pprRuntime val
-    Float val -> text "Float# =>" <+> pprRuntime val
-    Double val -> text "Double# =>" <+> pprRuntime val
-    where
-      -- pprRuntime :: PPrint a => RuntimeValue S a -> SDoc
-      -- pprRuntime = text . show . pformatText . unRuntimeValue
-      pprRuntime :: Show a => RuntimeValue S a -> SDoc
-      pprRuntime = text . show 
+    Int _ -> "Int#"
+    Int8 _ -> "Int8#"
+    Int16 _ -> "Int16#"
+    Int32 _ -> "Int32#"
+    Int64 _ -> "Int64#"
+    Word _ -> "Word#"
+    Word8 _ -> "Word8#"
+    Word16 _ -> "Word16#"
+    Word32 _ -> "Word32#"
+    Word64 _ -> "Word64#"
+    Float _ -> "Float#"
+    Double _ -> "Double#"
 
 instance (MonadEval m, KnownWordSize ws) => StrongEq m (Primitive ws) where
   strongEq = curry $ \case

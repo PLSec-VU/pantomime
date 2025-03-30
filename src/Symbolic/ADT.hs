@@ -283,6 +283,9 @@ dataConAccessorNames :: DataCon -> [String]
 dataConAccessorNames dataCon = do
   -- TODO: Note sure if we want to emit fields with pprUnsafe. I think we just
   -- want the plain old name as typed in Haskell.
+  -- TODO: It is actually complete nonsense to want to emit these named fields
+  -- like this for records. Only the solver sees these, so just numbered fields
+  -- will do this just fine.
   let names = showPprUnsafe . flSelector <$> dataConFieldLabels dataCon
   let arity = dataConRepArity dataCon
   if

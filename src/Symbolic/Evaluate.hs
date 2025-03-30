@@ -1,5 +1,3 @@
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
@@ -21,9 +19,9 @@ module Symbolic.Evaluate
 
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
-import GHC.Core.TyCo.Subst (substTy)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
+import GHC.MonadCore
 
 import Control.Monad (forM)
 import Control.Monad.Except
@@ -31,7 +29,7 @@ import Control.Monad.Except
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
 
-import Grisette hiding (Rec)
+import Grisette hiding (Rec, (<+>))
 import Grisette.Unified (EvalModeTag (..))
 
 import Symbolic.Util
@@ -73,12 +71,19 @@ evaluate env = \case
   -- TODO: Add support for CoreUnfolding and DFunUnfolding.
   Var var | Just op <- isPrimOpId_maybe var -> evalPrimOp op
   Var var | Just dataCon <- isDataConId_maybe var -> evalDataCon dataCon
-  Var var -> lookupEnv env var
+  Var var -> lookupIdEnv env var `catchError` \_ -> do
+    dbg $ "Unbound variable:" <+> ppr var $+$ "Using uninterpreted function."
+
+    let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
+        untyped = pure $ sym "hello"
+
+    let ty' = substTyEnv env $ varType var
+    typedValue untyped ty'
 
   Lit lit -> Primitive <$> evalLiteral lit
 
   Lam bndr body -> do
-    let argTy = varType bndr
+    let argTy = substTyEnv env $ varType bndr
     pure . Fun argTy $ \arg -> do
       -- TODO: I think it would be good to have a check here to ensure that the
       -- argument has the correct type.
@@ -102,31 +107,35 @@ evaluate env = \case
   Let (Rec _) _ -> throwError UnsupportedExpr
 
   Case scrut bndr ty alts -> do
+    -- Evaluate the scrutinee and extend the environment using the case binder.
     scrut' <- evaluate env scrut
     env' <- extendEnv env bndr scrut'
 
+    -- Gather the constraints to run each alternative and their body.
     alts' <- forM alts $ evalAlt env' scrut'
 
-    invalid <- invalidValue ty
+    -- Get an Invalid as a default value.
+    let ty' = substTyEnv env ty
+    invalid <- invalidValue ty'
 
+    -- Fold the alternatives into a large if-then-else.
     foldM' invalid alts' $ \fl (cond, rhs) -> do
       strictIte cond rhs fl
 
   Cast expr co -> do
+    let co' = substCoEnv env co
     value <- evaluate env expr
-    pure $ mkCast' co value
+    mkCast' co' value
 
   -- Ticks do not affect evaluation, thus we can skip it.
   Tick _ expr -> evaluate env expr
 
   Type ty -> do
-    let subst = Subst emptyInScopeSet emptyVarEnv (tvSubst env) (cvSubst env)
-    let ty' = substTy subst ty
+    let ty' = substTyEnv env ty
     pure $ Ty ty'
 
   Coercion co -> do
-    let subst = Subst emptyInScopeSet emptyVarEnv (tvSubst env) (cvSubst env)
-    let co' = substCo subst co
+    let co' = substCoEnv env co
     pure $ Co co'
 
 -- | Return the condition to run this alternative and its symbolic rhs.
@@ -159,9 +168,10 @@ evalAlt env scrut = \case
     -- arguments? I'll have to look into this. It's kind of important to not
     -- mess this up!
     let names = dataConAccessorNames dataCon
-    let accessors = zip names bndrs
-    fields <- forM accessors $ \(name, bndr) -> do
-      accessField scrut' name (varType bndr)
+    let tys = substTyEnv env . varType <$> bndrs
+    let accessors = zip names tys
+    fields <- forM accessors $ \(name, ty) -> do
+      accessField scrut' name ty
 
     -- Extend the environment with field accessors for each binder.
     env' <- extendManyEnv env $ zip bndrs fields
@@ -283,8 +293,6 @@ evalDataConInst dataCon tys = do
   -- actual arguments.
   final <- nArity root fields $ \cond field arg -> do
     -- Constraint the field of the ADT to be equivalent to the argument.
-    -- TODO: This is a (partial) assumption. Change it accordingly with the new
-    -- interface.
     extra <- strongEq field arg
     pure $ extra .&& cond
 
@@ -521,12 +529,12 @@ evalPrimOp = \case
   IntNegOp -> unary $ negate @(SymInt ws)
   IntAddCOp -> throwError UnsupportedExpr
   IntSubCOp -> throwError UnsupportedExpr
-  IntGtOp -> binary $ symGt @(SymWord ws)
-  IntGeOp -> binary $ symGe @(SymWord ws)
-  IntEqOp -> binary $ symEq @(SymWord ws)
-  IntNeOp -> binary $ symNe @(SymWord ws)
-  IntLtOp -> binary $ symLt @(SymWord ws)
-  IntLeOp -> binary $ symLe @(SymWord ws)
+  IntGtOp -> binary $ symGt @(SymInt ws)
+  IntGeOp -> binary $ symGe @(SymInt ws)
+  IntEqOp -> binary $ symEq @(SymInt ws)
+  IntNeOp -> binary $ symNe @(SymInt ws)
+  IntLtOp -> binary $ symLt @(SymInt ws)
+  IntLeOp -> binary $ symLe @(SymInt ws)
   ChrOp -> throwError UnsupportedExpr
   IntToWordOp -> unary $ toUnsigned @(SymWord ws) @(SymInt ws)
   IntToFloatOp -> throwError UnsupportedExpr

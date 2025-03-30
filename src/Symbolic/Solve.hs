@@ -100,7 +100,7 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
   unless (exprType lhs `eqType` exprType rhs) $ do
     throwError $ EvalError IllTyped
 
-  (bndrs, lres, rres, eq) <- modifyError EvalError $ do
+  (bndrs, lres, rres, neq) <- modifyError EvalError $ do
     bndrs <- symbolicBndrs $ exprType lhs
 
     let saturate expr = do
@@ -120,7 +120,7 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
           }
         }
 
-  result <- liftCore . liftIO $ solve z3' eq
+  result <- liftCore . liftIO $ solve z3' neq
 
   case result of
     Right model -> do

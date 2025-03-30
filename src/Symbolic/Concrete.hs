@@ -183,6 +183,8 @@ concretise model = \case
     let body = Unknown
     pure $ Function symbol argTy body
 
+  Poly _ty _ident -> pure $ Unknown
+
   -- TODO: There should be a better error to emit than this no? Maybe we
   -- should make a new one... Maybe we should make an error for concrete lookup
   -- failures. Alternatively, I guess we could actually just return the type as
