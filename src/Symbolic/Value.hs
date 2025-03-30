@@ -36,12 +36,17 @@ module Symbolic.Value
 
 import GHC.Plugins hiding (empty)
 import GHC.Core.TyCo.Compare (eqType)
+import GHC.Core.TyCo.Rep (scaledThing, Coercion (..))
+import GHC.Core.Type (substTy)
+import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
+import GHC.Core.Coercion.Opt
 import GHC.Builtin.Types.Prim
 import GHC.Platform (PlatformWordSize)
 
 import Grisette.SymPrim
 import Grisette.Unified (EvalModeTag (..))
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
+import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim)
 import Grisette
   ( Solvable (..)
   , Mergeable
@@ -62,11 +67,6 @@ import Symbolic.Runtime
 import Symbolic.ADT
 import Symbolic.Identifier
 import Symbolic.MonadEval
-import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim)
-import GHC.Core.TyCo.Rep (scaledThing, Coercion (..))
-import GHC.Core.Type (substTy)
-import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
-import GHC.Core.Coercion.Opt
 
 -- TODO: I feel like we don't really need this. It is literally only passed to
 -- the 'applyULam' function.
@@ -318,7 +318,7 @@ instance (MonadEval m, KnownWordSize ws) => StrongEq m (Value m ws) where
       strongEq lhs rhs
 
     (Fun lty lhs, Fun rty rhs) -> do
-      -- TODO: This thing is very messy!
+      -- TODO: Comment this thing!
       unless (lty `eqType` rty) $ throwError IllTyped
       idx <- freshIdx
       let symbol = indexed "!qarg" idx
@@ -493,8 +493,10 @@ mkCast' c v = case (optCoercion' c, v) of
 --
 -- These constraints are picked such that we can avoid overlapping instances
 -- whilst allowing all values we require to be constructed.
--- TODO: This once required Hashable as an exposed package. We should remove it
--- from the package list, as we do not use it.
+-- TODO: Should we place the interpretable constraints into the
+-- Identifier file? Then we can use interpretWith in places where we currently
+-- are not. We have a bit of code duplication in some places rn, so maybe that
+-- would resolve some of that!
 type Symbolisable t ws =
   ( Mergeable t
   , LinkedRep (ConType t) t

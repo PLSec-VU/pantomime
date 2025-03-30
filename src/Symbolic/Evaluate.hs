@@ -75,7 +75,7 @@ evaluate env = \case
     dbg $ "Unbound variable:" <+> ppr var $+$ "Using uninterpreted function."
 
     let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
-        untyped = pure $ sym "hello"
+        untyped = pure $ sym "unbound"
 
     let ty' = substTyEnv env $ varType var
     typedValue untyped ty'
@@ -96,9 +96,7 @@ evaluate env = \case
     applyValue fun' arg'
 
   Let (NonRec bndr arg) body -> do
-    arg' <- evaluate env arg
-    env' <- extendEnv env bndr arg'
-    evaluate env' body
+    evaluate env $ Lam bndr body `App` arg
 
   -- Perhaps we could handle these by allowing a Tick annotation to specify an
   -- invariant. Otherwise though, we don't really care about recursive

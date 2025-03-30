@@ -110,13 +110,13 @@ deriving via SymIntN (WordBits ws)
   instance (KnownWordSize ws, KnownPos n)
   => SymFromIntegral (SymWordN n) (SymInt ws)
 
-deriving via SymIntN n
-  instance KnownWordSize ws
-  => SymFromIntegral (SymInt ws) (SymIntN n)
+instance (KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (SymInt ws) (SymIntN n) where
+  symFromIntegral = symFromIntegral . unSymInt
 
-deriving via SymWordN n
-  instance KnownWordSize ws
-  => SymFromIntegral (SymInt ws) (SymWordN n)
+instance (KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (SymInt ws) (SymWordN n) where
+  symFromIntegral = symFromIntegral . unSymInt
 
 deriving via SymIntN (WordBits ws)
   instance KnownWordSize ws
@@ -166,13 +166,13 @@ deriving via SymWordN (WordBits ws)
   instance (KnownWordSize ws, KnownPos n)
   => SymFromIntegral (SymWordN n) (SymWord ws)
 
-deriving via SymIntN n
-  instance KnownWordSize ws
-  => SymFromIntegral (SymWord ws) (SymIntN n)
+instance (KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (SymWord ws) (SymIntN n) where
+  symFromIntegral = symFromIntegral . unSymWord
 
-deriving via SymWordN n
-  instance KnownWordSize ws
-  => SymFromIntegral (SymWord ws) (SymWordN n)
+instance (KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (SymWord ws) (SymWordN n) where
+  symFromIntegral = symFromIntegral . unSymWord
 
 deriving via SymWordN (WordBits ws)
   instance KnownWordSize ws
@@ -220,12 +220,11 @@ symShiftRA
   -> SymInt ws
   -> bv
 symShiftRA val (SymInt idx) = do
-  let idx' = sizedBVResize idx :: SymIntN (BitSize bv)
-  let idx'' = symFromIntegral idx'
+  let idx' = symFromIntegral idx
 
   let val' = symFromIntegral val :: SymIntN (BitSize bv)
   -- TODO: Same thing as with 'symShiftL' (i.e. non-total function)
-  let result = symShiftNegated val' idx''
+  let result = symShiftNegated val' idx'
   symFromIntegral result
 
 -- | Symbolic Shift Right Logical.
@@ -242,12 +241,11 @@ symShiftRL
   -> SymInt ws
   -> bv
 symShiftRL val (SymInt idx) = do
-  let idx' = sizedBVResize idx :: SymIntN (BitSize bv)
-  let idx'' = symFromIntegral idx'
+  let idx' = symFromIntegral idx
 
   let val' = symFromIntegral val :: SymWordN (BitSize bv)
   -- TODO: Same thing as with 'symShiftL' (i.e. non-total function)
-  let result = symShiftNegated val' idx''
+  let result = symShiftNegated val' idx'
   symFromIntegral result
 
 -- | Symbolic Shift Left
