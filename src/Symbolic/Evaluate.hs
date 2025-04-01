@@ -28,6 +28,7 @@ import Control.Monad.Except
 
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
+import Data.List ((!?))
 
 import Grisette hiding (Rec, (<+>))
 import Grisette.Unified (EvalModeTag (..))
@@ -35,29 +36,9 @@ import Grisette.Unified (EvalModeTag (..))
 import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Runtime
-import Symbolic.ADT
 import Symbolic.Value
 import Symbolic.Environment
 import Symbolic.MonadEval
-
--- | Get a fresh ADT identifier.
-freshADT
-  :: forall m ws
-   . MonadEval m
-  => KnownWordSize ws
-  => Type
-  -> m (ADT S)
-freshADT ty = do
-  (tyCon, tys) <- whyFail IllTyped $ splitTyConApp_maybe ty
-
-  idx <- freshIdx
-
-  -- Create a fresh ADT.
-  let symbol = indexed "!ADT" idx
-  let ident = pure $ sym symbol
-
-  -- Return fresh ADT and the next index.
-  pure $ mkADT @ws tyCon tys ident
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate
@@ -155,21 +136,15 @@ evalAlt env scrut = \case
       Data adt -> pure adt
       _ -> throwError IllTyped
 
+    -- TODO: We should add some functions to access an ADT conveniently instead
+    -- of like this!
+    let tag = fromIntegral $ dataConTagZ dataCon
+
     -- Whether the tag of this ADT is equivalent to the DataCon.
-    conditional <- whyFail IllTyped $ adtIsDataCon @ws scrut' dataCon
+    let conditional = (.== con tag) <$> adtTag scrut'
 
     -- Gather field accessors for all binders.
-    -- FIXME: I think the accessor names are returned in the same order as
-    -- dataConOrigArgTys. I'm not sure if this actually matches the types we
-    -- get here. I think they may be reordered. We should probably use
-    -- dataConFieldType_maybe to extract the matching type for each of the
-    -- arguments? I'll have to look into this. It's kind of important to not
-    -- mess this up!
-    let names = dataConAccessorNames dataCon
-    let tys = substTyEnv env . varType <$> bndrs
-    let accessors = zip names tys
-    fields <- forM accessors $ \(name, ty) -> do
-      accessField scrut' name ty
+    fields <- whyFail IllTyped $ adtFields scrut' !? fromIntegral tag
 
     -- Extend the environment with field accessors for each binder.
     env' <- extendManyEnv env $ zip bndrs fields
@@ -265,41 +240,32 @@ evalDataConInst
   -- ^ The types with which we will instantiate universal quantifiers of the
   -- DataCon.
   -> m (Value m ws)
-evalDataConInst dataCon tys = do
-  -- Create a fresh identifier for the ADT.
-  let ty = mkTyConApp (dataConTyCon dataCon) tys
-  adt <- freshADT @m @ws ty
-
-  -- Gather the accessor names and instantiate the universal types to create the
-  -- field accessors.
-  let names = dataConAccessorNames dataCon
-  let tys' = scaledThing <$> dataConInstArgTys dataCon tys
-  let accessors = zip names tys'
-
-  -- Gather the fields of the ADT.
-  fields <- forM accessors $ \(name, fty) -> do
-    field <- accessField adt name fty
-    pure (field, fty)
+evalDataConInst dataCon tyArgs = do
+  -- Gather the types of the binders.
+  let bndrTys = ((),) . scaledThing <$> dataConInstArgTys dataCon tyArgs
 
   -- The root is an ADT that assumes the given conditional holds.
-  let root cond = do
-        let adt' = assume cond adt
-        pure $ Data adt'
+  let root fields = do
+        let adt = ADT'
+              { adtTyCon = dataConTyCon dataCon
+              , adtTyArgs = tyArgs
+              -- TODO: This tag conversion should probably get its own function.
+              , adtTag = pure $ fromIntegral (dataConTagZ dataCon)
+              -- TODO: I should populate the other fields with fresh values.
+              -- Invalid ones could also work. I feel like I could even have
+              -- them as 'undefined'.
+              , adtFields = [fields]
+              }
+        pure $ Data adt
 
-  -- Accumulate a function that takes the fields as arguments. We pass a
-  -- conditional to the root that states the field accessors are equal to the
-  -- actual arguments.
-  final <- nArity root fields $ \cond field arg -> do
-    -- Constraint the field of the ADT to be equivalent to the argument.
-    extra <- strongEq field arg
-    pure $ extra .&& cond
+  -- Accumulate a function that passes its arguments to the root.
+  final <- nArity root bndrTys $ \fields _ arg -> do
+    -- Constrain the field of the ADT to be equivalent to the argument.
+    -- TODO: I think we should change the nArity function no? We can just do
+    -- with only returning per element instead of accumulating like this.
+    pure $ fields <> [arg]
 
-  -- As a final constraint, the ADT tag should match the given DataCon.
-  match <- whyFail IllTyped $ adtIsDataCon @ws adt dataCon
-  -- TODO: Not sure if this is the cleanest way to make the assumption. Perhaps
-  -- we should just let adtIsDataCon do the .== pure true itself. I'll have to
-  -- check the callsites.
-  final $ match .== pure true
+  final []
 
 -- | Get the value corresponding to a literal.
 evalLiteral
@@ -569,18 +535,14 @@ evalPrimOp = \case
   TagToEnumOp -> pure . Fun (tyVarKind alphaTyVar) $ \case
     Ty ty -> pure . Fun intPrimTy $ \case
       Primitive (Int tag) -> do
-        -- Gather a new adt and its tag.
-        adt <- freshADT @m @ws ty
-        let Tag _ tag' = accessTag @ws adt
+        -- TODO: Comment this!
+        value <- freshValue @m @ws ty
+        adt <- case value of
+          Data adt -> pure $ adt { adtTag = tag }
+          _ -> throwError IllTyped
 
-        -- Assume that the fresh adt tag is equivalent to the function argument.
-        -- TODO: I guess this assumes that the new ADT is always valid? I'll
-        -- have to ensure this is sound!
-        let conditional = tag .== tag'
-        let adt' = assume conditional adt
-
-        -- Return the new ADT with assumption.
-        pure $ Data adt'
+        -- Return the new ADT with matching tag.
+        pure $ Data adt
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError UnsupportedExpr

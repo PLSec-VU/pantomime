@@ -22,13 +22,15 @@ import Prelude hiding ((<>))
 
 import GHC.Plugins
 import GHC.Core.TyCo.Rep (scaledThing)
-import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy, eqType)
-import GHC.Core.Unify (tcMatchTy)
+import GHC.Tc.Utils.TcType (eqType)
 
 import Grisette (ToCon (..), EvalSym (..), evalSymToCon, indexed, Symbol)
 import Grisette.Unified (EvalModeTag (..))
 import Grisette.SymPrim
 import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..), SupportedPrim (..))
+
+import Data.List ((!?))
+import Data.Foldable (find)
 
 import Control.Monad.Identity (Identity (..))
 import Control.Monad.Except (MonadError (..), runExceptT)
@@ -37,7 +39,6 @@ import Control.Monad (forM)
 import Symbolic.WordSize
 import Symbolic.Value
 import Symbolic.Runtime
-import Symbolic.ADT
 import Symbolic.Util
 import Symbolic.Evaluate
 import Symbolic.MonadEval
@@ -128,29 +129,22 @@ concretise model = \case
   Primitive prim -> pure $ concretePrimitive model prim
   -- TODO: Clean this horrible piece of code up!
   Data adt -> do
-    let stag = accessTag @ws adt
-    let ctag = evalSymToCon @(Tag S ws) @(Tag C ws) model stag
+    let tag = evalSymToCon @_ @(RuntimeValue C (IntN (WordBits ws))) model $ adtTag adt
     let runRuntime = runIdentity . runExceptT . unRuntimeValue
+    case runRuntime $ tag of
+      Right tag'
+        | Just fields <- adtFields adt !? fromIntegral tag' -> do
+          -- TODO: this datacon lookup should get its own function!
+          dataCons <- whyFail IllTyped $ tyConDataCons_maybe (adtTyCon adt)
+          let cmp = (tag' ==) . fromIntegral . dataConTagZ
+          dataCon <- whyFail IllTyped $ find cmp dataCons
 
-    case runRuntime $ tagToDataCon ctag of
-      Right dataCon -> do
-          let (_, _, funTy) = tcSplitSigmaTy $ dataConRepType dataCon
-          let (argTys, resTy) = splitFunTys funTy
+          fields' <- forM fields $ concretise model
 
-          -- We try to match the result type of the constructor to the case binder.
-          -- Really, this should never fail.
-          -- TODO: We can just get the type of the argument via the dataCon and
-          -- the type arguments stored in the ADT. This is very roundabout.
-          subst <- whyFail IllTyped $ tcMatchTy resTy (adtType adt)
-          let argTys' = substTy subst . scaledThing <$> argTys
-          let names = dataConAccessorNames dataCon
-          let accessors = zip names argTys'
-          fields <- forM accessors $ \(name, ty') -> do
-            field <- accessField @m @ws adt name ty'
-            concretise model field
-
-          pure $ Record dataCon fields
-
+          pure $ Record dataCon fields'
+        
+      -- TODO: This shouldn't happen!
+      Right _ -> pure Unknown
       Left Invalid -> pure Unknown
       Left err -> pure $ Error err
 

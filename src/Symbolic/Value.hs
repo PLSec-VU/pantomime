@@ -18,17 +18,17 @@
 module Symbolic.Value
   ( Value (..)
   , mkCast'
-  , weakEq
 
   , typedValue
   , freshValue
   , invalidValue
-  , accessField
 
   , nArity
 
   , applyValue
   , applyValues
+
+  , ADT' (..)
 
   , Primitive (..)
   , typedPrimitive
@@ -56,7 +56,7 @@ import Grisette
   , SymEq (..)
   , SymbolSetRep (..)
   , indexed
-  , LogicalOp (..)
+  , LogicalOp (..), SymOrd (..), SimpleMergeable (..)
   )
 
 import Control.Monad (foldM, unless, forM)
@@ -65,17 +65,14 @@ import Control.Monad.Except (MonadError (..))
 import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Runtime
-import Symbolic.ADT
 import Symbolic.Identifier
 import Symbolic.MonadEval
 
--- TODO: Could we adjust n to be a DataKind of the actual word size data type
--- from GHC? To me that seems a lot cleaner, as it represents more
--- accurately what values n should range over are exactly.
+-- TODO: Add comment to what this data type is!
 data Value m ws where
   Primitive :: Primitive ws -> Value m ws
   Poly :: Type -> RuntimeValue S (Ident S) -> Value m ws
-  Data :: ADT S -> Value m ws
+  Data :: ADT' m ws -> Value m ws
   -- TODO: I don't really like the prime on the name of Cast here. Maybe we
   -- could go for some other name? Perhaps just Newtype, as that's pretty much
   -- what we wrap in there anyway. The alternative would be to just prefix all
@@ -90,7 +87,7 @@ instance KnownWordSize ws => Outputable (Value m ws) where
   ppr = \case
     Primitive prim -> ppr prim
     Poly ty _ -> ppr ty
-    Data adt -> ppr (adtType adt)
+    Data adt -> ppr adt
     Cast' co val -> ppr val <+> "<->" <+> ppr (coercionKindRole co)
     Fun argTy _ -> ppr argTy <+> "-> ?"
     Ty ty -> text "@" <+> ppr ty
@@ -103,7 +100,6 @@ instance (MonadEval m, KnownWordSize ws) => StrongEq m (Value m ws) where
       unless (lty `eqType` rty) $ throwError IllTyped
       strongEq lhs rhs
 
-    (Data lhs, Data rhs) -> strongEq lhs rhs
     (Cast' lco lhs, Cast' rco rhs) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
       strongEq lhs rhs
@@ -137,7 +133,19 @@ instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
     (Poly lty lhs, Poly rty rhs) -> do
       unless (lty `eqType` rty) $ throwError IllTyped
       Poly lty <$> strictIte cond lhs rhs
-    (Data lhs, Data rhs) -> Data <$> strictIte cond lhs rhs
+    (Data lhs, Data rhs) -> do
+      unless (adtType' lhs `eqType` adtType' rhs) $ throwError IllTyped
+
+      -- TODO: Make this nicer!
+      tag <- strictIte cond (adtTag lhs) (adtTag rhs)
+      let allPairs = uncurry zip <$> zip (adtFields lhs) (adtFields rhs)
+      fields' <- forM allPairs $ \pairs -> do
+        forM pairs $ uncurry (strictIte cond)
+      pure $ Data lhs
+        { adtTag = tag
+        , adtFields = fields'
+        }
+
     (Cast' lco lhs, Cast' rco rhs) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
       result <- strictIte cond lhs rhs
@@ -170,48 +178,22 @@ instance (MonadEval m, KnownWordSize ws) => Assume (Value m ws) where
 -- TODO: Explain why we distinguish between strong and weak equality.
 instance (MonadEval m, KnownWordSize ws) => WeakEq m (Value m ws) where
   weakEq = curry $ \case
+    -- TODO: Clean this up and comment it!
     (Data lhs, Data rhs) -> do
-      -- Ensure the equality is sound.
-      unless (lhs `eqTyADT` rhs) $ throwError IllTyped
+      unless (adtType' lhs `eqType` adtType' rhs) $ throwError IllTyped
+      tagEq <- weakEq (adtTag lhs) (adtTag rhs)
+      let pairs = uncurry zip <$> zip (adtFields lhs) (adtFields rhs)
+      fieldEq <- forM (zip [0..] pairs) $ \(tag, fields) -> do
+        eqs <- forM fields $ uncurry weakEq
+        let eqs' = foldl' (.&&) true eqs
+        isTag <- do
+          l <- weakEq (adtTag lhs) $ pure (con tag)
+          r <- weakEq (adtTag rhs) $ pure (con tag)
+          pure $ l .&& r
 
-      -- Gather type info.
-      let ADT tyCon tyArgs _ = lhs
-      let dataCons = tyConDataCons tyCon
+        pure $ symImplies isTag eqs'
 
-      -- Gather the branches for each DataCon this ADT could be. This is a pair of
-      -- conditional (i.e. the DataCon matches) and the inner assertion.
-      branches <- forM dataCons $ \dataCon -> do
-        -- Ensure that both ADTs match the current DataCon.
-        let inBranch adt = do
-              cond <- adtIsDataCon @ws adt dataCon
-              pure $ cond .== pure true
-        conditional <- whyFail IllTyped $ do
-          lhs' <- inBranch lhs
-          rhs' <- inBranch rhs
-          pure $ lhs' .&& rhs'
-
-        -- Gather the field names.
-        let names = dataConAccessorNames dataCon
-        let tys = scaledThing <$> dataConInstArgTys dataCon tyArgs
-        let accessors = zip names tys
-
-        -- Assertion for every field that they are equal.
-        assertions <- forM accessors $ \(name, ty) -> do
-          lfield <- accessField @m @ws lhs name ty
-          rfield <- accessField rhs name ty
-          weakEq lfield rfield
-
-        -- Fold the assertions per-field into a single conjunct.
-        let assertion = foldl' (.&&) true assertions
-
-        -- -- If the tags match, then the fields should also match.
-        pure $ symImplies conditional assertion
-
-      -- Ensure the tags are actually equal.
-      eqTag <- weakEq (accessTag @ws lhs) (accessTag rhs)
-
-      -- Merge the branches as a large if-then-else.
-      pure $ foldl' (.&&) eqTag branches
+      pure $ foldl' (.&&) tagEq fieldEq
 
     (Cast' lco lhs, Cast' rco rhs) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
@@ -313,6 +295,9 @@ typedValue
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
+  -- TODO: I think with the new setup this is way to general of a thing to want?
+  -- I think at this point, we just want to eliminitate this argument entirely
+  -- and just assume some stuff on a value afterwards if required no?
   => (forall t. Symbolisable t ws => RuntimeValue S t)
   -> Type
   -> m (Value m ws)
@@ -325,9 +310,29 @@ typedValue value ty
     let co' = mkSymCo co
     mkCast' co' value'
 
-  | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
-  , isDataTyCon tyCon = do
-    let adt = mkADT @ws tyCon tys value
+  | Just (tyCon, tyArgs) <- tcSplitTyConApp_maybe ty
+  , isDataTyCon tyCon
+  , Just dataCons <- tyConDataCons_maybe tyCon = do
+    -- TODO: This will loop infinitely for recursive types. We need to resolve
+    -- that somehow.
+
+    -- Create fresh values for all fields.
+    fields <- forM dataCons $ flip freshDataConBndrs tyArgs
+    let tag = do
+          let amount = length $ tyConDataCons tyCon
+          value' <- value @(SymIntN (WordBits ws))
+          -- TODO: Once Grisette adds support for (.&&), we could parameterise on the
+          -- evaluation mode. We could of course implement this (.&&) ourselves already,
+          -- but we leave it for now.
+          let cond =  0 .<= value' .&& value' .< fromIntegral amount
+          mrgIte cond (pure value') (throwError Invalid)
+
+    let adt = ADT'
+          { adtTyCon = tyCon
+          , adtTyArgs = tyArgs
+          , adtTag = tag
+          , adtFields = fields
+          }
     pure $ Data adt
 
   | Just (_, _, argTy, resTy) <- splitFunTy_maybe ty = do
@@ -339,7 +344,8 @@ typedValue value ty
 
     let argKind = tyVarKind tyCoVar
     -- TODO: This should not be a function accepting both a coercion variable or
-    -- type variable.
+    -- type variable. Instead, two individual functions should be made for each
+    -- case.
     pure . Fun argKind $ \case
       Ty arg -> do
         let subst' = extendTvSubst subst tyCoVar arg
@@ -358,8 +364,7 @@ typedValue value ty
 
   | hasTyVarHead ty = pure $ Poly ty value
 
-  | otherwise = do
-    throwError UnsupportedExpr
+  | otherwise = throwError UnsupportedExpr
 
 -- | Create a uninterpreted lambda of the given type.
 --
@@ -504,17 +509,18 @@ typedLambda ident argTy resTy = if
 
   | Just (tyCon, _) <- tcSplitTyConApp_maybe argTy
   , isDataTyCon tyCon -> lam $ \case
-    Data adt@(ADT _ _ arg) -> do
+    Data adt -> do
       -- TODO: I guess this check is not really necessary if we check types on
       -- function application.
-      unless (adtType adt `eqType` argTy) $ throwError IllTyped
+      unless (adtType' adt `eqType` argTy) $ throwError IllTyped
 
-      let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> Ident S -~> t
-            liftApply apply ident arg
+      error "TODO!"
+      -- let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
+      --     untyped = do
+      --       let apply = sym name :: Ident S -~> Ident S -~> t
+      --       liftApply apply ident arg
 
-      typedValue untyped resTy
+      -- typedValue untyped resTy
     _ -> throwError IllTyped
 
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe argTy
@@ -618,6 +624,20 @@ freshValue ty = do
       untyped = pure . sym $ indexed "!fresh" idx
   typedValue untyped ty
 
+-- | Create fresh binders for the given DataCon.
+--
+-- Note the type arguments will instantiate the universal quantifiers of the
+-- DataCon. They in general do not correspond to the types of the binders.
+freshDataConBndrs
+  :: MonadEval m
+  => KnownWordSize ws
+  => DataCon
+  -> [Type]
+  -> m [Value m ws]
+freshDataConBndrs dataCon tyArgs = do
+  let fieldTys = scaledThing <$> dataConInstArgTys dataCon tyArgs
+  forM fieldTys freshValue
+
 -- | A value that should not be reachable.
 --
 -- It will be typed according to the given core type.
@@ -628,21 +648,6 @@ invalidValue
   => Type
   -> m (Value m ws)
 invalidValue = typedValue $ mrgThrowError Invalid
-
--- | Accessor for a field of an ADT.
---
--- The field is a pair of name and its result type.
--- TODO: We should create a Field data structure as they're kind of
--- interconnected. It would make the calls of this function a bit cleaner.
-accessField
-  :: forall m ws
-   . MonadEval m
-  => KnownWordSize ws
-  => ADT S
-  -> String
-  -> Type
-  -> m (Value m ws)
-accessField adt name = typedValue $ untypedField adt name
 
 -- | Create a function with the arity of whatever we are folding over.
 --
@@ -686,6 +691,23 @@ applyValues
   -> [Value m ws]
   -> m (Value m ws)
 applyValues = foldM applyValue
+
+data ADT' m ws where
+  ADT' ::
+    { adtTyCon :: TyCon
+    , adtTyArgs :: [Type]
+    , adtTag :: RuntimeValue S (SymIntN (WordBits ws))
+    , adtFields :: [[Value m ws]]
+    } -> ADT' m ws
+
+instance KnownWordSize ws => Outputable (ADT' m ws) where
+  ppr = ppr . adtType'
+
+instance KnownWordSize ws => Assume (ADT' m ws) where
+  assume cond adt = adt { adtTag = assume cond $ adtTag adt }
+
+adtType' :: ADT' m ws -> Type
+adtType' adt = mkTyConApp (adtTyCon adt) (adtTyArgs adt)
 
 -- | Primitive values supported by the symbolic solver.
 data Primitive (ws :: PlatformWordSize) where
