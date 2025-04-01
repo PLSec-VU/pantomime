@@ -41,6 +41,7 @@ import GHC.Core.Type (substTy)
 import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
 import GHC.Core.Coercion.Opt
 import GHC.Builtin.Types.Prim
+import GHC.Tc.Utils.TcType (hasTyVarHead)
 import GHC.Platform (PlatformWordSize)
 
 import Grisette.SymPrim
@@ -68,14 +69,8 @@ import Symbolic.ADT
 import Symbolic.Identifier
 import Symbolic.MonadEval
 
--- TODO: I feel like we don't really need this. It is literally only passed to
--- the 'applyULam' function.
-data ULam mode where
-  ULam :: Type -> Type -> RuntimeValue mode (Ident mode) -> ULam mode
-
--- | Apply an uninterpreted function.
+-- | Create a uninterpreted lambda of the given type.
 --
--- TODO: Move this thing next to typedValue, as it is closely tied to it.
 -- TODO: Can't we make this function a little bit smaller?
 --
 -- Yes, this function is big. This has everything to do with overlapping
@@ -86,193 +81,210 @@ data ULam mode where
 -- concretely. I did some trickery to not have to write this for every product
 -- via 'typedValue' and its constraints. Still we get this abominable
 -- duplication because we explicitely need to spell out each instance.
-applyULam
+typedLambda
   :: forall m ws
    . KnownWordSize ws
   => MonadEval m
-  => ULam S
-  -> Value m ws
+  => RuntimeValue S (Ident S)
+  -> Type
+  -> Type
   -> m (Value m ws)
-applyULam (ULam argTy resTy ident) = \case
-  Primitive (Int value) -> do
-    guardType intPrimTy
+typedLambda ident argTy resTy = if
+  | eqArg intPrimTy -> lam $ \case
+    Primitive (Int arg) -> do
+      let untyped :: forall t. Interpretable (SymIntN (WordBits ws) -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymIntN (WordBits ws) -~> t
+            liftApply apply ident arg
 
-    let untyped :: forall t. Interpretable (SymIntN (WordBits ws) -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymIntN (WordBits ws) -~> t
-          liftApply apply ident value
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    typedValue untyped resTy
+  | eqArg int8PrimTy -> lam $ \case
+    Primitive (Int8 arg) -> do
+      let untyped :: forall t. Interpretable (SymIntN8 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymIntN8 -~> t
+            liftApply apply ident arg
 
-  Primitive (Int8 value) -> do
-    guardType int8PrimTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    let untyped :: forall t. Interpretable (SymIntN8 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymIntN8 -~> t
-          liftApply apply ident value
+  | eqArg int16PrimTy -> lam $ \case
+    Primitive (Int16 arg) -> do
+      let untyped :: forall t. Interpretable (SymIntN16 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymIntN16 -~> t
+            liftApply apply ident arg
 
-    typedValue untyped resTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-  Primitive (Int16 value) -> do
-    guardType int16PrimTy
+  | eqArg int32PrimTy -> lam $ \case
+    Primitive (Int32 arg) -> do
+      let untyped :: forall t. Interpretable (SymIntN32 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymIntN32 -~> t
+            liftApply apply ident arg
 
-    let untyped :: forall t. Interpretable (SymIntN16 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymIntN16 -~> t
-          liftApply apply ident value
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    typedValue untyped resTy
+  | eqArg int64PrimTy -> lam $ \case
+    Primitive (Int64 arg) -> do
+      let untyped :: forall t. Interpretable (SymIntN64 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymIntN64 -~> t
+            liftApply apply ident arg
 
-  Primitive (Int32 value) -> do
-    guardType int32PrimTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    let untyped :: forall t. Interpretable (SymIntN32 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymIntN32 -~> t
-          liftApply apply ident value
+  | eqArg wordPrimTy -> lam $ \case
+    Primitive (Word arg) -> do
+      let untyped :: forall t. Interpretable (SymWordN (WordBits ws) -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymWordN (WordBits ws) -~> t
+            liftApply apply ident arg
 
-    typedValue untyped resTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-  Primitive (Int64 value) -> do
-    guardType int64PrimTy
+  | eqArg word8PrimTy -> lam $ \case
+    Primitive (Word8 arg) -> do
+      let untyped :: forall t. Interpretable (SymWordN8 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymWordN8 -~> t
+            liftApply apply ident arg
 
-    let untyped :: forall t. Interpretable (SymIntN64 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymIntN64 -~> t
-          liftApply apply ident value
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    typedValue untyped resTy
+  | eqArg word16PrimTy -> lam $ \case
+    Primitive (Word16 arg) -> do
+      let untyped :: forall t. Interpretable (SymWordN16 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymWordN16 -~> t
+            liftApply apply ident arg
 
-  Primitive (Word value) -> do
-    guardType intPrimTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    let untyped :: forall t. Interpretable (SymWordN (WordBits ws) -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymWordN (WordBits ws) -~> t
-          liftApply apply ident value
+  | eqArg word32PrimTy -> lam $ \case
+    Primitive (Word32 arg) -> do
+      let untyped :: forall t. Interpretable (SymWordN32 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymWordN32 -~> t
+            liftApply apply ident arg
 
-    typedValue untyped resTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-  Primitive (Word8 value) -> do
-    guardType word8PrimTy
+  | eqArg word64PrimTy -> lam $ \case
+    Primitive (Word64 arg) -> do
+      let untyped :: forall t. Interpretable (SymWordN64 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymWordN64 -~> t
+            liftApply apply ident arg
 
-    let untyped :: forall t. Interpretable (SymWordN8 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymWordN8 -~> t
-          liftApply apply ident value
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    typedValue untyped resTy
+  | eqArg floatPrimTy -> lam $ \case
+    Primitive (Float arg) -> do
+      let untyped :: forall t. Interpretable (SymFP32 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymFP32 -~> t
+            liftApply apply ident arg
 
-  Primitive (Word16 value) -> do
-    guardType word16PrimTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    let untyped :: forall t. Interpretable (SymWordN16 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymWordN16 -~> t
-          liftApply apply ident value
+  | eqArg doublePrimTy -> lam $ \case
+    Primitive (Double arg) -> do
+      let untyped :: forall t. Interpretable (SymFP64 -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> SymFP64 -~> t
+            liftApply apply ident arg
 
-    typedValue untyped resTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-  Primitive (Word32 value) -> do
-    guardType word32PrimTy
+  | Just (tyCon, _) <- tcSplitTyConApp_maybe argTy
+  , isDataTyCon tyCon -> lam $ \case
+    Data adt@(ADT _ _ arg) -> do
+      -- TODO: I guess this check is not really necessary if we check types on
+      -- function application.
+      unless (adtType adt `eqType` argTy) $ throwError IllTyped
 
-    let untyped :: forall t. Interpretable (SymWordN32 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymWordN32 -~> t
-          liftApply apply ident value
+      let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> Ident S -~> t
+            liftApply apply ident arg
 
-    typedValue untyped resTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-  Primitive (Word64 value) -> do
-    guardType word64PrimTy
+  | Just (tyCon, tys) <- tcSplitTyConApp_maybe argTy
+  , Just (argTy', co) <- instNewTyCon_maybe tyCon tys -> lam $ \case
+    Cast' co' arg -> do
+      -- TODO: I guess this check is not really necessary if we check types on
+      -- function application.
+      unless (co `eqCoercion` SymCo co') $ throwError IllTyped
+      fun <- typedLambda ident argTy' resTy
+      applyValue fun arg
+    _ -> throwError IllTyped
 
-    let untyped :: forall t. Interpretable (SymWordN64 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymWordN64 -~> t
-          liftApply apply ident value
+  | hasTyVarHead argTy -> lam $ \case
+    Poly ty poly -> do
+      -- TODO: I guess this check is not really necessary if we check types on
+      -- function application.
+      unless (ty `eqType` argTy) $ throwError IllTyped
 
-    typedValue untyped resTy
+      let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> Ident S -~> t
+            liftApply apply ident poly
 
-  Primitive (Float value) -> do
-    guardType floatPrimTy
+      typedValue untyped resTy
+    _ -> throwError IllTyped
 
-    let untyped :: forall t. Interpretable (SymFP32 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymFP32 -~> t
-          liftApply apply ident value
+  | Just (_, _, iArgTy, _) <- splitFunTy_maybe argTy -> lam $ \case
+    arg@(Fun iArgTy' _) -> do
+      -- TODO: I guess this check is not really necessary if we check types on
+      -- function application.
+      unless (iArgTy `eqType` iArgTy') $ throwError IllTyped
 
-    typedValue untyped resTy
+      -- First, create an identifier that represents the function argument.
+      idx <- freshIdx
+      let argIdent :: forall t. Solvable (ConType t) t => RuntimeValue S t
+          argIdent = pure . sym $ indexed "!FUN" idx
 
-  Primitive (Double value) -> do
-    guardType doublePrimTy
+      -- Then we get an equivalence statement between this fresh argument and the
+      -- one we actually received as input.
+      arg' <- typedValue argIdent argTy
+      eq <- strongEq arg arg'
 
-    let untyped :: forall t. Interpretable (SymFP64 -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> SymFP64 -~> t
-          liftApply apply ident value
+      -- Now, we can use the fresh identifier as function argument for the final
+      -- value. Note that we are required to do it in this roundabout way, as
+      -- functions do not always carry an identifier (and it is in general not
+      -- extractable).
+      let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
+          untyped = do
+            let apply = sym name :: Ident S -~> Ident S -~> t
+            liftApply apply ident argIdent
 
-    typedValue untyped resTy
+      -- The actual result of the computation, assuming the equivalence of the
+      -- input and the fresh identifier.
+      assume eq <$> typedValue untyped resTy
 
-  Data adt@(ADT _ _ ident') -> do
-    guardType $ adtType adt
+    _ -> throwError IllTyped
 
-    let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> Ident S -~> t
-          liftApply apply ident ident'
-
-    typedValue untyped resTy
-
-  Cast' co value -> do
-    guardType $ coercionRKind co
-    let innerTy = coercionLKind co
-    applyULam (ULam innerTy resTy ident) value
-
-  fun@(Fun innerArgTy _) -> do
-    -- Ensure that the given value argument (which is itself a function) matches
-    -- the expected argument of the function. Since a value Fun only carries its
-    -- input type, we just check whether this matches.
-    (_, _, innerArgTy', _) <- whyFail IllTyped $ splitFunTy_maybe argTy
-    unless (innerArgTy `eqType` innerArgTy') $ throwError IllTyped
-
-    -- First, create an identifier that represents the function argument.
-    idx <- freshIdx
-    let argIdent :: forall t. Solvable (ConType t) t => RuntimeValue S t
-        argIdent = pure . sym $ indexed "!FUN" idx
-
-    -- Then we get an equivalence statement between this fresh argument and the
-    -- one we actually received as input.
-    arg <- typedValue argIdent argTy
-    eq <- strongEq arg fun
-
-    -- Now, we can use the fresh identifier as function argument for the final
-    -- value. Note that we are required to do it in this roundabout way, as
-    -- function do not always carry an identifier (and it is in general not
-    -- extractable).
-    let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> Ident S -~> t
-          liftApply apply ident argIdent
-
-    -- The actual result of the computation, assuming the equivalence of the
-    -- input and the fresh identifier.
-    assume eq <$> typedValue untyped resTy
-
-  Poly ty poly -> do
-    guardType ty
-
-    let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
-        untyped = do
-          let apply = sym name :: Ident S -~> Ident S -~> t
-          liftApply apply ident poly
-
-    typedValue untyped resTy
-
-  _ -> throwError UnsupportedExpr
+  | otherwise -> throwError UnsupportedExpr
   where
+    lam = pure . Fun argTy
+    eqArg = eqType argTy
     liftApply apply = liftA2 $ \a0 a1 -> apply # a0 # a1
-    guardType ty = unless (ty `eqType` argTy) $ throwError IllTyped
     -- TODO: I think we should make a separate file/spot with all the
     -- non-indexed names. It is very messy and error prone to define global
     -- names all over the place.
@@ -540,17 +552,15 @@ typedValue value ty
     pure $ Data adt
 
   | Just (_, _, argTy, resTy) <- splitFunTy_maybe ty = do
-    -- TODO: Get rid of the ULam, we just use it for this one function call.
-    let x = ULam @S argTy resTy value
-    pure . Fun argTy $ applyULam x
+    typedLambda value argTy resTy
 
   | Just (tyCoVar, resTy) <- splitForAllTyCoVar_maybe ty = do
     let vars = shallowTyCoVarsOfType ty
     let subst = mkEmptySubst $ InScope vars
 
     let argKind = tyVarKind tyCoVar
-    -- TODO: I guess we should make sure we actually get a correctly kinded type
-    -- or coercion argument.
+    -- TODO: This should not be a function accepting both a coercion variable or
+    -- type variable.
     pure . Fun argKind $ \case
       Ty arg -> do
         let subst' = extendTvSubst subst tyCoVar arg
@@ -567,8 +577,7 @@ typedValue value ty
   -- TODO: Is this correct? My guess is that any type variable should do.
   | isTypeLikeKind ty = pure $ Ty alphaTy
 
-  | isTyVarTy ty = pure $ Poly ty value
-  | Just _ <- splitTyConApp_maybe ty = pure $ Poly ty value
+  | hasTyVarHead ty = pure $ Poly ty value
 
   | otherwise = do
     throwError UnsupportedExpr
