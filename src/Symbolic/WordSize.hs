@@ -49,7 +49,7 @@ import Data.Type.Ord (Compare)
 
 -- | Constraint to ensure that the WordBits are non-zero.
 --
--- Note that technically we don't really need this, as WordBits can never be
+-- Note that technically we shouldn't really need this, as WordBits can never be
 -- zero. Still, Haskell cannot prove this and as such we tag around this
 -- typeclass constraint.
 type KnownWordSize ws = KnownPos (WordBits ws)

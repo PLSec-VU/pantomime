@@ -29,9 +29,6 @@ import Grisette.Unified (EvalModeTag (..))
 import Grisette.SymPrim
 import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..), SupportedPrim (..))
 
-import Data.List ((!?))
-import Data.Foldable (find)
-
 import Control.Monad.Identity (Identity (..))
 import Control.Monad.Except (MonadError (..), runExceptT)
 import Control.Monad (forM)
@@ -129,18 +126,13 @@ concretise model = \case
   Primitive prim -> pure $ concretePrimitive model prim
   -- TODO: Clean this horrible piece of code up!
   Data adt -> do
-    let tag = evalSymToCon @_ @(RuntimeValue C (IntN (WordBits ws))) model $ adtTag adt
+    let tag = evalSymToCon @_ @(Tag C ws) model $ adtTag adt
     let runRuntime = runIdentity . runExceptT . unRuntimeValue
     case runRuntime $ tag of
       Right tag'
-        | Just fields <- adtFields adt !? fromIntegral tag' -> do
-          -- TODO: this datacon lookup should get its own function!
-          dataCons <- whyFail IllTyped $ tyConDataCons_maybe (adtTyCon adt)
-          let cmp = (tag' ==) . fromIntegral . dataConTagZ
-          dataCon <- whyFail IllTyped $ find cmp dataCons
-
+        | Just dataCon <- tagToDataCon tag' $ adtTyCon adt
+        , Just fields <- adtDataConFields adt dataCon -> do
           fields' <- forM fields $ concretise model
-
           pure $ Record dataCon fields'
         
       -- TODO: This shouldn't happen!

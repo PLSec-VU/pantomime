@@ -28,7 +28,6 @@ import Control.Monad.Except
 
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
-import Data.List ((!?))
 
 import Grisette hiding (Rec, (<+>))
 import Grisette.Unified (EvalModeTag (..))
@@ -66,8 +65,6 @@ evaluate env = \case
   Lam bndr body -> do
     let argTy = substTyEnv env $ varType bndr
     pure . Fun argTy $ \arg -> do
-      -- TODO: I think it would be good to have a check here to ensure that the
-      -- argument has the correct type.
       env' <- extendEnv env bndr arg
       evaluate env' body
 
@@ -136,17 +133,11 @@ evalAlt env scrut = \case
       Data adt -> pure adt
       _ -> throwError IllTyped
 
-    -- TODO: We should add some functions to access an ADT conveniently instead
-    -- of like this!
-    let tag = fromIntegral $ dataConTagZ dataCon
-
     -- Whether the tag of this ADT is equivalent to the DataCon.
-    let conditional = (.== con tag) <$> adtTag scrut'
+    let conditional = adtIsDataCon scrut' dataCon
 
-    -- Gather field accessors for all binders.
-    fields <- whyFail IllTyped $ adtFields scrut' !? fromIntegral tag
-
-    -- Extend the environment with field accessors for each binder.
+    -- Extend the environment with the field for each binder.
+    fields <- whyFail IllTyped $ adtDataConFields scrut' dataCon
     env' <- extendManyEnv env $ zip bndrs fields
 
     -- Evaluate the right-hand side with the extended environment.
@@ -244,25 +235,15 @@ evalDataConInst dataCon tyArgs = do
   -- Gather the types of the binders.
   let bndrTys = ((),) . scaledThing <$> dataConInstArgTys dataCon tyArgs
 
-  -- The root is an ADT that assumes the given conditional holds.
-  let root fields = do
-        let adt = ADT'
-              { adtTyCon = dataConTyCon dataCon
-              , adtTyArgs = tyArgs
-              -- TODO: This tag conversion should probably get its own function.
-              , adtTag = pure $ fromIntegral (dataConTagZ dataCon)
-              -- TODO: I should populate the other fields with fresh values.
-              -- Invalid ones could also work. I feel like I could even have
-              -- them as 'undefined'.
-              , adtFields = [fields]
-              }
-        pure $ Data adt
+  -- The root is an ADT matching the given DataCon.
+  let root fields = Data <$> adtFromDataCon dataCon tyArgs fields
 
   -- Accumulate a function that passes its arguments to the root.
   final <- nArity root bndrTys $ \fields _ arg -> do
     -- Constrain the field of the ADT to be equivalent to the argument.
     -- TODO: I think we should change the nArity function no? We can just do
-    -- with only returning per element instead of accumulating like this.
+    -- with only returning per element instead of accumulating like this. We
+    -- are also ignoring the attached argument in all uses.
     pure $ fields <> [arg]
 
   final []
