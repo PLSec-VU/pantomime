@@ -75,6 +75,7 @@ import Symbolic.WordSize
 import Symbolic.Runtime
 import Symbolic.Identifier
 import Symbolic.MonadEval
+import GHC.MonadCore
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where
@@ -85,7 +86,7 @@ data Value m ws where
   -- could go for some other name? Perhaps just Newtype, as that's pretty much
   -- what we wrap in there anyway. The alternative would be to just prefix all
   -- options with something like 'V'. Then we can also use VType instead of Ty,
-  -- VLam instead of Fun, etc.
+  -- VLam instead of Fun, VCoercion instead of Co, etc.
   Cast' :: Coercion -> Value m ws -> Value m ws
   Fun :: Kind  -> (Value m ws -> m (Value m ws)) -> Value m ws
   Ty :: Type -> Value m ws
@@ -272,22 +273,31 @@ typedValue value ty
     -- TODO: This will loop infinitely for recursive types. We need to resolve
     -- that somehow.
 
-    -- Create fresh values for all fields.
-    fields <- forM dataCons $ flip freshDataConBndrs tyArgs
     -- TODO: I don't really like this tag creation. Should the tagInRange
     -- maybe just return the condition?
     let tag = tagInRange value tyCon
 
-    let adt = ADT
-          { adtTyCon = tyCon
-          , adtTyArgs = tyArgs
-          , adtTag = tag
-          , adtFields = fields
-          }
-    pure $ Data adt
+    -- Create fresh values for all fields.
+    fields <- forM dataCons $ flip freshDataConBndrs tyArgs
+
+    pure $ Data ADT
+      { adtTyCon = tyCon
+      , adtTyArgs = tyArgs
+      , adtTag = tag
+      , adtFields = fields
+      }
 
   | Just (_, _, argTy, resTy) <- splitFunTy_maybe ty = do
-    typedLambda value argTy resTy
+    let ident = value
+    -- FIXME: These functions generate a fresh copies of a typed value **for each**
+    -- call. We cannot lift this operation outside of the lambda it seems. I think
+    -- we'll have to rethink the Fun pattern. Returning an actual function breaks
+    -- so many things. Perhaps it would be better to create a substitution function?
+    -- Something similar to the GHC Subst? I.e. that's a way to generate a Value
+    -- without the annoyance of these function scoping problems I'm facing all the
+    -- time...
+    unless (ident == throwError Invalid) $ throwError UnsupportedExpr
+    typedLambda ident argTy resTy
 
   | Just (tyCoVar, resTy) <- splitForAllTyCoVar_maybe ty = do
     let vars = shallowTyCoVarsOfType ty
@@ -315,7 +325,9 @@ typedValue value ty
 
   | hasTyVarHead ty = pure $ Poly ty value
 
-  | otherwise = throwError UnsupportedExpr
+  | otherwise = do
+    dbg ty
+    throwError UnsupportedExpr
 
 -- | Create a uninterpreted lambda of the given type.
 --
@@ -465,13 +477,11 @@ typedLambda ident argTy resTy = if
       -- function application.
       unless (adtType adt `eqType` argTy) $ throwError IllTyped
 
-      error "TODO!"
-      -- let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
-      --     untyped = do
-      --       let apply = sym name :: Ident S -~> Ident S -~> t
-      --       liftApply apply ident arg
-
-      -- typedValue untyped resTy
+      -- FIXME: This is super broken, but it works for now as long as we don't
+      -- accept functions as arguments at the top level (or if they're nested
+      -- inside of an ADT btw).
+      unless (ident == throwError Invalid) $ throwError UnsupportedExpr
+      invalidValue resTy
     _ -> throwError IllTyped
 
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe argTy
@@ -503,31 +513,12 @@ typedLambda ident argTy resTy = if
       -- TODO: I guess this check is not really necessary if we check types on
       -- function application.
       unless (iArgTy `eqType` iArgTy') $ throwError IllTyped
-      error "TODO!"
 
-      -- -- First, create an identifier that represents the function argument.
-      -- idx <- freshIdx
-      -- let argIdent :: forall t. Solvable (ConType t) t => RuntimeValue S t
-      --     argIdent = pure . sym $ indexed "!FUN" idx
-
-      -- -- Then we get an equivalence statement between this fresh argument and the
-      -- -- one we actually received as input.
-      -- arg' <- typedValue argIdent argTy
-      -- eq <- strongEq arg arg'
-
-      -- -- Now, we can use the fresh identifier as function argument for the final
-      -- -- value. Note that we are required to do it in this roundabout way, as
-      -- -- functions do not always carry an identifier (and it is in general not
-      -- -- extractable).
-      -- let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
-      --     untyped = do
-      --       let apply = sym name :: Ident S -~> Ident S -~> t
-      --       liftApply apply ident argIdent
-
-      -- -- The actual result of the computation, assuming the equivalence of the
-      -- -- input and the fresh identifier.
-      -- assume eq <$> typedValue untyped resTy
-
+      -- FIXME: This is super broken, but it works for now as long as we don't
+      -- accept functions as arguments at the top level (or if they're nested
+      -- inside of an ADT btw).
+      unless (ident == throwError Invalid) $ throwError UnsupportedExpr
+      invalidValue resTy
     _ -> throwError IllTyped
 
   | otherwise -> throwError UnsupportedExpr

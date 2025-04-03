@@ -1,4 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MagicHash #-}
+{-# OPTIONS_GHC -Wno-all #-}
 
 module ProcessorControl
     ( test
@@ -11,6 +13,8 @@ module ProcessorControl
     ) where
 --import Test.QuickCheck
 
+import GHC.Base (wordToWord8#, word8ToWord#, word16ToWord#, wordToWord16#, wordToWord32#)
+import GHC.Word (Word8 (..), Word16 (..), Word32 (..))
 import Data.Word
 import Data.Bits
 import Control.Monad.State (MonadState, MonadIO, put, get, runStateT, runState, liftIO)
@@ -46,21 +50,31 @@ data Instruction = Add Word8
 -- 11 - J (with 8-bit target address)
 -- 100 - Beq (with 8-bit offset)
 
+word8ToWord16 :: Word8 -> Word16
+word8ToWord16 (W8# value) = W16# $ wordToWord16# (word8ToWord# value)
+
+word8ToWord32 :: Word8 -> Word32
+word8ToWord32 (W8# value) = W32# $ wordToWord32# (word8ToWord# value)
+
+word16ToWord8 :: Word16 -> Word8
+word16ToWord8 (W16# value) = W8# $ wordToWord8# (word16ToWord# value)
+
 encode :: Instruction -> Word16
 encode instruction = case instruction of
-    Add value -> (0 `shiftL` 8) .|. fromIntegral value
+    Add value -> (0 `shiftL` 8) .|. word8ToWord16 value
     Clr       -> 1 `shiftL` 8
     Out       -> 2 `shiftL` 8
-    J addr    -> (3 `shiftL` 8) .|. fromIntegral addr
-    Beq off   -> (4 `shiftL` 8) .|. fromIntegral off
+    J addr    -> (3 `shiftL` 8) .|. word8ToWord16 addr
+    Beq off   -> (4 `shiftL` 8) .|. word8ToWord16 off
 
 decode :: Word16 -> Instruction
 decode word = case shiftR word 8 of
-    0 -> Add (fromIntegral (word .&. 0xFF))
+    0 -> Add (word16ToWord8 (word .&. 0xFF))
     1 -> Clr
     2 -> Out
-    3 -> J (fromIntegral (word .&. 0xFF))
-    4 -> Beq (fromIntegral (word .&. 0xFF))
+    3 -> J (word16ToWord8 (word .&. 0xFF))
+    4 -> Beq (word16ToWord8 (word .&. 0xFF))
+    _ -> Add 0
     --_ -> error "Invalid instruction"
 
 testEncoding :: IO ()
@@ -110,7 +124,7 @@ execute = do
     let inst = fetchInstruction state
     case inst of
         Add value -> 
-            let result = reg state + fromIntegral value in
+            let result = reg state + word8ToWord32 value in
             put $ state {writebackOut = (Just $ Write result, Nothing), nextPc = pc state + 1}
         Clr ->
             put $ state {writebackOut = (Just (Write 0), Nothing), nextPc = pc state + 1}
@@ -152,7 +166,7 @@ tick rawInst = do
    return (out, pc)
 
 tickRun :: State -> Word16 -> (State, (Maybe Output, Word8))
-tickRun s i = swap $ runState (tick i) s    
+tickRun s i = swap $ runState (tick i) s
 
 -- instance Arbitrary [Instruction] where
 --     arbitrary = genProgram
@@ -224,9 +238,12 @@ data LeakInst = LBeq Bool Word8
 -- ^ all other instructions
     deriving (Eq, Ord, Show) 
 
+obs :: Circuit () (Maybe Output, Word8) Word8
+obs = stateless obs'
+
 -- | Attacker can only see the PC.
-obs :: (Maybe Output, Word8) -> (Word8)
-obs (_, pc) =  pc
+obs' :: (Maybe Output, Word8) -> (Word8)
+obs' (_, pc) = pc
 
 -- from instruction (and register value) to leakage instruction
 leakInst :: Instruction -> Word32 -> LeakInst
@@ -239,12 +256,15 @@ wbToReg _ (Just (Write n)) = n
 wbToReg n Nothing = n
 
 -- | Projection from state to leakage and simulator state
-proj :: State -> (LeakState, SimState)
-proj state = (leakState, simState)
+proj :: (State, ()) -> (LeakState, SimState)
+proj (state, ()) = (leakState, simState)
     where
     newreg = wbToReg (reg state) (fst $ writebackOut state)
     leakState = LState {lreg = newreg, lbubble = bubble state}
     simState = SimState {simPc = pc state, simBubble = bubble state, simNextPc = nextPc state, simFetchPc= fetchPC state, simFetchInstruction = leakInst (fetchInstruction state) newreg}
+
+stateless :: (a -> b) -> Circuit () a b
+stateless f _ i = ((), f i)
 
 -- | Leakage Description State
 data LeakState = LState {
@@ -264,7 +284,7 @@ leak rawInst = do
     -- ^ state updates and instruction
     case inst of 
         Add value -> do
-            let result = lreg lstate + fromIntegral value
+            let result = lreg lstate + word8ToWord32 value
             put $ lstate {lreg = result}
             return LOther
         Clr -> do
@@ -287,7 +307,7 @@ leak rawInst = do
     --trace ("inst: " ++ (show inst) ++ " leak inst: " ++ show lInst) $ return lInst
 
 leakRun :: LeakState -> Word16 -> (LeakState, LeakInst)
-leakRun s i = swap $ runState (leak i) s    
+leakRun s i = swap $ runState (leak i) s
 
 -- | Simulation State
 data SimState = SimState {
@@ -390,33 +410,44 @@ theorem prog = outI == outS
     maxSteps = 200
     (outI, _) = runState (run maxSteps $ map encode prog) initState
     (outS, _) = runState (lrun maxSteps $ map encode prog) simInit
-    simInit = proj initState
+    simInit = proj (initState, ())
 
 prop_theorem :: Property
 prop_theorem = forAll genProgram theorem
 
 check = quickCheckWith stdArgs{maxSuccess = 5000000} prop_theorem 
 
-diff :: (State, Word16)
-diff = (s, i)
+{-# ANN tickRun Spec
+  { observation' = 'obs
+  , leakage' = 'leakRun
+  , simulator' = 'simRun
+  , projection' = 'proj
+  } #-}
+
+diff :: ((State, ()), Word16)
+diff = ((s, ()), i)
     where
         s = State
             { pc = 0
-            , reg = 0
+            , reg = 2
             , bubble = False
-            , nextPc = 1
+            , nextPc = 0
             , fetchPC = 0
-            , fetchInstruction = Beq 0
-            , writebackOut = (Just $ Write 10, Nothing)
+            , fetchInstruction = Out
+            , writebackOut = (Just $ Write 0x40000000, Nothing)
             }
-        i = encode $ Add 0
+        i = 0x0300
 
 test :: IO ()
 test = do
+  -- pure ()
   let (s, i) = diff
-  let imp = Projection.composeI tickRun obs proj s i
-  let sim = Projection.composeS leakRun simRun proj s i
-  print $ show $ proj s
-  print $ leakRun (fst $ proj s) i
-  print $ snd imp
-  print $ snd sim
+  let imp = Projection.sproj proj (Projection.compose tickRun obs) s i
+  let sim = Projection.sproj' proj (Projection.compose leakRun simRun) s i
+  -- let imp = Projection.composeI tickRun obs' proj s i
+  -- let sim = Projection.composeS leakRun simRun proj s i
+  -- print $ show $ proj s
+  -- print $ leakRun (fst $ proj s) i
+  print $ imp
+  print $ sim
+  print $ imp == sim

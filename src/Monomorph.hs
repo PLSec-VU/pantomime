@@ -28,9 +28,9 @@ monomorphize guts expr = do
         [ inlineUnfolding
         , betaReduce
         , caseReduce
-        , dropReflCast
-        , joinCasts
-        , floatCast
+        -- , dropReflCast
+        -- , joinCasts
+        -- , floatCast
         , applyRule
         ]
 

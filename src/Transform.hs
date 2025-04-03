@@ -15,7 +15,11 @@ module Transform
   , applyRule
   , lintPass
 
+  , Transform
+  , Substitution
+  , initSubst
   , normalize
+  , saturate
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
@@ -25,11 +29,10 @@ import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep (Coercion (..), Scaled (..))
 import GHC.Core.Rules.Config (RuleOpts(..))
 import GHC.Core.Unify (tcMatchTy)
--- import GHC.Core.Opt.Arity (exprIsDeadEnd)
+import GHC.Core.Opt.Arity (exprIsDeadEnd)
 import GHC.Data.TrieMap (insertTM, TrieMap (..))
 import GHC.Platform (genericPlatform)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy)
-import GHC (dataConType)
 import GHC.MonadCore
 import GHC.Builtin.PrimOps
 
@@ -160,6 +163,7 @@ saturate
   :: Foldable f
   => Functor f
   => Monad m
+  => HasDynFlags m
   => Subst.Class s
   => f (Transform (MaybeT m) s CoreExpr)
   -- ^ The passes that we will consider for this substitution.
@@ -181,6 +185,7 @@ substitute
   :: Foldable f
   => Functor f
   => Monad m
+  -- => HasDynFlags m
   => Subst.Class s
   => f (Transform (MaybeT m) s CoreExpr)
   -- ^ The passes that we will consider for this substitution.
@@ -197,6 +202,7 @@ transform
   :: Foldable f
   => Functor f
   => Monad m
+  -- => HasDynFlags m
   => Subst.Class s
   => f (Transform (MaybeT m) s CoreExpr)
   -- ^ The passes that we will consider for this transformation.
@@ -210,7 +216,13 @@ transform passes continue subst expr = do
   let def = deShadowExpr continue subst expr
 
   -- Use the first succesful pass, or the default in case there was none.
-  maybe def pure expr'
+  expr'' <- maybe def pure expr'
+
+  -- TODO: Remove the lint (or make it a debug thing).
+  -- let scope = subst ^. Subst.scope
+  -- Lint.panic Lint.subterm scope expr''
+
+  pure expr''
 
 -- | Deshadow an expression.
 --
@@ -349,26 +361,25 @@ lintPass _ subst expr = do
   Lint.panic Lint.subterm scope expr
   empty
 
--- | Inlines all non-typeclass functions.
---
--- TODO: I think to correctly de-shadow, we should either do an empty substition
--- or a transformation on the unfolding. This of course assumes that the
--- unfolding is not fragile, as this will would make it so we only want to do
--- the empty substition.
+-- | Inlines normal unfoldings and dictionaries.
 inlineUnfolding
   :: Alternative m
   => Monad m
   => Transform m s CoreExpr
 inlineUnfolding continue subst = \case
   Var var -> do
+    -- TODO: Should we check whether an unfolding is not fragile?
     expr <- case idUnfolding var of
       CoreUnfolding { uf_tmpl } -> do
         pure uf_tmpl
 
+      -- TODO: Does it make sense to unfold the dictionary if we're not sure we
+      -- have a concrete instance? Perhaps we should change when this happens,
+      -- though it is not necessarily wrong btw.
       DFunUnfolding { df_bndrs, df_con, df_args } -> do
         let con = Var $ dataConWorkId df_con
-        let inner = foldl App con df_args
-        let quantified = foldr Lam inner df_bndrs
+        let inner = mkApps con df_args
+        let quantified = mkLams df_bndrs inner
         pure quantified
 
       _ -> empty
@@ -413,7 +424,8 @@ applyRule continue subst expr = do
         , roExcessRationalPrecision = True
         , roBignumRules = True
         }
-  -- TODO: Should we pick some unfolding fun?
+  -- TODO: What unfolding function should we pick? My hunch says it doesn't
+  -- really matter, since we're unfolding everything anyway.
   let scope = ISE (subst ^. Subst.scope) idUnfolding
   let alwaysActive = const True
 
@@ -428,6 +440,9 @@ applyRule continue subst expr = do
   continue subst expr''
 
 -- | Beta reduction.
+--
+-- This will both reduce traditional applications as well as non-recursive let
+-- bindings.
 betaReduce
   :: Monad m
   => Alternative m
@@ -497,7 +512,7 @@ caseReduce continue subst = \case
 
   _ -> empty
 
--- | Select the default case if no other construct can possible match.
+-- | Select the default case if no other alternative can possibly match.
 --
 -- This will use the OtherCon unfolding to determine whether it is okay to
 -- inline the default case.
@@ -507,11 +522,6 @@ caseSelectDefault
   => Subst.Class s
   => Transform m s CoreExpr
 caseSelectDefault continue subst = \case
-  -- Note on safety w.r.t. strictness:
-  --
-  -- We only know a scrutinee is "not one of these constructors" because
-  -- of an earlier scrutinisation. As such, it is safe to drop because the
-  -- computation, even if it has side-effects, as it was already evaluated.
   Case (Var scrut) bndr _ alts -> do
     -- We lookup the scrutinee to see if it has an OtherCon unfolding. Note
     -- we don't call `continue` on the scrutinee here as it might incur a lot
@@ -521,14 +531,29 @@ caseSelectDefault continue subst = \case
       Var scrut' -> pure scrut'
       _ -> empty
 
+    -- We can only select the default without problems if it doesn't pose
+    -- strictness problems.
+    -- guard $ exprIsHNF (Var scrut') || exprOkForSpeculation (Var scrut')
+    -- TODO: Implement a flag which we can poll to see if we care about side
+    -- effects.
+    let sideEffects = False
+    guard $ exprOkForSpeculation (Var scrut') || not sideEffects
+
     -- Get the default and explicit alternatives, if possible.
     (explicit, rhsDefault) <- do
       let (explicit, def) = findDefault alts
       def' <- maybeM def
       pure (explicit, def')
 
+    -- Get the OtherCon unfolding, which tells us the scrutinee does not match
+    -- the following constructors. Having this unfolding also means that we are
+    -- in head normal form. As such, we do not need to keep the case
+    -- expression for strictness evaluation.
+    others <- case idUnfolding scrut' of
+      OtherCon cons -> pure $ Set.fromList cons
+      _ -> empty
+
     -- Check that none of the alternative match the scrutinee.
-    let others = Set.fromList . otherCons . idUnfolding $ scrut'
     let noScrutMatch (Alt con _ _) = con `elem` others
     guard $ all noScrutMatch explicit
 
@@ -558,6 +583,10 @@ caseDistribute continue subst = \case
 
   -- Inline argument into case
   fun@(Case _ _ ty _) -> do
+    -- Ensure the scrutinee doesn't have side-effects. Otherwise, this
+    -- transformation is not meaning preserving.
+    -- guard $ exprOkForSpeculation scrut
+
     -- Split this case if it is a function.
     (_, mult, argTy, _) <- maybeM $ splitFunTy_maybe ty
 
@@ -574,10 +603,14 @@ caseDistribute continue subst = \case
     pure $ Lam fresh expr
 
   -- Inline function into case
-  App fun arg@Case {} -> do
-    -- FIXME: This may change meaning as the case scrutinee may have
-    -- side-effects that might otherwise not be used. We should check the
-    -- scrutinee before applying this.
+  App fun arg@(Case scrut _ _ _) -> do
+    -- Ensure the scrutinee doesn't have side-effects. Otherwise, this
+    -- transformation is not meaning preserving.
+    -- TODO: Implement a flag which we can poll to see if we care about side
+    -- effects.
+    let sideEffects = False
+    guard $ exprOkForSpeculation scrut || not sideEffects
+
     distribute' subst arg $ \subst' rhs -> do
       fun' <- continue subst' fun
       pure $ App fun' rhs
@@ -649,7 +682,6 @@ distribute dist continue subst = \case
 redundantCase
   :: Alternative m
   => Monad m
-  -- => MonadCore m
   => Subst.Class s
   => Transform m s CoreExpr
 redundantCase continue subst = \case
@@ -668,8 +700,13 @@ redundantCase continue subst = \case
       [Alt _ _ rhs] -> pure rhs
       _ -> empty
 
-    -- -- -- Ensure the scrutinee doesn't have side-effects, as this would break
-    -- -- -- confluence.
+    -- Ensure the scrutinee doesn't have side-effects, as this would break
+    -- confluence.
+    -- TODO: Implement a flag which we can poll to see if we care about side
+    -- effects.
+    let sideEffects = False
+    guard $ exprOkForSpeculation scrut || not sideEffects
+
     -- dbg' "================="
     -- dbg scrut
     -- dbg $ exprOkToDiscard scrut
@@ -678,8 +715,7 @@ redundantCase continue subst = \case
     -- dbg $ case scrut of
     --   Var var -> isStrictId var
     --   _ -> False
-    -- -- dbg $ isStrict
-    -- guard $ exprOkToDiscard scrut
+    -- dbg $ isStrict
     -- FIXME: Okay. It seems there are some assumptions that make our equality
     -- checker work for some expressions. This has to do with side-effects and
     -- divergence. Ideally, we want to be able to simply ditch the evaluation of
@@ -706,6 +742,128 @@ redundantCase continue subst = \case
     continue subst' expr
 
   _ -> empty
+
+redundantCase'
+  :: Alternative m
+  => Monad m
+  => Subst.Class s
+  => Transform m s CoreExpr
+redundantCase' continue subst = \case
+  -- Check that there exists only a default case for the case expression.
+  Case scrut bndr _ [Alt DEFAULT [] expr] -> do
+    -- Ensure that it is safe to not force the scrutinee.
+    -- TODO: Implement a flag which we can poll to see if we care about side
+    -- effects.
+    let sideEffects = False
+    guard $ exprOkForSpeculation scrut || not sideEffects
+
+    -- Transform the scrutinee.
+    scrut' <- continue subst scrut
+
+    -- We can discard the case expression as we only have one branch. We
+    -- substitute the case binder for the transformed scrutinee.
+    let subst' = subst & Subst.extend bndr scrut'
+    continue subst' expr
+
+  _ -> empty
+
+-- | Remove anything after forcing a dead-end expression.
+--
+-- If we force an expression that diverges, any expression after it remains
+-- unused. Thus, we can reduce expression size by removing these instances.
+forcedDeadEnd
+  :: Alternative m
+  => Monad m
+  => Transform m s CoreExpr
+forcedDeadEnd continue subst = \case
+  Case scrut _ _ _ -> do
+    guard $ exprIsDeadEnd scrut
+    continue subst scrut
+
+  -- Case scrut bndr ty _ -> do
+  --   guard $ exprIsDeadEnd scrut
+  --   continue subst $ Case scrut bndr ty []
+
+  App fun _ -> do
+    guard $ exprIsDeadEnd fun
+    continue subst fun
+
+  _ -> empty
+
+
+-- TODO: Case transformations we probably should apply!
+--
+-- - Check out 'mkCase' in the GHC API for some of the optimisations they
+--   perform.
+--
+-- - What about the identity case? Maybe should add a pass to eliminate that?
+--   To be explicit, an identity case is where every alternative pattern is
+--   returned as is. Essentially, a no-op case expression that returns its
+--   scrutinee in evaluated form. We do need to care about side-effects here!
+--
+-- - Should we add a pass to remove unreachable alternatives? 
+--
+-- - We should add constant unfolding for scrutinee case expressions. Stuff like
+--   integer size cast in a scrutinee should become a size change in the
+--   alternatives. Addition could also change the alternatives, etc. There's
+--   loads of these transformations.
+
+-- TODO: How to correctly deal with bot values!
+--
+-- The problems:
+-- - The 'caseDistribute' (specifically, the one that inlines functions) may
+--   force some thunks to HNF that are not normally forced. We can only perform
+--   this distribution if the scrutinee cannot have side-effects.
+--
+-- - The 'redundantCase' may remove bot scrutinees if we don't check for
+--   side-effects.
+--
+-- - The 'caseSelectDefault' cannot select a default for scrutinees with
+--   side-effects.
+--
+-- - The 'caseSwap' might behave differently if both scrutinees can have
+--   side-effects.
+--
+-- - We end up with a lot of bloat if we cannot remove redundant cases where
+--   we need to force the scrutinee. This is partly because of 'undefaultCase',
+--   which does a lot of code-duplication a priori. The other bit is that
+--   'prepCaseDedup' creates duplicate branches, but never squashes them
+--   if the opportunity presents itself. The former doesn't necessarily
+--   affect correctness. The latter might miss equivalence due to unsquashed
+--   alternatives.
+--
+-- The solutions:
+-- - For 'caseDistribute' and 'caseSwap' we should just ensure that the
+--   scrutinees are not forced/reordered (if it has side-effects) and in the
+--   correct order respectively.
+--
+-- - We ideally want to merge alternatives into the default. The 'undefaultCase'
+--   pass creates way too much bloat, though it is technically confluent.
+--   Would it not make sense to let 'prepCaseDedup' decide which alternatives
+--   we would still need in order to merge cases? This seems to be the only
+--   place where we know for sure whether it would not destroy confluence if we
+--   merge. I.e. if we merge whenever, we might not remove nested case
+--   expressions via 'reduceCaseBndr'. Note, we do care about confluence here in
+--   the sense that we should decide in some cases which pattern should be the
+--   default one. It should always be the one that captures the largest number
+--   of branches. In case of a tie, we could consistently use the branches that
+--   have the match the first constructor (when they are enumerated in order).
+--
+-- - Then the 'redundantCase' function should just check whether it is safe to
+--   remove the case given that there is **solely** a DEFAULT alternative. I.e.
+--   drop the case if the scrutinee does not have side-effects. 'prepCaseDedup'
+--   should have merged the right-hand-sides by then.
+--
+-- - Would it make sense for 'caseSelectDefault' to just remove any OtherCon it
+--   cannot match? I guess having an OtherCon unfolding automatically means that
+--   the expression is in head-normal-form, so I guess it doesn't really matter.
+--   My intention was that 'redundantCase' could perform the safety check for
+--   removal. Perhaps this is overkill and we can simply remove it immediately.
+--   A benefit though, is the fact that we will not redundantly transform all
+--   the cases for which we have evidence we will not evaluate them. Even if
+--   we cannot show that we definitively take the default branch. Maybe we
+--   should call this new function 'excludeBranches'/'excludeCons' or something
+--   along those lines.
 
 -- | Reduces any occurence of a case binder to the alt of that branch.
 --
@@ -876,7 +1034,8 @@ freshAltBndrs scope bndr = \case
     let goalTy = varType bndr
 
     -- Get the base types for the arguments and result of the constructor.
-    let (_, _, funTy) = tcSplitSigmaTy $ dataConType dataCon
+    -- TODO: Do we need to handle the foralls and dictionaries?
+    let (_, _, funTy) = tcSplitSigmaTy $ dataConRepType dataCon
     let (argTys, resTy) = splitFunTys funTy
 
     -- We try to match the result type of the constructor to the case binder.
@@ -1205,7 +1364,7 @@ floatCast continue subst = \case
     let expr = Cast (App fun arg') fco_res
     continue subst expr
 
-  App (Cast fun ForAllCo { fco_tcv,  fco_kind, fco_body}) (Type arg) -> do
+  App (Cast fun ForAllCo { fco_tcv, fco_kind, fco_body }) (Type arg) -> do
     -- The forall binder should only be substituted within the coercions. As
     -- there is no correct substitution for the entire returned expression, we
     -- continue only on the function body.

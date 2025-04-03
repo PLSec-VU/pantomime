@@ -23,7 +23,7 @@ import GHC.Generics (Generic)
 
 import Control.Monad.Except (ExceptT (..), MonadError)
 
-import Data.Functor.Classes (Show1)
+import Data.Functor.Classes (Show1, Eq1)
 
 import Grisette.Unified (EvalModeTag (..), BaseMonad)
 import Grisette
@@ -78,6 +78,10 @@ deriving via ExceptT RuntimeError (BaseMonad mode)
 deriving via ExceptT RuntimeError (BaseMonad mode) a
   instance (Show1 (BaseMonad mode), Show a)
   => Show (RuntimeValue mode a)
+
+deriving via ExceptT RuntimeError (BaseMonad mode) a
+  instance (Eq1 (BaseMonad mode), Eq a)
+  => Eq (RuntimeValue mode a)
 
 deriving via ExceptT RuntimeError (BaseMonad mode) a
   instance (EvalSym1 (BaseMonad mode), EvalSym a)

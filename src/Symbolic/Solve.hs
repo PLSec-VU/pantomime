@@ -97,7 +97,6 @@ exprSymEq'
   -> CoreExpr
   -> m (Either NonEq ())
 exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
-  dbg lhs
   unless (exprType lhs `eqType` exprType rhs) $ do
     throwError $ EvalError IllTyped
 
