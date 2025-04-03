@@ -109,7 +109,7 @@ execute :: MonadState State m => Word32 -> Word16 -> Maybe Output -> Word8 -> In
 execute reg rawInst out pc inst fetchPc = do 
     case inst of
         Add value -> 
-            let result = reg + fromIntegral value in
+            let result = reg + word8ToWord32 value in
             return ((Just $ Write result, Nothing), pc, pc+1, False, rawInst, out)
         Clr ->
             return ((Just (Write 0), Nothing), pc, pc+1, False, rawInst, out)
@@ -119,7 +119,7 @@ execute reg rawInst out pc inst fetchPc = do
             return ((Nothing, Nothing), pc, addr, True, rawInst, out)
         Beq offset ->
             if reg == 0 
-            then pure ((Nothing, Nothing), pc, fetchPc + offset, True, rawInst, out) 
+            then pure ((Nothing, Nothing), pc, pc + offset, True, rawInst, out) 
             else pure ((Nothing, Nothing), pc, pc + 1, False, rawInst, out)
 
 writeback :: MonadState State m => (Maybe Writeback, Maybe Output) -> Word16 -> Word32 -> m (Word32, Word16, Maybe Output)
@@ -201,8 +201,8 @@ data LeakInst = LBeq Word8
     deriving (Eq, Ord, Show) 
 
 -- | Attacker can only see the PC.
-obs :: (Maybe Output, Word8) -> Word8
-obs (_, pc) =  pc
+obs :: () -> (Maybe Output, Word8) -> ((),Word8)
+obs _ (_, pc) =  ((),pc)
 
 -- -- from instruction (and register value) to leakage instruction
 -- leakInst :: Instruction -> Word32 -> LeakInst
@@ -246,14 +246,14 @@ leak rawInst = do
     let curReg = lreg state
     case (lfetchInstruction state) of 
         Add value -> do
-            let result = lreg state + fromIntegral value
+            let result = lreg state + word8ToWord32 value
             put $ state {lreg = result, lfetchInstruction=inst}
             return LOther
         Clr -> do
             put $ state {lreg = 0, lfetchInstruction=inst}
             return LOther
         J addr -> do
-            put $ state {lfetchInstruction=inst}
+            put $ state {lfetchInstruction = Add 0}
             return (LJ addr)
         Beq offset ->
             if (lreg state) == 0 
@@ -296,8 +296,8 @@ sim leakInst = do
     
             
 
-proj :: State -> (LeakState, SimState)
-proj state = case wb of 
+proj :: (State,()) -> (LeakState, SimState)
+proj (state, _) = case wb of 
         Just (Write newReg) ->
             (LState {lreg = newReg, lfetchInstruction =  fetchInstruction state},
             SimState {simPc = pc state, simFetchPc=fetchPC state})
