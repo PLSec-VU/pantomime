@@ -21,7 +21,6 @@ import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
-import GHC.MonadCore
 
 import Control.Monad (forM)
 import Control.Monad.Except
@@ -48,17 +47,30 @@ evaluate
   -> CoreExpr
   -> m (Value m ws)
 evaluate env = \case
-  -- TODO: Add support for CoreUnfolding and DFunUnfolding.
   Var var | Just op <- isPrimOpId_maybe var -> evalPrimOp op
   Var var | Just dataCon <- isDataConId_maybe var -> evalDataCon dataCon
-  Var var -> lookupIdEnv env var `catchError` \_ -> do
-    dbg $ "Unbound variable:" <+> ppr var $+$ "Using uninterpreted function."
+  Var var | CoreUnfolding { uf_tmpl } <- idUnfolding var -> do
+    evaluate env uf_tmpl
 
-    let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
-        untyped = pure $ sym "unbound"
+  Var var | DFunUnfolding { df_bndrs, df_con, df_args } <- idUnfolding var -> do
+    let spine = Var $ dataConWorkId df_con
+    let inner = mkApps spine df_args
+    let quantified = mkLams df_bndrs inner
+    evaluate env quantified
 
-    let ty' = substTyEnv env $ varType var
-    typedValue untyped ty'
+  Var var | Just expr <- lookupLocalEnv env var -> evaluate env expr
+
+  Var var -> lookupIdEnv env var `catchError` \err -> do
+      throwError err
+
+  -- Var var -> lookupIdEnv env var `catchError` \_ -> do
+  --   dbg $ "Unbound variable:" <+> ppr var $+$ "Using uninterpreted function."
+
+  --   let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
+  --       untyped = pure $ sym "unbound"
+
+  --   let ty' = substTyEnv env $ varType var
+  --   typedValue untyped ty'
 
   Lit lit -> Primitive <$> evalLiteral lit
 
@@ -134,6 +146,10 @@ evalAlt env scrut = \case
       _ -> throwError IllTyped
 
     -- Whether the tag of this ADT is equivalent to the DataCon.
+    -- FIXME: This ends up duplicating the prerequisite a lot (i.e. whether
+    -- it goes to Invalid or errors). For every branch we unroll it once. In
+    -- reality, we should be able to unwrap the condition only once since all
+    -- the branch conditions rely on the same tag.
     let conditional = adtIsDataCon scrut' dataCon
 
     -- Extend the environment with the field for each binder.
