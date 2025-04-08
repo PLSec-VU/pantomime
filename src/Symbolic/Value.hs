@@ -44,7 +44,7 @@ module Symbolic.Value
 
 import GHC.Plugins hiding (empty)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.TyCo.Rep (scaledThing, Coercion (..))
+import GHC.Core.TyCo.Rep (scaledThing, Coercion (..), UnivCoProvenance (..))
 import GHC.Core.Type (substTy)
 import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
 import GHC.Core.Coercion.Opt
@@ -61,7 +61,8 @@ import Grisette
   , Function (..)
   , LogicalOp (..)
   , SymOrd (..)
-  , indexed, SymEq (..)
+  , SymEq (..)
+  , indexed
   )
 
 import Data.List ((!?))
@@ -76,6 +77,7 @@ import Symbolic.Runtime
 import Symbolic.Identifier
 import Symbolic.MonadEval
 import GHC.MonadCore
+import GHC.Data.Pair (Pair(..))
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where
@@ -119,8 +121,12 @@ instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
         lhs' <- lhs arg
         rhs' <- rhs arg
         strictIte cond lhs' rhs'
-    (Ty _, Ty _) -> throwError UnsupportedExpr
-    (Co _, Co _) -> throwError UnsupportedExpr
+    (Ty lty, Ty rty) -> do
+      unless (lty `eqType` rty) $ throwError IllTyped
+      pure $ Ty lty
+    (Co lco, Co rco) -> do
+      unless (lco `eqCoercion` rco) $ throwError IllTyped
+      pure $ Co lco
     _ -> throwError IllTyped
 
 instance (MonadEval m, KnownWordSize ws) => Assume (Value m ws) where
@@ -203,6 +209,30 @@ mkCast' c v = case (optCoercion' c, v) of
     let trans = mkTransCo co' co
     mkCast' trans value
 
+  -- Given some coercion (a ~ b) ~# (c ~ d).
+  --
+  -- We manually cast the boxed equality type:
+  -- (~) :: forall k (a :: k) (b :: k). (a ~# b) -> (a ~ b)
+  (co, Data adt)
+    | adtTyCon adt == eqTyCon
+    , [_kind, _a, _b] <- adtTyArgs adt
+    , [[Co co']] <- adtFields adt
+    -> do
+    -- Cast the coercion.
+    let cast = mkCoCast co' co
+
+    -- Construct the type arguments for this ADT from the new coercion.
+    let Pair a b  = coercionKind cast
+    let kind = typeKind a
+
+    -- Construct the new ADT.
+    pure $ Data ADT
+      { adtTyCon = adtTyCon adt
+      , adtTyArgs = [kind, a, b]
+      , adtTag = adtTag adt
+      , adtFields = [[Co cast]]
+      }
+
   -- TODO: Check whether the coercion actually fits the value.
   (co, value)
     | isReflexiveCo co -> pure value
@@ -237,6 +267,13 @@ type Symbolisable t ws =
   , Interpretable (SymFP64 -~> t)
   )
 
+eqTyConRole :: TyCon -> Maybe Role
+eqTyConRole tyCon = if
+  | tyCon == eqPrimTyCon -> Just Nominal
+  | tyCon == eqReprPrimTyCon -> Just Representational
+  | tyCon == eqPhantPrimTyCon -> Just Phantom
+  | otherwise -> Nothing
+
 -- TODO: I guess this should just return a maybe, as there is only one reason
 -- why this would possibly fail.
 -- TODO: Instead of having one giant guard, wouldn't it be better to make a
@@ -260,6 +297,12 @@ typedValue
   -> m (Value m ws)
 typedValue value ty
   | Right prim <- typedPrimitive value ty = pure $ Primitive prim
+  -- TODO: This should be part of typedPrimitive, but due the current setup, we
+  -- cannot create fresh variables in the typedPrimitive creation.
+  | ty `eqType` byteArrayPrimTy = do
+    idx <- freshIdx
+    let array = pure . sym $ indexed "!fresh" idx
+    pure . Primitive $ ByteArray value array
 
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
   , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
@@ -287,6 +330,16 @@ typedValue value ty
       , adtFields = fields
       }
 
+  | Just (tyCon, [_, _, a, b]) <- tcSplitTyConApp_maybe ty
+  , Just role <- eqTyConRole tyCon
+  = do
+    -- TODO: In reality, shouldn't we only be able to construct valid coercions
+    -- here. I guess otherwise, we would need to return Invalid. The problem is,
+    -- we currently don't allow Invalid in a coercion.
+    let provenance = PluginProv "Unsound placeholder"
+    let coercion = mkUnivCo provenance role a b
+    pure $ Co coercion
+
   | Just (_, _, argTy, resTy) <- splitFunTy_maybe ty = do
     let ident = value
     -- FIXME: These functions generate a fresh copies of a typed value **for each**
@@ -296,7 +349,7 @@ typedValue value ty
     -- Something similar to the GHC Subst? I.e. that's a way to generate a Value
     -- without the annoyance of these function scoping problems I'm facing all the
     -- time...
-    unless (ident == throwError Invalid) $ throwError UnsupportedExpr
+    -- unless (ident == throwError Invalid) $ throwError UnsupportedExpr
     typedLambda ident argTy resTy
 
   | Just (tyCoVar, resTy) <- splitForAllTyCoVar_maybe ty = do
@@ -477,10 +530,6 @@ typedLambda ident argTy resTy = if
       -- function application.
       unless (adtType adt `eqType` argTy) $ throwError IllTyped
 
-      -- FIXME: This is super broken, but it works for now as long as we don't
-      -- accept functions as arguments at the top level (or if they're nested
-      -- inside of an ADT btw).
-      unless (ident == throwError Invalid) $ throwError UnsupportedExpr
       invalidValue resTy
     _ -> throwError IllTyped
 
@@ -514,10 +563,6 @@ typedLambda ident argTy resTy = if
       -- function application.
       unless (iArgTy `eqType` iArgTy') $ throwError IllTyped
 
-      -- FIXME: This is super broken, but it works for now as long as we don't
-      -- accept functions as arguments at the top level (or if they're nested
-      -- inside of an ADT btw).
-      unless (ident == throwError Invalid) $ throwError UnsupportedExpr
       invalidValue resTy
     _ -> throwError IllTyped
 
@@ -793,7 +838,7 @@ data Primitive (ws :: PlatformWordSize) where
   -- need to wrap just solvables in RuntimeValue. In fact, RuntimeValue itself
   -- wraps Either, which is non-solvable. I really think it would be best to use
   -- the newtype wrapper here, it is a lot more clear! The same goes for Word
-  -- btw.
+  -- and for the size field of a ByteArray btw.
   Int :: RuntimeValue S (SymIntN (WordBits ws)) -> Primitive ws
   Int8 :: RuntimeValue S SymIntN8 -> Primitive ws
   Int16 :: RuntimeValue S SymIntN16 -> Primitive ws
@@ -806,6 +851,22 @@ data Primitive (ws :: PlatformWordSize) where
   Word64 :: RuntimeValue S SymWordN64 -> Primitive ws
   Float :: RuntimeValue S SymFP32 -> Primitive ws
   Double :: RuntimeValue S SymFP64 -> Primitive ws
+  -- ByteArray'
+  --   :: RuntimeValue S (ByteArray ws)
+  --   -> Primitive ws
+  ByteArray
+    :: RuntimeValue S (SymIntN (WordBits ws))
+    -> RuntimeValue S SymInteger
+    -> Primitive ws
+
+-- data ByteArray ws = ByteArray2
+--   { baSize :: SymIntN (WordBits ws)
+--   , baArray :: SymIntN (WordBits ws) --> SymIntN8
+--   }
+--   deriving Generic
+
+-- deriving via Default (ByteArray ws)
+--   instance KnownWordSize ws => Mergeable (ByteArray ws)
 
 instance KnownWordSize ws => Outputable (Primitive ws) where
   ppr = \case
@@ -821,6 +882,7 @@ instance KnownWordSize ws => Outputable (Primitive ws) where
     Word64 _ -> "Word64#"
     Float _ -> "Float#"
     Double _ -> "Double#"
+    ByteArray _ _ -> "ByteArray#"
 
 instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive ws) where
   weakEq = curry $ \case
@@ -852,6 +914,10 @@ instance (MonadEval m, KnownWordSize ws) => StrictIte m (Primitive ws) where
     (Word64 lhs, Word64 rhs) -> Word64 <$> strictIte cond lhs rhs
     (Float lhs, Float rhs) -> Float <$> strictIte cond lhs rhs
     (Double lhs, Double rhs) -> Double <$> strictIte cond lhs rhs
+    (ByteArray lsize larr, ByteArray rsize rarr) -> do
+      size <- strictIte cond lsize rsize
+      array <- strictIte cond larr rarr
+      pure $ ByteArray size array
     _ -> throwError IllTyped
 
 instance KnownWordSize ws => Assume (Primitive ws) where
@@ -868,6 +934,7 @@ instance KnownWordSize ws => Assume (Primitive ws) where
     Word64 value -> Word64 $ assume cond value
     Float value -> Float $ assume cond value
     Double value -> Double $ assume cond value
+    ByteArray size array -> ByteArray (assume cond size) array
 
 -- | Construct a primitive, symbolic value with the given type.
 typedPrimitive
