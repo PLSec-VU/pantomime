@@ -45,13 +45,16 @@ module Symbolic.Value
 
 import GHC.Plugins hiding (empty)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.TyCo.Rep (scaledThing, Coercion (..), UnivCoProvenance (..))
+import GHC.Core.TyCo.Rep (Coercion (..), UnivCoProvenance (..), scaledThing)
 import GHC.Core.Type (substTy)
 import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
 import GHC.Core.Coercion.Opt
+import GHC.Core.Reduction (Reduction (..))
+import GHC.Core.FamInstEnv (emptyFamInstEnv, normaliseType)
 import GHC.Builtin.Types.Prim
-import GHC.Tc.Utils.TcType (hasTyVarHead)
+import GHC.Tc.Utils.TcType (hasTyVarHead, tcTyConAppTyFamInstsAndVis, isTyFamFree)
 import GHC.Types.TyThing (MonadThings(..))
+import GHC.TypeLits (OrderingI (..), SomeNat (..), someNatVal, cmpNat)
 import GHC.Platform (PlatformWordSize)
 import GHC.Data.Pair (Pair(..))
 import GHC.MonadCore
@@ -74,17 +77,16 @@ import Data.List ((!?))
 import Data.Foldable (find)
 import qualified Data.Typeable as Typeable
 
-import Control.Monad (foldM, unless, forM, guard)
+import Control.Monad (foldM, unless, forM, guard, when)
 import Control.Monad.Except (MonadError (..))
 
-import Clash.Prelude (BitVector)
+import Clash.Prelude (BitVector, Unsigned, Signed)
 
 import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Runtime
 import Symbolic.Identifier
 import Symbolic.MonadEval
-import GHC.TypeLits (someNatVal, SomeNat (..), cmpNat, OrderingI (..))
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where
@@ -95,7 +97,7 @@ data Value m ws where
   -- could go for some other name? Perhaps just Newtype, as that's pretty much
   -- what we wrap in there anyway. The alternative would be to just prefix all
   -- options with something like 'V'. Then we can also use VType instead of Ty,
-  -- VLam instead of Fun, VCoercion instead of Co, etc.
+  -- VLam instead of Fun, VCoercion instead of Co, etc. Same for Opaque' btw.
   Cast' :: Coercion -> Value m ws -> Value m ws
   Fun :: Kind  -> (Value m ws -> m (Value m ws)) -> Value m ws
   Ty :: Type -> Value m ws
@@ -272,10 +274,6 @@ mkCast' c v = case (optCoercion' c, v) of
 --
 -- These constraints are picked such that we can avoid overlapping instances
 -- whilst allowing all values we require to be constructed.
--- TODO: Should we place the interpretable constraints into the
--- Identifier file? Then we can use interpretWith in places where we currently
--- are not. We have a bit of code duplication in some places rn, so maybe that
--- would resolve some of that!
 type Symbolisable t ws =
   ( Mergeable t
   , LinkedRep (ConType t) t
@@ -360,10 +358,13 @@ typedValue
   -> m (Value m ws)
 typedValue value ty = asum'
   [ typedBitVector value ty
+  , typedUnsigned value ty
+  , typedSigned value ty
   , Primitive <$> typedPrimitive value ty
+  , typedTyFamInst value ty
   , typedNewtype value ty
-  , typedADT value ty
   , typedLambda' value ty
+  , typedADT value ty
   , typedForall value ty
   , typedPoly value ty
   , typedCoercion ty
@@ -377,7 +378,10 @@ typedValue value ty = asum'
       err -> throwError err
 
 -- TODO: This should be defined outside of the base definitions. We should have
--- an import interface to allow interpretations like this one!
+-- an import interface to allow interpretations like this one! Also, I think we
+-- should be able to make interpretations less techinical... At the end of the
+-- day it's just a check: does the type match this pattern, then use this opaque
+-- interpretation instead.
 typedBitVector
   :: forall m ws
    . MonadEval m
@@ -414,6 +418,114 @@ typedBitVector value ty = do
           bv = value
       pure $ Opaque' ty bv
     _ -> throwError UnsupportedExpr
+
+-- TODO: This is a lot of code duplication. Can't we squash this one with
+-- typedBitVector?
+typedUnsigned
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedUnsigned value ty = do
+  -- Get the TyCon and type literal of this type, if possible.
+  (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
+    Just (tyCon, [size])
+      | Just size' <- isNumLitTy size >>= someNatVal
+      -- TODO: Additionally check whether the integer conversion is not lossy.
+      -> pure (tyCon, size')
+    _ -> throwError UnsupportedExpr
+
+  -- Ensure the TyCon is actually a BitVector.
+  -- TODO: We should really not be looking up the name here! This should just be
+  -- some pre-pass thing imo.
+  bvTyCon <- do
+    name <- liftCore $ thNameToGhcName ''Unsigned
+    name' <- whyFail UnsupportedExpr name
+    liftCore $ lookupTyCon name'
+  unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
+
+  -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
+  -- that the natural is actually a positive value.
+  -- TODO: We should find a better way to get this evidence. This pattern match
+  -- makes things super nested, which is horrible. There's many other places
+  -- w.r.t. the whole bitvec interpretation where we need this.
+  case cmpNat @1 @n Typeable.Proxy Typeable.Proxy of
+    LTI -> do
+      let bv :: RuntimeValue S (SymWordN n)
+          bv = value
+      pure $ Opaque' ty bv
+    _ -> throwError UnsupportedExpr
+
+typedSigned
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedSigned value ty = do
+  -- Get the TyCon and type literal of this type, if possible.
+  (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
+    Just (tyCon, [size])
+      | Just size' <- isNumLitTy size >>= someNatVal
+      -- TODO: Additionally check whether the integer conversion is not lossy.
+      -> pure (tyCon, size')
+    _ -> throwError UnsupportedExpr
+
+  -- Ensure the TyCon is actually a BitVector.
+  -- TODO: We should really not be looking up the name here! This should just be
+  -- some pre-pass thing imo.
+  bvTyCon <- do
+    name <- liftCore $ thNameToGhcName ''Signed
+    name' <- whyFail UnsupportedExpr name
+    liftCore $ lookupTyCon name'
+  unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
+
+  -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
+  -- that the natural is actually a positive value.
+  -- TODO: We should find a better way to get this evidence. This pattern match
+  -- makes things super nested, which is horrible. There's many other places
+  -- w.r.t. the whole bitvec interpretation where we need this.
+  case cmpNat @1 @n Typeable.Proxy Typeable.Proxy of
+    LTI -> do
+      let bv :: RuntimeValue S (SymIntN n)
+          bv = value
+      pure $ Opaque' ty bv
+    _ -> throwError UnsupportedExpr
+
+typedTyFamInst
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedTyFamInst value ty = do
+  -- Ensure there are type families here.
+  when (isTyFamFree ty) $ throwError UnsupportedExpr
+
+  -- Gather the type family instances.
+  -- FIXME: We should really get the local instances from the ModGuts via
+  -- mg_fam_inst_env.
+  let locFamInst = emptyFamInstEnv
+  extFamInst <- liftCore getPackageFamInstEnv
+  let famInst = (locFamInst, extFamInst)
+
+  -- Get the inner type after reducing the type family instances.
+  -- TODO: Shouldn't we check whether Nominal normalisation returns the same
+  -- coercion?
+  let reduction = normaliseType famInst Representational ty
+  let co = SymCo $ reductionCoercion reduction
+  let ty' = reductionReducedType reduction
+
+  -- Ensure there is an actual reduction.
+  when (isReflCo co) $ throwError UnsupportedExpr
+
+  -- Create the cast.
+  inner <- typedValue value ty'
+  mkCast' co inner
 
 typedNewtype
   :: forall m ws

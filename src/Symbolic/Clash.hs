@@ -2,12 +2,13 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeAbstractions #-}
+
 module Symbolic.Clash
   ( clashInterp
   ) where
 
 import Clash.Prelude (BitVector)
-import Clash.Sized.Internal.BitVector ((+#), (-#), (*#), negate#, fromInteger#)
+import Clash.Sized.Internal.BitVector ((+#), (-#), (*#), negate#, fromInteger#, xToBV)
 
 import GHC.Plugins
 import GHC.Types.TyThing (lookupId, MonadThings (..))
@@ -42,6 +43,7 @@ clashInterp = sequence
   , interpMul
   , interpNeg
   , interpFromInteger
+  , interpXToBV
   ]
 
 interpAdd
@@ -282,6 +284,35 @@ fromIntegerValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \
             _ -> throwError IllTyped
 
         _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpXToBV
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpXToBV = do
+  name <- thNameToGhcName' 'xToBV
+    ??= "Lookup failed."
+  var <- liftCore $ lookupId name
+
+  bvname <- liftCore $ thNameToGhcName ''BitVector
+  bvname' <- whyFail UnsupportedExpr bvname
+  bvTyCon <- liftCore $ lookupTyCon bvname'
+  pure (var, xToBVValue bvTyCon)
+
+xToBVValue
+  :: forall m ws
+   . MonadEval m
+  => TyCon
+  -> Value m ws
+xToBVValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+      opaque@Opaque' {} -> pure $ opaque
+
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
