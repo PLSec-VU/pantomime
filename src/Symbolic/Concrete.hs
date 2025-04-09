@@ -12,6 +12,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeAbstractions #-}
 
 module Symbolic.Concrete
   ( Concrete (..)
@@ -23,6 +24,7 @@ import Prelude hiding ((<>))
 import GHC.Plugins
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Tc.Utils.TcType (eqType)
+import GHC.TypeLits (SomeNat(..), someNatVal, OrderingI (..), cmpNat)
 
 import Grisette (ToCon (..), EvalSym (..), evalSymToCon, indexed, Symbol)
 import Grisette.Unified (EvalModeTag (..))
@@ -32,6 +34,8 @@ import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..), SupportedPrim (..))
 import Control.Monad.Identity (Identity (..))
 import Control.Monad.Except (MonadError (..), runExceptT)
 import Control.Monad (forM)
+
+import Data.Typeable (cast, Proxy (..))
 
 import Symbolic.WordSize
 import Symbolic.Value
@@ -171,6 +175,20 @@ concretise model = \case
 
   Poly _ty _ident -> pure $ Unknown
 
+  -- TODO: This is super ugly!
+  Opaque' ty value
+    -- TODO Actually check the TyCon!
+    | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
+    , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
+    -> do
+    bv <- whyFail UnsupportedExpr $ cast @_ @(RuntimeValue S (SymWordN n)) value
+    case cmpNat @1 @n Proxy Proxy of
+      LTI -> do
+        pure $ primCon model bv
+      _ -> throwError IllTyped
+
+  Opaque' _ty _value -> pure $ Unknown
+
   -- TODO: There should be a better error to emit than this no? Maybe we
   -- should make a new one... Maybe we should make an error for concrete lookup
   -- failures. Alternatively, I guess we could actually just return the type as
@@ -185,30 +203,42 @@ concretePrimitive
   -> Primitive ws
   -> Concrete
 concretePrimitive model = \case
-  Int value -> prim value
-  Int8 value -> prim value
-  Int16 value -> prim value
-  Int32 value -> prim value
-  Int64 value -> prim value
-  Word value -> prim value
-  Word8 value -> prim value
-  Word16 value -> prim value
-  Word32 value -> prim value
-  Word64 value -> prim value
-  Float value -> prim value
-  Double value -> prim value
+  Int value -> prim' value
+  Int8 value -> prim' value
+  Int16 value -> prim' value
+  Int32 value -> prim' value
+  Int64 value -> prim' value
+  Word value -> prim' value
+  Word8 value -> prim' value
+  Word16 value -> prim' value
+  Word32 value -> prim' value
+  Word64 value -> prim' value
+  Float value -> prim' value
+  Double value -> prim' value
+  ByteArray _ _ -> error "Unsupported for now!"
   where
-    prim
+    prim'
       :: forall a
        . ToCon a (ConType a)
       => EvalSym a
       => SupportedPrim (ConType a)
       => RuntimeValue S a
       -> Concrete
-    prim value = do
-      let concrete = evalSymToCon @_ @(RuntimeValue C (ConType a)) model value
-      -- TODO: I think we should either add an instance of ToCon from Runtime to
-      -- Either, or we should expose a runRuntime function. This is bad!
-      case runIdentity . runExceptT . unRuntimeValue $ concrete of
-        Right value' -> Value $ ModelValue value'
-        Left err -> Error err
+    prim' = primCon model
+
+-- TODO: Maybe give this a better name? This function is also kind of ugly...
+primCon
+  :: forall a
+   . ToCon a (ConType a)
+  => EvalSym a
+  => SupportedPrim (ConType a)
+  => Model
+  -> RuntimeValue S a
+  -> Concrete
+primCon model value = do
+  let concrete = evalSymToCon @_ @(RuntimeValue C (ConType a)) model value
+  -- TODO: I think we should either add an instance of ToCon from Runtime to
+  -- Either, or we should expose a runRuntime function. This is bad!
+  case runIdentity . runExceptT . unRuntimeValue $ concrete of
+    Right value' -> Value $ ModelValue value'
+    Left err -> Error err

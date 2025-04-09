@@ -28,6 +28,8 @@ import Symbolic.Runtime
 import Grisette.Internal.Unified.UnifiedBV (UnifiedBVImpl(..))
 import Grisette.Internal.Unified.EvalModeTag (EvalModeTag(..))
 
+-- TODO: I think most of this isn't used anymore. We should nuke it!
+
 -- | Unintepreted identifier.
 --
 -- This may represent any abstract value, such as a function or an ADT. It is

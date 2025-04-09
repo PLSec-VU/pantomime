@@ -1,6 +1,8 @@
 module Symbolic.Environment
   ( Environment (..)
   , emptyEnv
+  , lookupLocalEnv
+  , extendLocalEnv
   , lookupIdEnv
   , extendEnv
   , extendManyEnv
@@ -25,6 +27,7 @@ data Environment m ws = Environment
   { idSubst :: IdEnv (Value m ws)
   , tvSubst :: TvSubstEnv
   , cvSubst :: CvSubstEnv
+  , localIds :: IdEnv CoreExpr
   }
 
 emptyEnv :: Environment m ws
@@ -32,7 +35,24 @@ emptyEnv = Environment
   { idSubst = emptyVarEnv
   , tvSubst = emptyVarEnv
   , cvSubst = emptyVarEnv
+  , localIds = emptyVarEnv
   }
+
+lookupLocalEnv
+  :: Environment m ws
+  -> Var
+  -> Maybe CoreExpr
+lookupLocalEnv env = lookupVarEnv (localIds env)
+
+extendLocalEnv
+  :: Environment m ws
+  -> CoreProgram
+  -> Environment m ws
+extendLocalEnv = foldl' $ \env -> \case
+  NonRec bndr expr -> do
+    let local = extendVarEnv (localIds env) bndr expr
+    env { localIds = local }
+  Rec _ -> env
 
 lookupIdEnv
   :: MonadError EvalError m

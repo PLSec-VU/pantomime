@@ -37,6 +37,7 @@ import Symbolic.Runtime
 import Symbolic.Value
 import Symbolic.Environment
 import Symbolic.MonadEval
+import GHC.MonadCore
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate
@@ -47,8 +48,14 @@ evaluate
   -> CoreExpr
   -> m (Value m ws)
 evaluate env = \case
+  Var var | Opaque _ <- inl_inline $ idInlinePragma var -> do
+    dbg' "OPAQUE:"
+    dbg var
+    lookupIdEnv env var
+
   Var var | Just op <- isPrimOpId_maybe var -> evalPrimOp op
   Var var | Just dataCon <- isDataConId_maybe var -> evalDataCon dataCon
+
   Var var | CoreUnfolding { uf_tmpl } <- idUnfolding var -> do
     evaluate env uf_tmpl
 
@@ -60,8 +67,11 @@ evaluate env = \case
 
   Var var | Just expr <- lookupLocalEnv env var -> evaluate env expr
 
-  Var var -> lookupIdEnv env var `catchError` \err -> do
-      throwError err
+  Var var -> lookupIdEnv env var
+  -- Var var -> lookupIdEnv env var `catchError` \err -> do
+  --   dbg $ varType var
+  --   dbg var
+  --   throwError err
 
   -- Var var -> lookupIdEnv env var `catchError` \_ -> do
   --   dbg $ "Unbound variable:" <+> ppr var $+$ "Using uninterpreted function."

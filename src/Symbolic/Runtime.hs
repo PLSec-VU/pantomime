@@ -12,6 +12,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
 module Symbolic.Runtime
   ( RuntimeValue (..)
@@ -67,6 +68,10 @@ deriving via ExceptT RuntimeError (BaseMonad mode) a
   instance (Mergeable1 (BaseMonad mode), Mergeable a)
   => Mergeable (RuntimeValue mode a)
 
+deriving via ExceptT RuntimeError (BaseMonad mode)
+  instance (Mergeable1 (BaseMonad mode))
+  => Mergeable1 (RuntimeValue mode)
+
 deriving via ExceptT RuntimeError (BaseMonad mode) a
   instance (SymBranching (BaseMonad mode), Mergeable a)
   => SimpleMergeable (RuntimeValue mode a)
@@ -109,6 +114,8 @@ instance ToCon a b => ToCon (RuntimeValue C a) (RuntimeValue C b) where
 -- deal with errors in any case, so maybe the disable should just ensure the
 -- inputs are not bot?
 data RuntimeError where
+  Overflow :: RuntimeError
+  Underflow :: RuntimeError
   DivideByZero :: RuntimeError
   -- | Any Symbolic value that cannot be reached in practise.
   --
@@ -126,5 +133,7 @@ data RuntimeError where
 
 instance Outputable RuntimeError where
   ppr = \case
+    Overflow -> text "overflow"
+    Underflow -> text "underflow"
     DivideByZero -> text "divide-by-zero"
     Invalid -> text "invalid"

@@ -25,14 +25,11 @@ import qualified Language.Haskell.TH.Syntax as TH
 
 import qualified Lint
 import qualified Projection
--- Import the RULES defined in Diverge.
-import Diverge ()
 import Types
 import Util
 import Transform
 import Unification
 import Symbolic.Solve
-import Monomorph (monomorphize)
 
 plugin :: Plugin
 plugin = defaultPlugin
@@ -384,13 +381,10 @@ checkSpec (UCGenerated spec) (Bind' var expr) = do
   let imp'' = resolveInstances instEnvs imp'
   let sim'' = resolveInstances instEnvs sim'
 
-  imp''' <- monomorphize guts imp''
-  Lint.panic Lint.base scope imp'''
+  Lint.panic Lint.base scope imp''
+  Lint.panic Lint.base scope sim''
 
-  sim''' <- monomorphize guts sim''
-  Lint.panic Lint.base scope sim'''
-
-  result <- exprSymEq imp''' sim'''
+  result <- exprSymEq imp'' sim''
 
   case result of
     Right _ -> do
@@ -412,14 +406,15 @@ symCompare
 symCompare (UCGenerated (SymCompare other)) (Bind' var expr) = do
   let resolve name = Var <$> resolveTH' name
 
-  guts <- reader modGuts
-  expr' <- monomorphize guts expr
+  other' <- resolve other
+  -- guts <- reader modGuts
+  -- expr' <- monomorphize guts expr
 
-  other' <- do
-    other' <- resolve other
-    monomorphize guts other'
+  -- other' <- do
+  --   other' <- resolve other
+  --   monomorphize guts other'
 
-  result <- exprSymEq expr' other'
+  result <- exprSymEq expr other'
 
   case result of
     Right _ -> do

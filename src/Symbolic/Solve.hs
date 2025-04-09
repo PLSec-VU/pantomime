@@ -43,10 +43,13 @@ import Grisette
 
 import Control.Monad.Except (MonadError (..), modifyError, runExceptT)
 import Control.Monad.State (evalStateT)
+import Control.Monad.Reader (MonadReader (..))
 import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
 import Data.Foldable (forM_)
+
+import Types (HasModGuts (..))
 
 import Symbolic.WordSize
 import Symbolic.Evaluate
@@ -55,6 +58,11 @@ import Symbolic.Value
 import Symbolic.Concrete
 import Symbolic.Runtime
 import Symbolic.MonadEval
+
+-- TODO: These modules should just get their own package such that a user can
+-- just provide the interpretations they require for the code!
+import Symbolic.Base
+import Symbolic.Clash
 
 -- TODO: Rename this thing.
 data NonEq
@@ -73,8 +81,11 @@ instance Outputable NonEq where
     SolveError err -> text "solver error: " <+> text (show err)
 
 exprSymEq
-  :: forall m
+  :: forall m r
    . MonadCore m
+  => MonadFail m
+  => MonadReader r m
+  => HasModGuts r
   => HasDynFlags m
   => CoreExpr
   -> CoreExpr
@@ -86,12 +97,15 @@ exprSymEq lhs rhs = do
 
   -- We run the comparison with the word size of the target platform.
   case pwsize of
-    PW4 -> exprSymEq' @m @PW4 lhs rhs
-    PW8 -> exprSymEq' @m @PW8 lhs rhs
+    PW4 -> exprSymEq' @m @r @PW4 lhs rhs
+    PW8 -> exprSymEq' @m @r @PW8 lhs rhs
 
 exprSymEq'
-  :: forall m ws
+  :: forall m r ws
    . MonadCore m
+  => MonadFail m
+  => MonadReader r m
+  => HasModGuts r
   => KnownWordSize ws
   => CoreExpr
   -> CoreExpr
@@ -103,8 +117,15 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
   (bndrs, lres, rres, neq) <- modifyError EvalError $ do
     bndrs <- symbolicBndrs $ exprType lhs
 
+    base <- baseValues
+    clash <- clashInterp
+    env <- extendManyEnv emptyEnv $ base ++ clash
+
+    prog <- reader $ mg_binds . modGuts
+    let env' = extendLocalEnv env prog
+
     let saturate expr = do
-          value <- evaluate emptyEnv expr
+          value <- evaluate env' expr
           applyValues @_ @ws value bndrs
 
     lresult <- saturate lhs

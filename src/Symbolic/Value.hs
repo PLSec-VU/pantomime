@@ -14,6 +14,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeAbstractions #-}
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE TemplateHaskellQuotes #-}
 
 module Symbolic.Value
   ( Value (..)
@@ -50,13 +51,17 @@ import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
 import GHC.Core.Coercion.Opt
 import GHC.Builtin.Types.Prim
 import GHC.Tc.Utils.TcType (hasTyVarHead)
+import GHC.Types.TyThing (MonadThings(..))
 import GHC.Platform (PlatformWordSize)
+import GHC.Data.Pair (Pair(..))
+import GHC.MonadCore
 
 import Grisette.SymPrim
 import Grisette.Unified (EvalModeTag (..), GetIntN)
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 import Grisette
   ( Solvable (..)
+  , SimpleMergeable
   , Mergeable
   , Function (..)
   , LogicalOp (..)
@@ -67,17 +72,19 @@ import Grisette
 
 import Data.List ((!?))
 import Data.Foldable (find)
+import qualified Data.Typeable as Typeable
 
 import Control.Monad (foldM, unless, forM, guard)
 import Control.Monad.Except (MonadError (..))
+
+import Clash.Prelude (BitVector)
 
 import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Runtime
 import Symbolic.Identifier
 import Symbolic.MonadEval
-import GHC.MonadCore
-import GHC.Data.Pair (Pair(..))
+import GHC.TypeLits (someNatVal, SomeNat (..), cmpNat, OrderingI (..))
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where
@@ -93,6 +100,16 @@ data Value m ws where
   Fun :: Kind  -> (Value m ws -> m (Value m ws)) -> Value m ws
   Ty :: Type -> Value m ws
   Co :: Coercion -> Value m ws
+  Opaque'
+    :: forall m ws a
+     . ( Typeable.Typeable a
+       , SimpleMergeable a
+       , Mergeable a
+       , SymEq a
+       )
+    => Type
+    -> RuntimeValue S a
+    -> Value m ws
 
 instance KnownWordSize ws => Outputable (Value m ws) where
   ppr = \case
@@ -103,6 +120,7 @@ instance KnownWordSize ws => Outputable (Value m ws) where
     Fun argTy _ -> ppr argTy <+> "-> ?"
     Ty ty -> text "@" <+> ppr ty
     Co co -> ppr co
+    Opaque' ty _ -> ppr ty
 
 instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
   strictIte cond = curry $ \case
@@ -127,6 +145,10 @@ instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
     (Co lco, Co rco) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
       pure $ Co lco
+    (Opaque' @_ @_ @l lty lhs, Opaque' @_ @_ @r rty rhs) -> do
+      unless (lty `eqType` rty) $ throwError IllTyped
+      Typeable.Refl <- whyFail IllTyped $ Typeable.eqT @l @r
+      Opaque' lty <$> strictIte cond lhs rhs
     _ -> throwError IllTyped
 
 instance (MonadEval m, KnownWordSize ws) => Assume (Value m ws) where
@@ -134,7 +156,7 @@ instance (MonadEval m, KnownWordSize ws) => Assume (Value m ws) where
     Primitive prim -> Primitive $ assume cond prim
     Poly ty value -> Poly ty $ assume cond value
     Data adt -> Data $ assume cond adt
-    Cast' co val -> Cast' co $ assume cond val
+    Cast' co value -> Cast' co $ assume cond value
     Fun argTy fun -> do
       Fun argTy $ \arg -> do
         assume cond <$> fun arg
@@ -143,6 +165,7 @@ instance (MonadEval m, KnownWordSize ws) => Assume (Value m ws) where
     -- I think we should change this. We shouldn't just drop assumptions...
     Ty ty -> Ty ty
     Co co -> Co co
+    Opaque' ty value -> Opaque' ty $ assume cond value
 
 -- TODO: We removed strong equivalence now, pehaps this shouldn't be called weak
 -- equivalence anymore! Also, I think it would be better if this would return a
@@ -162,6 +185,11 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (Value m ws) where
       lhs' <- lhs arg
       rhs' <- rhs arg
       weakEq lhs' rhs'
+
+    (Opaque' @_ @_ @l lty lhs, Opaque' @_ @_ @r rty rhs) -> do
+      unless (lty `eqType` rty) $ throwError IllTyped
+      Typeable.Refl <- whyFail IllTyped $ Typeable.eqT @l @r
+      weakEq lhs rhs
 
     (Poly lty lhs, Poly rty rhs) -> do
       unless (lty `eqType` rty) $ throwError IllTyped
@@ -274,6 +302,41 @@ eqTyConRole tyCon = if
   | tyCon == eqPhantPrimTyCon -> Just Phantom
   | otherwise -> Nothing
 
+-- Goal:
+--
+-- Support OPAQUE expressions from Clash. These should get a handwritten
+-- bitvector interpretation.
+--
+-- Steps:
+--
+-- Allow us to create symbolic instances for opaque types. I.e. BitVector should
+-- get a SymWordN symbolic instance.
+-- - To actuate this, we need to be able to access the TyCons of the things we
+--   wish to interpret. This should be done through lookupTyCon/lookupTyThing.
+--   It would be best to look this up once, but we could get away with doing the
+--   lookup inside typedValue, since we are in the CoreM monad for debugging
+--   purposes.
+-- - Apart from this, we really should be able to split the typedValue function
+--   into separate checks. This allows us to easily extend it!
+--
+-- Allow us to create symbolic instances for opaque functions. We already have
+-- something like this going. I guess in the ideal world, we allow user defined
+-- interpretations through some interface. Then we define a Clash interpretation
+-- outside of the base symbolic executor. This would be much cleaner. For now
+-- though, we don't have enough time... :(
+--
+-- - Short term solution would be to add variable size bitvector as a primitive.
+--   Then we can use the existing method to add interpretation to the clash
+--   opaque functions.
+--
+-- - After the deadline, we should consider adding in an Opaque constructor to
+--   Value. It would have an existential value in it, with some constraints
+--   (i.e. it should implement some of the interfaces we use for merging,
+--   if then else, etc.). We could btw reuse this to do polymorphic instances,
+--   since they are, in a way, also opaque. Then we could interface the Opaque
+--   constructor to allow for users to interpret values and create symbolic
+--   values.
+
 -- TODO: I guess this should just return a maybe, as there is only one reason
 -- why this would possibly fail.
 -- TODO: Instead of having one giant guard, wouldn't it be better to make a
@@ -295,92 +358,193 @@ typedValue
   => (forall t. Symbolisable t ws => RuntimeValue S t)
   -> Type
   -> m (Value m ws)
-typedValue value ty
-  | Right prim <- typedPrimitive value ty = pure $ Primitive prim
-  -- TODO: This should be part of typedPrimitive, but due the current setup, we
-  -- cannot create fresh variables in the typedPrimitive creation.
-  | ty `eqType` byteArrayPrimTy = do
-    idx <- freshIdx
-    let array = pure . sym $ indexed "!fresh" idx
-    pure . Primitive $ ByteArray value array
+typedValue value ty = asum'
+  [ typedBitVector value ty
+  , Primitive <$> typedPrimitive value ty
+  , typedNewtype value ty
+  , typedADT value ty
+  , typedLambda' value ty
+  , typedForall value ty
+  , typedPoly value ty
+  , typedCoercion ty
+  , typedType ty
+  ]
+  where
+    asum' :: [m a] -> m a
+    asum' [] = dbg ty >> throwError UnsupportedExpr
+    asum' (x:xs) = x `catchError` \case
+      UnsupportedExpr -> asum' xs
+      err -> throwError err
 
-  | Just (tyCon, tys) <- tcSplitTyConApp_maybe ty
-  , Just (ty', co) <- instNewTyCon_maybe tyCon tys = do
-    value' <- typedValue value ty'
-    let co' = mkSymCo co
-    mkCast' co' value'
+-- TODO: This should be defined outside of the base definitions. We should have
+-- an import interface to allow interpretations like this one!
+typedBitVector
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedBitVector value ty = do
+  -- Get the TyCon and type literal of this type, if possible.
+  (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
+    Just (tyCon, [size])
+      | Just size' <- isNumLitTy size >>= someNatVal
+      -- TODO: Additionally check whether the integer conversion is not lossy.
+      -> pure (tyCon, size')
+    _ -> throwError UnsupportedExpr
 
-  | Just (tyCon, tyArgs) <- tcSplitTyConApp_maybe ty
-  , isDataTyCon tyCon
-  , Just dataCons <- tyConDataCons_maybe tyCon = do
-    -- TODO: This will loop infinitely for recursive types. We need to resolve
-    -- that somehow.
+  -- Ensure the TyCon is actually a BitVector.
+  -- TODO: We should really not be looking up the name here! This should just be
+  -- some pre-pass thing imo.
+  bvTyCon <- do
+    name <- liftCore $ thNameToGhcName ''BitVector
+    name' <- whyFail UnsupportedExpr name
+    liftCore $ lookupTyCon name'
+  unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-    -- TODO: I don't really like this tag creation. Should the tagInRange
-    -- maybe just return the condition?
-    let tag = tagInRange value tyCon
+  -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
+  -- that the natural is actually a positive value.
+  -- TODO: We should find a better way to get this evidence. This pattern match
+  -- makes things super nested, which is horrible. There's many other places
+  -- w.r.t. the whole bitvec interpretation where we need this.
+  case cmpNat @1 @n Typeable.Proxy Typeable.Proxy of
+    LTI -> do
+      let bv :: RuntimeValue S (SymWordN n)
+          bv = value
+      pure $ Opaque' ty bv
+    _ -> throwError UnsupportedExpr
 
-    -- Create fresh values for all fields.
-    fields <- forM dataCons $ flip freshDataConBndrs tyArgs
+typedNewtype
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedNewtype value ty = do
+  (tyCon, tys) <- whyFail UnsupportedExpr $ tcSplitTyConApp_maybe ty
+  (ty', co) <- whyFail UnsupportedExpr $ instNewTyCon_maybe tyCon tys
+  value' <- typedValue value ty'
+  let co' = mkSymCo co
+  mkCast' co' value'
 
-    pure $ Data ADT
-      { adtTyCon = tyCon
-      , adtTyArgs = tyArgs
-      , adtTag = tag
-      , adtFields = fields
-      }
+typedADT
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedADT value ty = do
+  -- Ensure this is a ADT we can construct
+  (tyCon, tyArgs) <- whyFail UnsupportedExpr $ tcSplitTyConApp_maybe ty
+  unless (isDataTyCon tyCon) $ throwError UnsupportedExpr
+  dataCons <- whyFail UnsupportedExpr $ tyConDataCons_maybe tyCon
+  -- TODO: This will loop infinitely for recursive types. We need to resolve
+  -- that somehow.
 
-  | Just (tyCon, [_, _, a, b]) <- tcSplitTyConApp_maybe ty
-  , Just role <- eqTyConRole tyCon
-  = do
-    -- TODO: In reality, shouldn't we only be able to construct valid coercions
-    -- here. I guess otherwise, we would need to return Invalid. The problem is,
-    -- we currently don't allow Invalid in a coercion.
-    let provenance = PluginProv "Unsound placeholder"
-    let coercion = mkUnivCo provenance role a b
-    pure $ Co coercion
+  -- TODO: I don't really like this tag creation. Should the tagInRange
+  -- maybe just return the condition?
+  let tag = tagInRange value tyCon
 
-  | Just (_, _, argTy, resTy) <- splitFunTy_maybe ty = do
-    let ident = value
-    -- FIXME: These functions generate a fresh copies of a typed value **for each**
-    -- call. We cannot lift this operation outside of the lambda it seems. I think
-    -- we'll have to rethink the Fun pattern. Returning an actual function breaks
-    -- so many things. Perhaps it would be better to create a substitution function?
-    -- Something similar to the GHC Subst? I.e. that's a way to generate a Value
-    -- without the annoyance of these function scoping problems I'm facing all the
-    -- time...
-    -- unless (ident == throwError Invalid) $ throwError UnsupportedExpr
-    typedLambda ident argTy resTy
+  -- Create fresh values for all fields.
+  fields <- forM dataCons $ flip freshDataConBndrs tyArgs
 
-  | Just (tyCoVar, resTy) <- splitForAllTyCoVar_maybe ty = do
-    let vars = shallowTyCoVarsOfType ty
-    let subst = mkEmptySubst $ InScope vars
+  pure $ Data ADT
+    { adtTyCon = tyCon
+    , adtTyArgs = tyArgs
+    , adtTag = tag
+    , adtFields = fields
+    }
 
-    let argKind = tyVarKind tyCoVar
-    -- TODO: This should not be a function accepting both a coercion variable or
-    -- type variable. Instead, two individual functions should be made for each
-    -- case.
-    pure . Fun argKind $ \case
-      Ty arg -> do
-        let subst' = extendTvSubst subst tyCoVar arg
-        let resTy' = substTy subst' resTy
-        typedValue value resTy'
+typedLambda'
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedLambda' value ty = do
+  (_, _, argTy, resTy) <- whyFail UnsupportedExpr $ splitFunTy_maybe ty
+  let ident = value
+  -- FIXME: These functions generate a fresh copies of a typed value **for
+  -- each** call. We cannot lift this operation outside of the lambda it seems.
+  -- I think we'll have to rethink the Fun pattern. Returning an actual function
+  -- breaks so many things. Perhaps it would be better to create a substitution
+  -- function? Something similar to the GHC Subst? I.e. that's a way to generate
+  -- a Value without the annoyance of these function scoping problems I'm facing
+  -- all the time...
+  -- unless (ident == throwError Invalid) $ throwError UnsupportedExpr
+  typedLambda ident argTy resTy
 
-      Co arg -> do
-        let subst' = extendCvSubst subst tyCoVar arg
-        let resTy' = substTy subst' resTy
-        typedValue value resTy'
+typedForall
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedForall value ty = do
+  (tyCoVar, resTy) <- whyFail UnsupportedExpr $ splitForAllTyCoVar_maybe ty
+  let vars = shallowTyCoVarsOfType ty
+  let subst = mkEmptySubst $ InScope vars
 
-      _ -> throwError IllTyped
+  let argKind = tyVarKind tyCoVar
+  -- TODO: This should not be a function accepting both a coercion variable or
+  -- type variable. Instead, two individual functions should be made for each
+  -- case.
+  pure . Fun argKind $ \case
+    Ty arg -> do
+      let subst' = extendTvSubst subst tyCoVar arg
+      let resTy' = substTy subst' resTy
+      typedValue value resTy'
 
-  -- TODO: Is this correct? My guess is that any type variable should do.
-  | isTypeLikeKind ty = pure $ Ty alphaTy
+    Co arg -> do
+      let subst' = extendCvSubst subst tyCoVar arg
+      let resTy' = substTy subst' resTy
+      typedValue value resTy'
 
-  | hasTyVarHead ty = pure $ Poly ty value
+    _ -> throwError IllTyped
 
-  | otherwise = do
-    dbg ty
-    throwError UnsupportedExpr
+typedCoercion
+  :: forall m ws
+   . MonadEval m
+  => Type
+  -> m (Value m ws)
+typedCoercion ty = do
+  -- Ensure we have a coercion type.
+  (tyCon, a, b) <- case tcSplitTyConApp_maybe ty of
+    Just (tyCon, [_, _, a, b]) -> pure (tyCon, a, b)
+    _ -> throwError UnsupportedExpr
+  role <- whyFail UnsupportedExpr $ eqTyConRole tyCon
+
+  -- TODO: In reality, shouldn't we only be able to construct valid coercions
+  -- here. I guess otherwise, we would need to return Invalid. The problem is,
+  -- we currently don't allow Invalid in a coercion.
+  let provenance = PluginProv "Unsound placeholder"
+  let coercion = mkUnivCo provenance role a b
+  pure $ Co coercion
+
+typedType
+  :: forall m ws
+   . MonadEval m
+  => Type
+  -> m (Value m ws)
+typedType ty = if
+  | isTypeLikeKind ty -> pure $ Ty alphaTy
+  | otherwise -> throwError UnsupportedExpr
+
+typedPoly
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedPoly value ty = if
+  | hasTyVarHead ty -> pure $ Poly ty value
+  | otherwise -> throwError UnsupportedExpr
 
 -- | Create a uninterpreted lambda of the given type.
 --
@@ -524,14 +688,21 @@ typedLambda ident argTy resTy = if
     _ -> throwError IllTyped
 
   | Just (tyCon, _) <- tcSplitTyConApp_maybe argTy
-  , isDataTyCon tyCon -> lam $ \case
-    Data adt -> do
-      -- TODO: I guess this check is not really necessary if we check types on
-      -- function application.
-      unless (adtType adt `eqType` argTy) $ throwError IllTyped
+  , isDataTyCon tyCon -> lam $ \arg -> case arg of
+      Data adt -> do
+        -- TODO: I guess this check is not really necessary if we check types on
+        -- function application.
+        unless (adtType adt `eqType` argTy) $ throwError IllTyped
 
-      invalidValue resTy
-    _ -> throwError IllTyped
+        invalidValue resTy
+      Opaque' ty _ -> do
+        unless (ty `eqType` argTy) $ throwError IllTyped
+
+        -- TODO: This thing is here because we can interpret Opaque types. It
+        -- is just a hack though, but this whole function construction is broken
+        -- anyway...
+        invalidValue resTy
+      _ -> throwError IllTyped
 
   | Just (tyCon, tys) <- tcSplitTyConApp_maybe argTy
   , Just (argTy', co) <- instNewTyCon_maybe tyCon tys -> lam $ \case
@@ -613,6 +784,7 @@ invalidValue
   => Type
   -> m (Value m ws)
 invalidValue = typedValue $ mrgThrowError Invalid
+-- invalidValue ty = assume false <$> freshValue ty
 
 -- | Create a function with the arity of whatever we are folding over.
 --
@@ -939,7 +1111,7 @@ instance KnownWordSize ws => Assume (Primitive ws) where
 -- | Construct a primitive, symbolic value with the given type.
 typedPrimitive
   :: forall m ws
-   . MonadError EvalError m
+   . MonadEval m
   => KnownWordSize ws
   => (forall t. Symbolisable t ws => RuntimeValue S t)
   -> Type
@@ -957,4 +1129,8 @@ typedPrimitive value ty
   | ty `eqType` word64PrimTy = pure $ Word64 value
   | ty `eqType` floatPrimTy = pure $ Float value
   | ty `eqType` doublePrimTy = pure $ Double value
+  | ty `eqType` byteArrayPrimTy = do
+    idx <- freshIdx
+    let array = pure . sym $ indexed "!fresh" idx
+    pure $ ByteArray value array
   | otherwise = throwError UnsupportedExpr
