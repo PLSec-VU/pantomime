@@ -180,8 +180,19 @@ concretise model = \case
     -- TODO Actually check the TyCon!
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
     , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
+    , Just bv <- cast @_ @(RuntimeValue S (SymWordN n)) value
     -> do
-    bv <- whyFail UnsupportedExpr $ cast @_ @(RuntimeValue S (SymWordN n)) value
+    case cmpNat @1 @n Proxy Proxy of
+      LTI -> do
+        pure $ primCon model bv
+      _ -> throwError IllTyped
+
+  Opaque' ty value
+    -- TODO Actually check the TyCon!
+    | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
+    , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
+    , Just bv <- cast @_ @(RuntimeValue S (SymIntN n)) value
+    -> do
     case cmpNat @1 @n Proxy Proxy of
       LTI -> do
         pure $ primCon model bv
