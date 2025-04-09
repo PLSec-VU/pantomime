@@ -52,7 +52,7 @@ import GHC.Core.Coercion.Opt
 import GHC.Core.Reduction (Reduction (..))
 import GHC.Core.FamInstEnv (emptyFamInstEnv, normaliseType)
 import GHC.Builtin.Types.Prim
-import GHC.Tc.Utils.TcType (hasTyVarHead, tcTyConAppTyFamInstsAndVis, isTyFamFree)
+import GHC.Tc.Utils.TcType (hasTyVarHead, isTyFamFree)
 import GHC.Types.TyThing (MonadThings(..))
 import GHC.TypeLits (OrderingI (..), SomeNat (..), someNatVal, cmpNat)
 import GHC.Platform (PlatformWordSize)
