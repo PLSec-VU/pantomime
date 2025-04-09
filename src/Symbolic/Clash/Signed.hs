@@ -15,4 +15,251 @@ clashInterp
   :: forall m ws
    . Monad m
   => m [(Var, Value m ws)]
-clashInterp = pure []
+clashInterp = sequence
+  [ interpFromInteger
+  , interpAdd
+  , interpSub
+  , interpMul
+  , interpNeg
+  , interpFromInteger
+  ]
+
+interpAdd
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpAdd = do
+  name <- thNameToGhcName' '(+#)
+    ??= "Lookup failed."
+  var <- liftCore $ lookupId name
+
+  sname <- liftCore $ thNameToGhcName ''Signed
+  sname' <- whyFail UnsupportedExpr sname
+  bvTyCon <- liftCore $ lookupTyCon sname'
+  pure (var, addValue bvTyCon)
+
+-- TODO: It is insanely ugly and error prone to define interpretations like
+-- this...
+addValue
+  :: forall m ws
+   . MonadEval m
+  => TyCon
+  -> Value m ws
+addValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+      Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+        Opaque' _rty rhs -> do
+          SomeNat @n _ <- whyFail IllTyped $ do
+            size' <- isNumLitTy size
+            someNatVal size'
+
+          case cmpNat @1 @n Proxy Proxy of
+            LTI -> do
+              lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) lhs
+              rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) rhs
+
+              let result = mrgLiftA2 (+) lhs' rhs'
+              pure $ Opaque' lty result
+            _ -> throwError IllTyped
+        _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpSub
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpSub = do
+  name <- thNameToGhcName' '(-#)
+    ??= "Lookup failed."
+  var <- liftCore $ lookupId name
+
+  sname <- liftCore $ thNameToGhcName ''Signed
+  sname' <- whyFail UnsupportedExpr sname
+  bvTyCon <- liftCore $ lookupTyCon sname'
+  pure (var, subValue bvTyCon)
+
+subValue
+  :: forall m ws
+   . MonadEval m
+  => TyCon
+  -> Value m ws
+subValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+      Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+        Opaque' _rty rhs -> do
+          SomeNat @n _ <- whyFail IllTyped $ do
+            size' <- isNumLitTy size
+            someNatVal size'
+
+          case cmpNat @1 @n Proxy Proxy of
+            LTI -> do
+              lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) lhs
+              rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) rhs
+
+              let result = mrgLiftA2 (-) lhs' rhs'
+              pure $ Opaque' lty result
+            _ -> throwError IllTyped
+        _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpMul
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpMul = do
+  name <- thNameToGhcName' '(*#)
+    ??= "Lookup failed."
+  var <- liftCore $ lookupId name
+
+  sname <- liftCore $ thNameToGhcName ''Signed
+  sname' <- whyFail UnsupportedExpr sname
+  bvTyCon <- liftCore $ lookupTyCon sname'
+  pure (var, mulValue bvTyCon)
+
+mulValue
+  :: forall m ws
+   . MonadEval m
+  => TyCon
+  -> Value m ws
+mulValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+      Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+        Opaque' _rty rhs -> do
+          SomeNat @n _ <- whyFail IllTyped $ do
+            size' <- isNumLitTy size
+            someNatVal size'
+
+          case cmpNat @1 @n Proxy Proxy of
+            LTI -> do
+              lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) lhs
+              rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) rhs
+
+              let result = mrgLiftA2 (*) lhs' rhs'
+              pure $ Opaque' lty result
+            _ -> throwError IllTyped
+        _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpNeg
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpNeg = do
+  name <- thNameToGhcName' 'negate#
+    ??= "Lookup failed."
+  var <- liftCore $ lookupId name
+
+  sname <- liftCore $ thNameToGhcName ''Signed
+  sname' <- whyFail UnsupportedExpr sname
+  bvTyCon <- liftCore $ lookupTyCon sname'
+  pure (var, negValue bvTyCon)
+
+negValue
+  :: forall m ws
+   . MonadEval m
+  => TyCon
+  -> Value m ws
+negValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+      Opaque' ty value -> do
+        SomeNat @n _ <- whyFail IllTyped $ do
+          size' <- isNumLitTy size
+          someNatVal size'
+
+        case cmpNat @1 @n Proxy Proxy of
+          LTI -> do
+            value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) value
+
+            let result = negate <$> value'
+            pure $ Opaque' ty result
+          _ -> throwError IllTyped
+
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpFromInteger
+  :: forall m ws
+   . MonadFail m
+  => KnownWordSize ws
+  => MonadEval m
+  => m (Var, Value m ws)
+interpFromInteger = do
+  name <- thNameToGhcName' 'fromInteger#
+    ??= "Lookup failed."
+  var <- liftCore $ lookupId name
+
+  sname <- liftCore $ thNameToGhcName ''Signed
+  sname' <- whyFail UnsupportedExpr sname
+  bvTyCon <- liftCore $ lookupTyCon sname'
+  pure (var, fromIntegerValue bvTyCon)
+
+fromIntegerValue
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => TyCon
+  -> Value m ws
+fromIntegerValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ _ ->  pure . Fun integerTy $ \case
+      Data adt -> do
+        SomeNat @n _ <- whyFail IllTyped $ do
+          size' <- isNumLitTy size
+          someNatVal size'
+
+        case cmpNat @1 @n Proxy Proxy of
+          LTI -> do
+            let condIS = adtIsDataCon adt integerISDataCon
+            valueIS <- case adtDataConFields adt integerISDataCon of
+              Just [Primitive (Int i)] -> pure $ symFromIntegral <$> i
+              _ -> throwError IllTyped
+
+            let condIP = adtIsDataCon adt integerIPDataCon
+            valueIP <- case adtDataConFields adt integerIPDataCon of
+              Just [Primitive (ByteArray _ i)] -> pure $ symFromIntegral <$> i
+              _ -> throwError IllTyped
+
+            let condIN = adtIsDataCon adt integerINDataCon
+            valueIN <- case adtDataConFields adt integerINDataCon of
+              Just [Primitive (ByteArray _ i)] -> pure $ negate . symFromIntegral <$> i
+              _ -> throwError IllTyped
+
+            let alts =
+                  [ (condIS, valueIS)
+                  , (condIP, valueIP)
+                  , (condIN, valueIN)
+                  ]
+
+            let invalid :: RuntimeValue S (SymIntN n)
+                invalid = throwError Invalid
+
+            let foldl'' acc xs f = foldl' f acc xs
+
+            -- FIXME: This unfolds the prerequisites for the tag multiple times,
+            -- potentially bloating the guard.
+            let final = foldl'' invalid alts $ \fl (cond, body) -> do
+                  cond' <- cond
+                  mrgIte cond' body fl
+
+            let ty = mkTyConApp bvTyCon [size]
+            pure $ Opaque' ty final
+          _ -> throwError IllTyped
+
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
