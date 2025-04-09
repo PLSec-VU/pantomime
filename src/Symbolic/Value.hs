@@ -824,6 +824,12 @@ typedLambda ident argTy resTy = if
       unless (co `eqCoercion` SymCo co') $ throwError IllTyped
       fun <- typedLambda ident argTy' resTy
       applyValue fun arg
+    Opaque' ty _ -> do
+      unless (ty `eqType` argTy) $ throwError IllTyped
+      -- TODO: This thing is here because we can interpret Opaque types. It
+      -- is just a hack though, but this whole function construction is broken
+      -- anyway...
+      invalidValue resTy
     _ -> throwError IllTyped
 
   | hasTyVarHead argTy -> lam $ \case

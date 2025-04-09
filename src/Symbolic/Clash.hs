@@ -7,7 +7,7 @@ module Symbolic.Clash
   ( clashInterp
   ) where
 
-import Clash.Prelude (BitVector)
+import Clash.Prelude (BitVector, Unsigned)
 import Clash.Sized.Internal.BitVector ((+#), (-#), (*#), negate#, fromInteger#, xToBV)
 
 import GHC.Plugins
@@ -30,6 +30,8 @@ import Symbolic.MonadEval
 import Symbolic.Runtime
 import Symbolic.Util
 import Symbolic.WordSize
+import Clash.Sized.Internal.Unsigned (unpack#, pack#)
+import qualified Language.Haskell.TH as TH
 
 clashInterp
   :: forall m ws
@@ -44,31 +46,43 @@ clashInterp = sequence
   , interpNeg
   , interpFromInteger
   , interpXToBV
+  , interpUnpack#
+  , interpPack#
   ]
 
-interpAdd
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
-  => m (Var, Value m ws)
-interpAdd = do
-  name <- thNameToGhcName' '(+#)
+lookupThId
+  :: MonadCore m
+  => MonadFail m
+  => TH.Name
+  -> m Var
+lookupThId th = do
+  name <- thNameToGhcName' th
     ??= "Lookup failed."
-  var <- liftCore $ lookupId name
+  liftCore $ lookupId name
 
-  bvname <- liftCore $ thNameToGhcName ''BitVector
-  bvname' <- whyFail UnsupportedExpr bvname
-  bvTyCon <- liftCore $ lookupTyCon bvname'
-  pure (var, addValue bvTyCon)
+lookupThTyCon
+  :: MonadCore m
+  => MonadFail m
+  => TH.Name
+  -> m TyCon
+lookupThTyCon th = do
+  name <- thNameToGhcName' th
+    ??= "Lookup failed."
+  liftCore $ lookupTyCon name
 
+-- | Perform a binary operation on two bit vectors.
+--
+-- The result value has type:
+-- forall n. KnownNat n => BitVector n -> BitVector n -> BitVector n
+bvBinary
+  :: forall m ws
+   . MonadEval m
+  => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymWordN n)
+  -> TyCon
+  -> Value m ws
 -- TODO: It is insanely ugly and error prone to define interpretations like
 -- this...
-addValue
-  :: forall m ws
-   . MonadEval m
-  => TyCon
-  -> Value m ws
-addValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+bvBinary op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
   Ty size -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
       Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
@@ -82,7 +96,7 @@ addValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
               lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
               rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
 
-              let result = mrgLiftA2 (+) lhs' rhs'
+              let result = mrgLiftA2 op lhs' rhs'
               pure $ Opaque' lty result
             _ -> throwError IllTyped
         _ -> throwError IllTyped
@@ -90,111 +104,17 @@ addValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
     _ -> throwError IllTyped
   _ -> throwError IllTyped
 
-interpSub
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
-  => m (Var, Value m ws)
-interpSub = do
-  name <- thNameToGhcName' '(-#)
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
-
-  bvname <- liftCore $ thNameToGhcName ''BitVector
-  bvname' <- whyFail UnsupportedExpr bvname
-  bvTyCon <- liftCore $ lookupTyCon bvname'
-  pure (var, subValue bvTyCon)
-
-subValue
+-- | Perform a binary operation on two bit vectors.
+--
+-- The result value has type:
+-- forall n. KnownNat n => BitVector n -> BitVector n
+bvUnary
   :: forall m ws
    . MonadEval m
-  => TyCon
+  => (forall n. KnownPos n => SymWordN n -> SymWordN n)
+  -> TyCon
   -> Value m ws
-subValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
-      Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
-        Opaque' _rty rhs -> do
-          SomeNat @n _ <- whyFail IllTyped $ do
-            size' <- isNumLitTy size
-            someNatVal size'
-
-          case cmpNat @1 @n Proxy Proxy of
-            LTI -> do
-              lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
-              rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
-
-              let result = mrgLiftA2 (-) lhs' rhs'
-              pure $ Opaque' lty result
-            _ -> throwError IllTyped
-        _ -> throwError IllTyped
-      _ -> throwError IllTyped
-    _ -> throwError IllTyped
-  _ -> throwError IllTyped
-
-interpMul
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
-  => m (Var, Value m ws)
-interpMul = do
-  name <- thNameToGhcName' '(*#)
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
-
-  bvname <- liftCore $ thNameToGhcName ''BitVector
-  bvname' <- whyFail UnsupportedExpr bvname
-  bvTyCon <- liftCore $ lookupTyCon bvname'
-  pure (var, mulValue bvTyCon)
-
-mulValue
-  :: forall m ws
-   . MonadEval m
-  => TyCon
-  -> Value m ws
-mulValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
-      Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
-        Opaque' _rty rhs -> do
-          SomeNat @n _ <- whyFail IllTyped $ do
-            size' <- isNumLitTy size
-            someNatVal size'
-
-          case cmpNat @1 @n Proxy Proxy of
-            LTI -> do
-              lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
-              rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
-
-              let result = mrgLiftA2 (*) lhs' rhs'
-              pure $ Opaque' lty result
-            _ -> throwError IllTyped
-        _ -> throwError IllTyped
-      _ -> throwError IllTyped
-    _ -> throwError IllTyped
-  _ -> throwError IllTyped
-
-interpNeg
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
-  => m (Var, Value m ws)
-interpNeg = do
-  name <- thNameToGhcName' 'negate#
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
-
-  bvname <- liftCore $ thNameToGhcName ''BitVector
-  bvname' <- whyFail UnsupportedExpr bvname
-  bvTyCon <- liftCore $ lookupTyCon bvname'
-  pure (var, negValue bvTyCon)
-
-negValue
-  :: forall m ws
-   . MonadEval m
-  => TyCon
-  -> Value m ws
-negValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+bvUnary op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
   Ty size -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
       Opaque' ty value -> do
@@ -206,13 +126,57 @@ negValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
           LTI -> do
             value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) value
 
-            let result = negate <$> value'
+            let result = op <$> value'
             pure $ Opaque' ty result
           _ -> throwError IllTyped
 
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
+
+interpAdd
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpAdd = do
+  var <- lookupThId '(+#)
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvBinary (+) bvTyCon
+  pure (var, value)
+
+interpSub
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpSub = do
+  var <- lookupThId '(-#)
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvBinary (-) bvTyCon
+  pure (var, value)
+
+interpMul
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpMul = do
+  var <- lookupThId '(*#)
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvBinary (*) bvTyCon
+  pure (var, value)
+
+interpNeg
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpNeg = do
+  var <- lookupThId 'negate#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvUnary negate bvTyCon
+  pure (var, value)
 
 interpFromInteger
   :: forall m ws
@@ -221,14 +185,10 @@ interpFromInteger
   => MonadEval m
   => m (Var, Value m ws)
 interpFromInteger = do
-  name <- thNameToGhcName' 'fromInteger#
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
-
-  bvname <- liftCore $ thNameToGhcName ''BitVector
-  bvname' <- whyFail UnsupportedExpr bvname
-  bvTyCon <- liftCore $ lookupTyCon bvname'
-  pure (var, fromIntegerValue bvTyCon)
+  var <- lookupThId 'fromInteger#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = fromIntegerValue bvTyCon
+  pure (var, value)
 
 fromIntegerValue
   :: forall m ws
@@ -294,25 +254,59 @@ interpXToBV
   => MonadEval m
   => m (Var, Value m ws)
 interpXToBV = do
-  name <- thNameToGhcName' 'xToBV
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
+  var <- lookupThId 'xToBV
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvUnary id bvTyCon
+  pure (var, value)
 
-  bvname <- liftCore $ thNameToGhcName ''BitVector
-  bvname' <- whyFail UnsupportedExpr bvname
-  bvTyCon <- liftCore $ lookupTyCon bvname'
-  pure (var, xToBVValue bvTyCon)
+interpUnpack#
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpUnpack# = do
+  var <- lookupThId 'unpack#
+  bvTyCon <- lookupThTyCon ''BitVector
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unpackValue bvTyCon unTyCon
+  pure (var, value)
 
-xToBVValue
+unpackValue
   :: forall m ws
    . MonadEval m
   => TyCon
+  -> TyCon
   -> Value m ws
-xToBVValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+unpackValue bvTyCon unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
   Ty size -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
-      opaque@Opaque' {} -> pure $ opaque
-
+      Opaque' _ value -> do
+        pure $ Opaque' (mkTyConApp unTyCon [size]) value
       _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpPack#
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpPack# = do
+  var <- lookupThId 'pack#
+  bvTyCon <- lookupThTyCon ''BitVector
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = packValue bvTyCon unTyCon
+  pure (var, value)
+
+packValue
+  :: forall m ws
+   . MonadEval m
+  => TyCon
+  -> TyCon
+  -> Value m ws
+packValue bvTyCon unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
+    Opaque' _ value -> do
+      pure $ Opaque' (mkTyConApp bvTyCon [size]) value
     _ -> throwError IllTyped
   _ -> throwError IllTyped
