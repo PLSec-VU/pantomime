@@ -9,7 +9,6 @@ module Symbolic.MonadEval
   , freshIdx
 
   , StrictIte (..)
-  , StrongEq (..)
   , WeakEq (..)
   , Assume (..)
   ) where
@@ -31,7 +30,6 @@ import Control.Monad.Except (MonadError, runExceptT)
 import Control.Monad.State (MonadState (..))
 
 import Symbolic.Runtime
-import Data.Composition ((.:))
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 
 -- TODO: Remove MonadCore from the requirements.
@@ -73,13 +71,8 @@ instance (MonadEval m, Mergeable a) => StrictIte m (RuntimeValue S a) where
     cond' <- cond
     mrgIte cond' tr fl
 
--- TODO: Comment on why we need a strong and weak equvalence.
-class MonadEval m => StrongEq m a where
-  strongEq :: a -> a -> m SymBool
-
-instance (MonadEval m, SymEq a) => StrongEq m (RuntimeValue S a) where
-  strongEq = pure .: (.==)
-
+-- TODO: We don't distinguish between weak and strong equivalence anymore.
+-- We should perhaps change the name?
 class MonadEval m => WeakEq m a where
   weakEq :: a -> a -> m SymBool
 
