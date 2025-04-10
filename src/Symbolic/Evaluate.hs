@@ -50,6 +50,7 @@ evaluate
 evaluate env = \case
   Var var | Opaque _ <- inl_inline $ idInlinePragma var -> do
     dbg' "OPAQUE:"
+    dbg $ varType var
     dbg var
     lookupIdEnv env var
 

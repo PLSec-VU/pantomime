@@ -263,6 +263,12 @@ mkCast' c v = case (optCoercion' c, v) of
       , adtFields = [[Co cast]]
       }
 
+  -- Given some Cast (a ~# b) ~# (c ~# d) on a Coercion (a ~# b), cast the
+  -- coercion to (c ~# d).
+  (co, Co co') -> do
+    let cast = mkCoCast co' co
+    pure $ Co cast
+
   -- TODO: Check whether the coercion actually fits the value.
   (co, value)
     | isReflexiveCo co -> pure value

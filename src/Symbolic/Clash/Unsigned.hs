@@ -48,8 +48,7 @@ clashInterp
   => KnownWordSize ws
   => m [(Var, Value m ws)]
 clashInterp = sequence
-  [ interpFromInteger
-  , interpAdd
+  [ interpAdd
   , interpSub
   , interpMul
   , interpNeg
