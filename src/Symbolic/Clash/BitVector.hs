@@ -44,6 +44,8 @@ import Data.Typeable (cast, Proxy (..))
 
 import Unsafe.Coerce (unsafeCoerce)
 
+import Data.Bits ((.&.), (.|.), xor)
+
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
 
@@ -227,7 +229,7 @@ interpAnd
 interpAnd = do
   var <- lookupThId 'and#
   bvTyCon <- lookupThTyCon ''BitVector
-  let value = bvBinary negate bvTyCon
+  let value = bvBinary (.&.) bvTyCon
   pure (var, value)
 
 interpOr
@@ -238,7 +240,7 @@ interpOr
 interpOr = do
   var <- lookupThId 'or#
   bvTyCon <- lookupThTyCon ''BitVector
-  let value = bvBinary negate bvTyCon
+  let value = bvBinary (.|.) bvTyCon
   pure (var, value)
 
 interpXor
@@ -249,7 +251,7 @@ interpXor
 interpXor = do
   var <- lookupThId 'xor#
   bvTyCon <- lookupThTyCon ''BitVector
-  let value = bvBinary negate bvTyCon
+  let value = bvBinary xor bvTyCon
   pure (var, value)
 
 interpXToBV
