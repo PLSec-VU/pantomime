@@ -87,6 +87,7 @@ import Symbolic.WordSize
 import Symbolic.Runtime
 import Symbolic.Identifier
 import Symbolic.MonadEval
+import Symbolic.Dict
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where
@@ -415,15 +416,10 @@ typedBitVector value ty = do
 
   -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
   -- that the natural is actually a positive value.
-  -- TODO: We should find a better way to get this evidence. This pattern match
-  -- makes things super nested, which is horrible. There's many other places
-  -- w.r.t. the whole bitvec interpretation where we need this.
-  case cmpNat @1 @n Typeable.Proxy Typeable.Proxy of
-    LTI -> do
-      let bv :: RuntimeValue S (SymWordN n)
-          bv = value
-      pure $ Opaque' ty bv
-    _ -> throwError UnsupportedExpr
+  Dict <- whyFail UnsupportedExpr $ posNat @n
+  let bv :: RuntimeValue S (SymWordN n)
+      bv = value
+  pure $ Opaque' ty bv
 
 -- TODO: This is a lot of code duplication. Can't we squash this one with
 -- typedBitVector?
@@ -454,15 +450,10 @@ typedUnsigned value ty = do
 
   -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
   -- that the natural is actually a positive value.
-  -- TODO: We should find a better way to get this evidence. This pattern match
-  -- makes things super nested, which is horrible. There's many other places
-  -- w.r.t. the whole bitvec interpretation where we need this.
-  case cmpNat @1 @n Typeable.Proxy Typeable.Proxy of
-    LTI -> do
-      let bv :: RuntimeValue S (SymWordN n)
-          bv = value
-      pure $ Opaque' ty bv
-    _ -> throwError UnsupportedExpr
+  Dict <- whyFail UnsupportedExpr $ posNat @n
+  let bv :: RuntimeValue S (SymWordN n)
+      bv = value
+  pure $ Opaque' ty bv
 
 typedSigned
   :: forall m ws
@@ -475,7 +466,7 @@ typedSigned value ty = do
   -- Get the TyCon and type literal of this type, if possible.
   (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, [size])
-      | Just size' <- isNumLitTy size >>= someNatVal
+      | Just size' <- someTyNat size
       -- TODO: Additionally check whether the integer conversion is not lossy.
       -> pure (tyCon, size')
     _ -> throwError UnsupportedExpr
@@ -491,15 +482,10 @@ typedSigned value ty = do
 
   -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
   -- that the natural is actually a positive value.
-  -- TODO: We should find a better way to get this evidence. This pattern match
-  -- makes things super nested, which is horrible. There's many other places
-  -- w.r.t. the whole bitvec interpretation where we need this.
-  case cmpNat @1 @n Typeable.Proxy Typeable.Proxy of
-    LTI -> do
-      let bv :: RuntimeValue S (SymIntN n)
-          bv = value
-      pure $ Opaque' ty bv
-    _ -> throwError UnsupportedExpr
+  Dict <- whyFail UnsupportedExpr $ posNat @n
+  let bv :: RuntimeValue S (SymIntN n)
+      bv = value
+  pure $ Opaque' ty bv
 
 typedTyFamInst
   :: forall m ws

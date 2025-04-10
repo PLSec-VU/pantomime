@@ -43,6 +43,7 @@ import Symbolic.Runtime
 import Symbolic.Util
 import Symbolic.Evaluate
 import Symbolic.MonadEval
+import Symbolic.Dict
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.
@@ -180,23 +181,17 @@ concretise model = \case
     -- TODO Actually check the TyCon!
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
     , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
+    , Just Dict <- posNat @n
     , Just bv <- cast @_ @(RuntimeValue S (SymWordN n)) value
-    -> do
-    case cmpNat @1 @n Proxy Proxy of
-      LTI -> do
-        pure $ primCon model bv
-      _ -> throwError IllTyped
+    -> pure $ primCon model bv
 
   Opaque' ty value
     -- TODO Actually check the TyCon!
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
     , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
+    , Just Dict <- posNat @n
     , Just bv <- cast @_ @(RuntimeValue S (SymIntN n)) value
-    -> do
-    case cmpNat @1 @n Proxy Proxy of
-      LTI -> do
-        pure $ primCon model bv
-      _ -> throwError IllTyped
+    -> pure $ primCon model bv
 
   Opaque' _ty _value -> pure $ Unknown
 
