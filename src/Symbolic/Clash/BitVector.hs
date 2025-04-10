@@ -227,7 +227,7 @@ interpAnd
 interpAnd = do
   var <- lookupThId 'and#
   bvTyCon <- lookupThTyCon ''BitVector
-  let value = bvUnary negate bvTyCon
+  let value = bvBinary negate bvTyCon
   pure (var, value)
 
 interpOr
@@ -238,7 +238,7 @@ interpOr
 interpOr = do
   var <- lookupThId 'or#
   bvTyCon <- lookupThTyCon ''BitVector
-  let value = bvUnary negate bvTyCon
+  let value = bvBinary negate bvTyCon
   pure (var, value)
 
 interpXor
@@ -249,7 +249,7 @@ interpXor
 interpXor = do
   var <- lookupThId 'xor#
   bvTyCon <- lookupThTyCon ''BitVector
-  let value = bvUnary negate bvTyCon
+  let value = bvBinary negate bvTyCon
   pure (var, value)
 
 interpXToBV
