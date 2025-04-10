@@ -7,7 +7,21 @@ module Symbolic.Clash.Unsigned
   ) where
 
 import Clash.Prelude (Unsigned, BitVector)
-import Clash.Sized.Internal.Unsigned ((+#), (-#), (*#), negate#, fromInteger#, unpack#, pack#)
+import Clash.Sized.Internal.Unsigned
+  ( (+#)
+  , (-#)
+  , (*#)
+  , negate#
+  , eq#
+  , neq#
+  , lt#
+  , le#
+  , gt#
+  , ge#
+  , fromInteger#
+  , unpack#
+  , pack#
+  )
 
 import GHC.Plugins
 import GHC.TypeLits
@@ -39,6 +53,12 @@ clashInterp = sequence
   , interpSub
   , interpMul
   , interpNeg
+  , interpEq
+  , interpNeq
+  , interpLt
+  , interpLe
+  , interpGt
+  , interpGe
   , interpFromInteger
   , interpPack#
   , interpUnpack#
@@ -108,6 +128,41 @@ unUnary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
     _ -> throwError IllTyped
   _ -> throwError IllTyped
 
+unEquality
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymBool)
+  -> TyCon
+  -> Value m ws
+unEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+    Opaque' _ lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+      Opaque' _ rhs -> do
+        SomeNat @n _ <- whyFail IllTyped $ do
+          size' <- isNumLitTy size
+          someNatVal size'
+
+        case cmpNat @1 @n Proxy Proxy of
+          LTI -> do
+            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
+            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
+
+            let conditional = mrgLiftA2 cmp lhs' rhs'
+            let tr = dataConToTag trueDataCon
+            let fl = dataConToTag falseDataCon
+            let tag = (\c -> symIte c tr fl) <$> conditional
+            pure $ Data ADT
+              { adtTyCon = boolTyCon
+              , adtTyArgs = []
+              , adtTag = tag
+              , adtFields = [[], []]
+              }
+          _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
 interpAdd
   :: forall m ws
    . MonadFail m
@@ -150,6 +205,78 @@ interpNeg = do
   var <- lookupThId 'negate#
   unTyCon <- lookupThTyCon ''Unsigned
   let value = unUnary negate unTyCon
+  pure (var, value)
+
+interpEq
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpEq = do
+  var <- lookupThId 'eq#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unEquality (.==) unTyCon
+  pure (var, value)
+
+interpNeq
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpNeq = do
+  var <- lookupThId 'neq#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unEquality (./=) unTyCon
+  pure (var, value)
+
+interpLt
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpLt = do
+  var <- lookupThId 'lt#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unEquality (.<) unTyCon
+  pure (var, value)
+
+interpLe
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpLe = do
+  var <- lookupThId 'le#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unEquality (.<=) unTyCon
+  pure (var, value)
+
+interpGt
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpGt = do
+  var <- lookupThId 'gt#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unEquality (.>) unTyCon
+  pure (var, value)
+
+interpGe
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpGe = do
+  var <- lookupThId 'ge#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unEquality (.>=) unTyCon
   pure (var, value)
 
 interpFromInteger
