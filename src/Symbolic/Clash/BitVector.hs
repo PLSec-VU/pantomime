@@ -23,6 +23,7 @@ import Clash.Sized.Internal.BitVector
   , ge#
   , fromInteger#
   , slice#
+  , (++#)
   )
 
 import GHC.Plugins
@@ -37,6 +38,8 @@ import GHC.TypeLits
 import Control.Monad.Except (MonadError(..))
 
 import Data.Typeable (cast, Proxy (..))
+
+import Unsafe.Coerce (unsafeCoerce)
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -69,7 +72,12 @@ clashInterp = sequence
   , interpGe
   , interpFromInteger
   , interpSlice
+  , interpConcat
   ]
+
+-- | Create a type-variable type with the natural kind.
+mkNatTyVarTy :: TyVar -> Type
+mkNatTyVarTy tyVar = mkTyVarTy $ setVarType tyVar naturalTy
 
 -- | Perform a binary operation on two bit vectors.
 --
@@ -83,7 +91,7 @@ bvBinary
   -> Value m ws
 -- TODO: It is insanely ugly and error prone to define interpretations like
 -- this...
-bvBinary op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+bvBinary op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
   Ty size -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
       Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
@@ -112,7 +120,7 @@ bvUnary
   => (forall n. KnownPos n => SymWordN n -> SymWordN n)
   -> TyCon
   -> Value m ws
-bvUnary op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+bvUnary op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
   Ty size -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
       Opaque' ty value -> do
@@ -134,7 +142,7 @@ bvEquality
   => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymBool)
   -> TyCon
   -> Value m ws
-bvEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+bvEquality cmp bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
   Ty size -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
       Opaque' _ lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
@@ -306,7 +314,7 @@ fromIntegerValue
   => KnownWordSize ws
   => TyCon
   -> Value m ws
-fromIntegerValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+fromIntegerValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
   Ty size -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ _ -> pure . Fun naturalTy $ \case
       Data _ -> pure . Fun integerTy $ \case
@@ -369,8 +377,19 @@ interpSlice = do
   let value = sliceValue bvTyCon snTyCon addTyFam subTyFam
   pure (var, value)
 
-mkNatTyVarTy :: TyVar -> Type
-mkNatTyVarTy tyVar = mkTyVarTy $ setVarType tyVar naturalTy
+-- TODO: We copied this code over from type family instantiation for when
+-- creating symbolic versions of values. Could we deduplicate?
+-- FIXME: We should really get the local instances from the ModGuts via
+-- mg_fam_inst_env.
+normTyFam
+  :: MonadEval m
+  => Type
+  -> m Reduction
+normTyFam ty = do
+  let locFamInst = emptyFamInstEnv
+  extFamInst <- liftCore getPackageFamInstEnv
+  let famInst = (locFamInst, extFamInst)
+  pure $ normaliseType famInst Representational ty
 
 sliceValue
   :: forall m ws
@@ -419,22 +438,10 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
                 value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) value
                 let sliced = sizedBVSelect @_ @n @idx @w Proxy Proxy <$> value'
 
-                -- Gather the type family instances.
-                -- TODO: We copied this code over from type family
-                -- instantiation for when creating symbolic versions of
-                -- values. Could we deduplicate?
-                -- FIXME: We should really get the local instances from the ModGuts via
-                -- mg_fam_inst_env.
-                let locFamInst = emptyFamInstEnv
-                extFamInst <- liftCore getPackageFamInstEnv
-                let famInst = (locFamInst, extFamInst)
-
                 let size' = mkTyConApp subTyFam [upperInc, lower]
                 let bvTy' = mkTyConApp bvTyCon [size']
 
-                -- Get the inner type after reducing the type family
-                -- instances.
-                let reduction = normaliseType famInst Representational bvTy'
+                reduction <- normTyFam bvTy'
                 let co' = SymCo $ reductionCoercion reduction
                 let ty' = reductionReducedType reduction
 
@@ -445,6 +452,74 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
               _ -> throwError IllTyped
             _ -> throwError IllTyped
           _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpConcat
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpConcat = do
+  var <- lookupThId '(++#)
+  bvTyCon <- lookupThTyCon ''BitVector
+  addTyFam <- lookupThTyCon ''(+)
+  let value = concatValue bvTyCon addTyFam
+  pure (var, value)
+
+concatValue
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => TyCon
+  -> TyCon
+  -> Value m ws
+concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
+  Ty rsize -> pure . Fun (mkNatTyVarTy betaTyVar) $ \case
+    Ty lsize -> pure . Fun cONSTRAINTKind $ \case
+      Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [lsize]) $ \case
+        Opaque' _lty lhs -> pure . Fun (mkTyConApp bvTyCon [rsize]) $ \case
+          Opaque' _rty rhs -> do
+            SomeNat @l _ <- whyFail IllTyped $ someTyNat lsize
+            Dict <- whyFail IllTyped $ posNat @l
+            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN l)) lhs
+
+            SomeNat @r _ <- whyFail IllTyped $ someTyNat rsize
+            Dict <- whyFail IllTyped $ posNat @r
+            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN r)) rhs
+
+            -- We do this as we need to get the KnownNat constraint on the
+            -- output.
+            SomeNat @n _ <- whyFail IllTyped $ do
+              lsize' <- isNumLitTy lsize
+              rsize' <- isNumLitTy rsize
+              someNatVal $ lsize' + rsize'
+            Dict <- whyFail IllTyped $ posNat @n
+            -- Refl <- pure $ unsafeAxiom @(l + r ~ n)
+
+            let concatted :: RuntimeValue S (SymWordN (l + r))
+                concatted = liftA2 sizedBVConcat lhs' rhs'
+
+            -- TODO: Why can we not use the normal coercion if we add the unsafe
+            -- axiom that l + r ~ n? Of course, this is also still always valid,
+            -- but it is less obviously correct.
+            let concatted' :: RuntimeValue S (SymWordN n)
+                concatted' = unsafeCoerce concatted
+
+            let size = mkTyConApp addTyFam [lsize, rsize]
+            let resTy = mkTyConApp bvTyCon [size]
+            reduction <- normTyFam resTy
+            let co = SymCo $ reductionCoercion reduction
+            let ty = reductionReducedType reduction
+
+            let result = Opaque' ty concatted'
+
+            mkCast' co result
+
+          _ -> throwError IllTyped
+        _ -> throwError IllTyped
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
