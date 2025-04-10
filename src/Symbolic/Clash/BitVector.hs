@@ -14,6 +14,9 @@ import Clash.Sized.Internal.BitVector
   , (-#)
   , (*#)
   , negate#
+  , and#
+  , or#
+  , xor#
   , xToBV
   , eq#
   , neq#
@@ -63,6 +66,9 @@ clashInterp = sequence
   , interpSub
   , interpMul
   , interpNeg
+  , interpAnd
+  , interpOr
+  , interpXor
   , interpXToBV
   , interpEq
   , interpNeq
@@ -209,6 +215,39 @@ interpNeg
   => m (Var, Value m ws)
 interpNeg = do
   var <- lookupThId 'negate#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvUnary negate bvTyCon
+  pure (var, value)
+
+interpAnd
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpAnd = do
+  var <- lookupThId 'and#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvUnary negate bvTyCon
+  pure (var, value)
+
+interpOr
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpOr = do
+  var <- lookupThId 'or#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvUnary negate bvTyCon
+  pure (var, value)
+
+interpXor
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpXor = do
+  var <- lookupThId 'xor#
   bvTyCon <- lookupThTyCon ''BitVector
   let value = bvUnary negate bvTyCon
   pure (var, value)
