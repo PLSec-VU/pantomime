@@ -14,6 +14,7 @@ import Clash.Sized.Internal.BitVector
   , (-#)
   , (*#)
   , negate#
+  , complement#
   , and#
   , or#
   , xor#
@@ -27,6 +28,7 @@ import Clash.Sized.Internal.BitVector
   , fromInteger#
   , slice#
   , (++#)
+  , size#
   )
 
 import GHC.Plugins
@@ -40,7 +42,7 @@ import Data.Typeable (cast, Proxy (..))
 
 import Unsafe.Coerce (unsafeCoerce)
 
-import Data.Bits ((.&.), (.|.), xor)
+import Data.Bits (Bits (..))
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -64,6 +66,7 @@ clashInterp = sequence
   , interpSub
   , interpMul
   , interpNeg
+  , interpComplement
   , interpAnd
   , interpOr
   , interpXor
@@ -77,6 +80,7 @@ clashInterp = sequence
   , interpFromInteger
   , interpSlice
   , interpConcat
+  , interpSize
   ]
 
 -- | Create a type-variable type with the natural kind.
@@ -215,6 +219,17 @@ interpNeg = do
   var <- lookupThId 'negate#
   bvTyCon <- lookupThTyCon ''BitVector
   let value = bvUnary negate bvTyCon
+  pure (var, value)
+
+interpComplement
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpComplement = do
+  var <- lookupThId 'complement#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvUnary complement bvTyCon
   pure (var, value)
 
 interpAnd
@@ -529,3 +544,40 @@ concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
+
+interpSize
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpSize = do
+  var <- lookupThId 'size#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = sizeValue bvTyCon
+  pure (var, value)
+
+sizeValue
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => TyCon
+  -> Value m ws
+sizeValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data adt) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
+      Opaque' _ _ -> do
+        size <- whyFail UnsupportedExpr $ concreteNat adt
+        let size' = pure $ fromIntegral size
+
+        pure $ Data ADT
+          { adtTyCon = intTyCon
+          , adtTyArgs = []
+          , adtTag = pure $ dataConToTag intDataCon
+          , adtFields = [[Primitive $ Int size']]
+          }
+
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
