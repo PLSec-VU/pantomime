@@ -1,5 +1,6 @@
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
 module Symbolic.Base
   ( baseValues
   , integerToInt'#
@@ -25,12 +26,11 @@ import Symbolic.WordSize
 import Symbolic.Runtime
 
 baseValues
-  :: forall m m' ws
-   . MonadCore m
-  => MonadFail m
-  => MonadEval m'
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
   => KnownWordSize ws
-  => m [(Var, Value m' ws)]
+  => m [(Var, Value m ws)]
 baseValues = sequence
   [ integerToInt'#
   , integerToWord'#
@@ -303,12 +303,11 @@ naturalToWord'# = do
 --   pure (var, value)
 
 overflowError'
-  :: forall m m' ws
-   . MonadCore m
-  => MonadFail m
-  => MonadEval m'
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
   => KnownWordSize ws
-  => m (Var, Value m' ws)
+  => m (Var, Value m ws)
 overflowError' = do
   name <- thNameToGhcName' 'overflowError
     ??= "Lookup failed."
@@ -321,12 +320,11 @@ overflowError' = do
   pure (var, value)
 
 divZeroError'
-  :: forall m m' ws
-   . MonadCore m
-  => MonadFail m
-  => MonadEval m'
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
   => KnownWordSize ws
-  => m (Var, Value m' ws)
+  => m (Var, Value m ws)
 divZeroError' = do
   name <- thNameToGhcName' 'divZeroError
     ??= "Lookup failed."

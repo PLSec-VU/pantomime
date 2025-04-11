@@ -14,11 +14,19 @@ module Types
   , nonRec
 
   , HasModGuts (..)
+  , HasModGuts' (..)
   , HasRuleEnv (..)
   ) where
 
-import Data.Data
 import GHC.Plugins
+
+import Data.Data
+
+import Control.Monad.Trans.Class (MonadTrans (..))
+import Control.Monad.Reader (MonadReader (..), ReaderT)
+import Control.Monad.Except (ExceptT)
+import Control.Monad.State (StateT)
+import Control.Monad.Trans.Maybe (MaybeT)
 
 -- | Tactic based UC check.
 --
@@ -113,6 +121,24 @@ class HasModGuts a where
 
 instance HasModGuts ModGuts where
   modGuts = id
+
+-- TODO: We should just have this as only version. Also, we should probably
+-- get rid of this file or clean it up!
+-- | Anything Monad that has module guts.
+class Monad m => HasModGuts' m where
+  modGuts' :: m ModGuts
+
+instance (Monad m, HasModGuts r) => HasModGuts' (ReaderT r m) where
+  modGuts' = reader modGuts
+
+instance HasModGuts' m => HasModGuts' (ExceptT e m) where
+  modGuts' = lift modGuts'
+
+instance HasModGuts' m => HasModGuts' (StateT s m) where
+  modGuts' = lift modGuts'
+
+instance HasModGuts' m => HasModGuts' (MaybeT m) where
+  modGuts' = lift modGuts'
 
 -- | Anything that has a rule environment.
 class HasRuleEnv a where

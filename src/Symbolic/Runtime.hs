@@ -16,13 +16,15 @@
 
 module Symbolic.Runtime
   ( RuntimeValue (..)
+  , unRuntimeC
   , RuntimeError (..)
   ) where
 
 import GHC.Utils.Outputable (Outputable (..), text)
 import GHC.Generics (Generic)
 
-import Control.Monad.Except (ExceptT (..), MonadError)
+import Control.Monad.Except (ExceptT (..), MonadError, runExceptT)
+import Control.Monad.Identity (runIdentity)
 
 import Data.Functor.Classes (Show1, Eq1)
 
@@ -47,6 +49,9 @@ newtype RuntimeValue mode a where
   RuntimeValue ::
     { unRuntimeValue :: ExceptT RuntimeError (BaseMonad mode) a
     } -> RuntimeValue mode a
+
+unRuntimeC :: RuntimeValue C a -> Either RuntimeError a
+unRuntimeC = runIdentity . runExceptT . unRuntimeValue
 
 deriving via ExceptT RuntimeError (BaseMonad mode)
   instance Monad (BaseMonad mode)

@@ -43,13 +43,12 @@ import Grisette
 
 import Control.Monad.Except (MonadError (..), modifyError, runExceptT)
 import Control.Monad.State (evalStateT)
-import Control.Monad.Reader (MonadReader (..))
 import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
 import Data.Foldable (forM_)
 
-import Types (HasModGuts (..))
+import Types (HasModGuts' (..))
 
 import Symbolic.WordSize
 import Symbolic.Evaluate
@@ -81,11 +80,10 @@ instance Outputable NonEq where
     SolveError err -> text "solver error: " <+> text (show err)
 
 exprSymEq
-  :: forall m r
+  :: forall m
    . MonadCore m
   => MonadFail m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => HasDynFlags m
   => CoreExpr
   -> CoreExpr
@@ -97,15 +95,14 @@ exprSymEq lhs rhs = do
 
   -- We run the comparison with the word size of the target platform.
   case pwsize of
-    PW4 -> exprSymEq' @m @r @PW4 lhs rhs
-    PW8 -> exprSymEq' @m @r @PW8 lhs rhs
+    PW4 -> exprSymEq' @m @PW4 lhs rhs
+    PW8 -> exprSymEq' @m @PW8 lhs rhs
 
 exprSymEq'
-  :: forall m r ws
+  :: forall m ws
    . MonadCore m
   => MonadFail m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => KnownWordSize ws
   => CoreExpr
   -> CoreExpr
@@ -121,7 +118,7 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
     clash <- clashInterp
     env <- extendManyEnv emptyEnv $ base ++ clash
 
-    prog <- reader $ mg_binds . modGuts
+    prog <- mg_binds <$> modGuts'
     let env' = extendLocalEnv env prog
 
     let saturate expr = do

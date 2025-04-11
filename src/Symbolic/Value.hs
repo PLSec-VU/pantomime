@@ -50,13 +50,12 @@ import GHC.Core.Type (substTy)
 import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
 import GHC.Core.Coercion.Opt
 import GHC.Core.Reduction (Reduction (..))
-import GHC.Core.FamInstEnv (emptyFamInstEnv, normaliseType)
+import GHC.Core.FamInstEnv (normaliseType)
 import GHC.Builtin.Types.Prim
 import GHC.Tc.Utils.TcType (hasTyVarHead, isTyFamFree)
 import GHC.Types.TyThing (MonadThings(..))
-import GHC.TypeLits (OrderingI (..), SomeNat (..), someNatVal, cmpNat)
+import GHC.TypeLits (SomeNat (..), someNatVal)
 import GHC.Platform (PlatformWordSize)
-import GHC.Data.Pair (Pair(..))
 import GHC.MonadCore
 
 import Grisette.SymPrim
@@ -80,7 +79,9 @@ import qualified Data.Typeable as Typeable
 import Control.Monad (foldM, unless, forM, guard, when)
 import Control.Monad.Except (MonadError (..))
 
-import Clash.Prelude (BitVector, Unsigned, Signed)
+import Clash.Prelude (BitVector, Unsigned, Signed, Bit)
+
+import Util (getFamInstEnvs')
 
 import Symbolic.Util
 import Symbolic.WordSize
@@ -207,20 +208,32 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (Value m ws) where
 -- Merges nested casts. This should always be preferred over manually creating
 -- a cast.
 mkCast'
-  -- :: MonadError EvalError m
   :: MonadEval m
   => KnownWordSize ws
   => Coercion
   -> Value m ws
   -> m (Value m ws)
-mkCast' c v = case (optCoercion' c, v) of
+mkCast' c v = case (optimiseCo c, v) of
+  -- Before anything else, we just want to get rid of reflexive casts.
+  (co, value) | isReflCo co -> pure value
+
+  (co, Cast' co' value) -> do
+    -- TODO: Check whether the casts actually can be transitively applied.
+    let trans = mkTransCo co' co
+    mkCast' trans value
+
+  -- TODO: I guess we shouldn't be pattern matching on the coercion. Instead,
+  -- use SelCo to select the right fields from the coercion. Same for FunCo and
+  -- TyCoAppCo. This would allow us to drop the optimisation call on every cast.
+  -- Do note that for checks on reflexive casts, we would need to use the more
+  -- expensive check.
   (co@ForAllCo { fco_kind }, Fun argTy fun) -> do
     let argTy' = coercionRKind fco_kind
     unless (argTy `eqType` coercionLKind fco_kind) $ throwError IllTyped
 
     pure . Fun argTy' $ \case
       Ty arg -> do
-        let arg' = mkCastTy arg $ SymCo fco_kind
+        let arg' = mkCastTy arg $ mkSymCo fco_kind
         result <- fun $ Ty arg'
         let resCo = mkInstCo co $ mkNomReflCo arg'
         mkCast' resCo result
@@ -231,37 +244,40 @@ mkCast' c v = case (optCoercion' c, v) of
     unless (argTy `eqType` coercionLKind fco_arg) $ throwError IllTyped
 
     pure . Fun argTy' $ \arg -> do
-      arg' <- mkCast' (SymCo fco_arg) arg
+      arg' <- mkCast' (mkSymCo fco_arg) arg
       result <- fun arg'
       mkCast' fco_res result
 
-  (co, Cast' co' value) -> do
-    -- TODO: Check whether the casts actually can be transitively applied.
-    let trans = mkTransCo co' co
-    mkCast' trans value
+  (TyConAppCo role tyCon coArgs, Data adt) -> do
+    unless (tyCon == adtTyCon adt) $ throwError IllTyped
 
-  -- Given some coercion (a ~ b) ~# (c ~ d).
-  --
-  -- We manually cast the boxed equality type:
-  -- (~) :: forall k (a :: k) (b :: k). (a ~# b) -> (a ~ b)
-  (co, Data adt)
-    | adtTyCon adt == eqTyCon
-    , [_kind, _a, _b] <- adtTyArgs adt
-    , [[Co co']] <- adtFields adt
-    -> do
-    -- Cast the coercion.
-    let cast = mkCoCast co' co
+    -- Gather all DataCons in the ADT.
+    dataCons <- whyFail IllTyped $ tyConDataCons_maybe tyCon
 
-    -- Construct the type arguments for this ADT from the new coercion.
-    let Pair a b  = coercionKind cast
-    let kind = typeKind a
+    -- Cast the fields of every DataCon.
+    fields <- forM dataCons $ \dataCon -> do
+      -- Gather the field types with the universal type variables.
+      -- TODO: I don't think this works for ADTs with existential types.
+      let tyVars = dataConUnivTyVars dataCon
+      let tyArgs = scaledThing <$> dataConInstArgTys dataCon (mkTyVarTys tyVars)
 
-    -- Construct the new ADT.
+      -- Lift the field types to coercions by substituting the type variables
+      -- for the coercion arguments.
+      let coercions = liftCoSubstWith role tyVars coArgs <$> tyArgs
+
+      -- Cast the fields of the ADT for the current DataCon.
+      fields <- whyFail IllTyped $ adtDataConFields adt dataCon
+      forM (zip coercions fields) $ uncurry mkCast'
+
+    -- The type arguments are now simply the result type of the coercions.
+    let tyArgs = coercionRKind <$> coArgs
+
+    -- Construct the new ADT with the coerced fields.
     pure $ Data ADT
-      { adtTyCon = adtTyCon adt
-      , adtTyArgs = [kind, a, b]
+      { adtTyCon = tyCon
+      , adtTyArgs = tyArgs
       , adtTag = adtTag adt
-      , adtFields = [[Co cast]]
+      , adtFields = fields
       }
 
   -- Given some Cast (a ~# b) ~# (c ~# d) on a Coercion (a ~# b), cast the
@@ -271,11 +287,10 @@ mkCast' c v = case (optCoercion' c, v) of
     pure $ Co cast
 
   -- TODO: Check whether the coercion actually fits the value.
-  (co, value)
-    | isReflexiveCo co -> pure value
-    | otherwise -> pure $ Cast' co value
-  where
-    optCoercion' = optCoercion (OptCoercionOpts True) emptySubst
+  (co, value) -> pure $ Cast' co value
+
+optimiseCo :: Coercion -> Coercion
+optimiseCo = optCoercion (OptCoercionOpts True) emptySubst
 
 -- | Constraints for creating the symbolic values we require.
 --
@@ -367,6 +382,7 @@ typedValue value ty = asum'
   [ typedBitVector value ty
   , typedUnsigned value ty
   , typedSigned value ty
+  , typedBit value ty
   , Primitive <$> typedPrimitive value ty
   , typedTyFamInst value ty
   , typedNewtype value ty
@@ -439,7 +455,7 @@ typedUnsigned value ty = do
       -> pure (tyCon, size')
     _ -> throwError UnsupportedExpr
 
-  -- Ensure the TyCon is actually a BitVector.
+  -- Ensure the TyCon is actually an Unsigned.
   -- TODO: We should really not be looking up the name here! This should just be
   -- some pre-pass thing imo.
   bvTyCon <- do
@@ -471,7 +487,7 @@ typedSigned value ty = do
       -> pure (tyCon, size')
     _ -> throwError UnsupportedExpr
 
-  -- Ensure the TyCon is actually a BitVector.
+  -- Ensure the TyCon is actually a Signed.
   -- TODO: We should really not be looking up the name here! This should just be
   -- some pre-pass thing imo.
   bvTyCon <- do
@@ -487,6 +503,33 @@ typedSigned value ty = do
       bv = value
   pure $ Opaque' ty bv
 
+typedBit
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  -> Type
+  -> m (Value m ws)
+typedBit value ty = do
+  -- Get the TyCon and type literal of this type, if possible.
+  tyCon <- case tcSplitTyConApp_maybe ty of
+    Just (tyCon, []) -> pure tyCon
+    _ -> throwError UnsupportedExpr
+
+  -- Ensure the TyCon is actually a Bit.
+  -- TODO: We should really not be looking up the name here! This should just be
+  -- some pre-pass thing imo.
+  bitTyCon <- do
+    name <- liftCore $ thNameToGhcName ''Bit
+    name' <- whyFail UnsupportedExpr name
+    liftCore $ lookupTyCon name'
+  unless (tyCon == bitTyCon) $ throwError UnsupportedExpr
+
+  -- Wrap the Bit into an Opaque value.
+  let bv :: RuntimeValue S (SymWordN 1)
+      bv = value
+  pure $ Opaque' ty bv
+
 typedTyFamInst
   :: forall m ws
    . MonadEval m
@@ -499,21 +542,17 @@ typedTyFamInst value ty = do
   when (isTyFamFree ty) $ throwError UnsupportedExpr
 
   -- Gather the type family instances.
-  -- FIXME: We should really get the local instances from the ModGuts via
-  -- mg_fam_inst_env.
-  let locFamInst = emptyFamInstEnv
-  extFamInst <- liftCore getPackageFamInstEnv
-  let famInst = (locFamInst, extFamInst)
+  famInst <- getFamInstEnvs'
 
   -- Get the inner type after reducing the type family instances.
   -- TODO: Shouldn't we check whether Nominal normalisation returns the same
-  -- coercion?
+  -- coercion? What about the Phantom role?
   let reduction = normaliseType famInst Representational ty
   let co = SymCo $ reductionCoercion reduction
   let ty' = reductionReducedType reduction
 
   -- Ensure there is an actual reduction.
-  when (isReflCo co) $ throwError UnsupportedExpr
+  when (isReflexiveCo co) $ throwError UnsupportedExpr
 
   -- Create the cast.
   inner <- typedValue value ty'

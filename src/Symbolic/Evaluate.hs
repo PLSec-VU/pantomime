@@ -113,6 +113,8 @@ evaluate env = \case
     -- Gather the constraints to run each alternative and their body.
     alts' <- forM alts $ evalAlt env' scrut'
 
+    -- TODO: Shouldn't this be a bottom value instead? I.e. if we don't have a
+    -- irrefutable pattern match, we reach bottom.
     -- Get an Invalid as a default value.
     let ty' = substTyEnv env ty
     invalid <- invalidValue ty'

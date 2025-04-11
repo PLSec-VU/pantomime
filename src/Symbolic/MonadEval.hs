@@ -16,6 +16,7 @@ module Symbolic.MonadEval
 import GHC.Plugins
 import GHC.MonadCore
 
+import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 import Grisette.Unified (GetBool, EvalModeTag (..))
 import Grisette 
   ( SymBool
@@ -29,14 +30,16 @@ import Grisette
 import Control.Monad.Except (MonadError, runExceptT)
 import Control.Monad.State (MonadState (..))
 
+import Types (HasModGuts')
+
 import Symbolic.Runtime
-import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 
 -- TODO: Remove MonadCore from the requirements.
 type MonadEval m =
   ( MonadError EvalError m
   , MonadState SymbolicState m
   , MonadCore m
+  , HasModGuts' m
   )
 
 -- TODO: These errors give very little information on what went actually wrong.

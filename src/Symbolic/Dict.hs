@@ -14,10 +14,13 @@ module Symbolic.Dict
   ) where
 
 import GHC.Plugins hiding (empty)
-import GHC.TypeLits
+import GHC.TypeNats
 
+import Data.Type.Ord
 import Data.Data (Proxy(..))
+
 import Control.Applicative (Alternative (..))
+import Control.Monad (guard)
 
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -62,4 +65,5 @@ cmpNat' = cmpNat @l @r Proxy Proxy
 someTyNat :: Type -> Maybe SomeNat
 someTyNat ty = do
   num <- isNumLitTy ty
-  someNatVal num
+  guard $ num >= 0
+  pure $ someNatVal (fromInteger num)

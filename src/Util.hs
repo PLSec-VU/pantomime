@@ -21,12 +21,12 @@ module Util
   , lookupLocal
   , thNameToGhcName'
   , getInstEnvs'
+  , getFamInstEnvs'
   ) where
 
 import Control.Applicative
 import Control.Monad.Trans.Maybe
 import Control.Monad ((>=>))
-import Control.Monad.Reader (MonadReader, reader)
 import Control.Monad.State (state, runState)
 
 import GHC.MonadCore
@@ -45,6 +45,7 @@ import Data.Generics.Schemes (everywhere)
 import Lens.Micro (Lens)
 
 import Types
+import GHC.Core.FamInstEnv (FamInstEnvs)
 
 -- | Maps an expression pass over a binder.
 bindPass :: Functor m => Pass m (Expr a) -> Pass m (Bind' a)
@@ -162,12 +163,11 @@ zapOccInfo = everywhere $ mkT zap
 resolveTH
   :: Alternative m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => TH.Name
   -> m Var
 resolveTH thName = do
-  name <- thNameToGhcName' thName 
+  name <- thNameToGhcName' thName
   let lookupLocal' = do
         Bind' x _ <- lookupLocal $ \v -> varName v == name
         pure x
@@ -178,8 +178,7 @@ resolveTH thName = do
 resolveTH'
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => TH.Name
   -> m Var
 resolveTH' name = resolveTH name
@@ -188,12 +187,11 @@ resolveTH' name = resolveTH name
 -- | Lookup a local non-recursive binder.
 lookupLocal
   :: Alternative m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => (Var -> Bool)
   -> m CoreBind'
 lookupLocal cmp = do
-  prog <- reader $ mg_binds . modGuts
+  prog <- mg_binds <$> modGuts'
   let firstJust f = maybeM . listToMaybe . mapMaybe f
   let cmp' = \case
         NonRec x e | cmp x -> Just $ Bind' x e
@@ -209,7 +207,10 @@ thNameToGhcName' = liftCore . thNameToGhcName >=> maybeM
 --
 -- Get the instance environments from a CoreM pass instead of the typechecker
 -- pass.
-getInstEnvs' :: MonadCore m => MonadReader r m => HasModGuts r => m InstEnvs
+getInstEnvs'
+  :: MonadCore m
+  => HasModGuts' m
+  => m InstEnvs
 getInstEnvs' = do
   -- Get the global definitions
   hscEnv <- liftCore getHscEnv
@@ -217,7 +218,7 @@ getInstEnvs' = do
   let global = eps_inst_env eps
 
   -- Get the local definitions
-  local <- reader $ mg_inst_env . modGuts
+  local <- mg_inst_env <$> modGuts'
 
   -- Return the instance environments
   return $ InstEnvs
@@ -226,3 +227,12 @@ getInstEnvs' = do
     -- TODO: Get actual visible orphan modules
     , ie_visible = mkModuleSet []
     }
+
+getFamInstEnvs'
+  :: MonadCore m
+  => HasModGuts' m
+  => m FamInstEnvs
+getFamInstEnvs' = do
+  local <- mg_fam_inst_env <$> modGuts'
+  global <- liftCore getPackageFamInstEnv
+  pure (local, global)

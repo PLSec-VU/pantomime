@@ -234,8 +234,7 @@ printAndLint bind = do
 composeImpl
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => UC TH.Name
   -> Pass m CoreExpr
 composeImpl uc expr = do
@@ -258,8 +257,7 @@ composeImpl uc expr = do
 composeImpl'
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => Spec TH.Name
   -> Pass m CoreExpr
 composeImpl' spec expr = do
@@ -282,8 +280,7 @@ composeImpl' spec expr = do
 composeSim'
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => Spec TH.Name
   -> m CoreExpr
 composeSim' uc = do
@@ -307,8 +304,7 @@ composeSim' uc = do
 composeSim
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => UC TH.Name
   -> m CoreExpr
 composeSim uc = do
@@ -333,8 +329,7 @@ composeSim uc = do
 ucCheck
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => HasDynFlags m
   => UCGenerated (UC TH.Name)
   -> Pass m CoreBind'
@@ -358,13 +353,12 @@ ucCheck (UCGenerated uc) (Bind' var expr) = do
 checkSpec
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => HasDynFlags m
   => UCGenerated (Spec TH.Name)
   -> Pass m CoreBind'
 checkSpec (UCGenerated spec) (Bind' var expr) = do
-  guts <- reader modGuts
+  guts <- modGuts'
   let program = mg_binds guts
   let scope = extendInScopeSetBndrs emptyInScopeSet program
 
@@ -398,8 +392,7 @@ checkSpec (UCGenerated spec) (Bind' var expr) = do
 symCompare
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => HasDynFlags m
   => UCGenerated (SymCompare TH.Name)
   -> Pass m CoreBind'
@@ -407,12 +400,6 @@ symCompare (UCGenerated (SymCompare other)) (Bind' var expr) = do
   let resolve name = Var <$> resolveTH' name
 
   other' <- resolve other
-  -- guts <- reader modGuts
-  -- expr' <- monomorphize guts expr
-
-  -- other' <- do
-  --   other' <- resolve other
-  --   monomorphize guts other'
 
   result <- exprSymEq expr other'
 
@@ -427,8 +414,7 @@ symCompare (UCGenerated (SymCompare other)) (Bind' var expr) = do
 ucCompare
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => HasDynFlags m
   => UCGenerated (UCCompare TH.Name)
   -> Pass m CoreBind'
@@ -449,8 +435,7 @@ ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
 unifyAndNorm
   :: MonadFail m
   => MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => HasDynFlags m
   => CoreExpr
   -> CoreExpr
@@ -461,13 +446,13 @@ unifyAndNorm this other = do
 
   instEnv <- getInstEnvs'
 
-  prog <- reader $ mg_binds . modGuts
+  prog <- mg_binds <$> modGuts'
   let scope = extendInScopeSetBndrs emptyInScopeSet prog
 
   let instantiateAndNormalize expr = do
           let expr' = resolveInstances instEnv expr
           Lint.panic Lint.base scope expr'
-          guts <- reader modGuts
+          guts <- modGuts'
           -- monomorphize guts expr'
           normalize guts expr'
 

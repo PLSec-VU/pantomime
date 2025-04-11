@@ -24,7 +24,7 @@ import Prelude hiding ((<>))
 import GHC.Plugins
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Tc.Utils.TcType (eqType)
-import GHC.TypeLits (SomeNat(..), someNatVal, OrderingI (..), cmpNat)
+import GHC.TypeLits (SomeNat(..), someNatVal)
 
 import Grisette (ToCon (..), EvalSym (..), evalSymToCon, indexed, Symbol)
 import Grisette.Unified (EvalModeTag (..))
@@ -35,7 +35,7 @@ import Control.Monad.Identity (Identity (..))
 import Control.Monad.Except (MonadError (..), runExceptT)
 import Control.Monad (forM)
 
-import Data.Typeable (cast, Proxy (..))
+import Data.Typeable (cast)
 
 import Symbolic.WordSize
 import Symbolic.Value
@@ -193,6 +193,12 @@ concretise model = \case
     , Just bv <- cast @_ @(RuntimeValue S (SymIntN n)) value
     -> pure $ primCon model bv
 
+  Opaque' ty value
+    -- TODO Actually check the TyCon!
+    | Just (_tyCon, []) <- tcSplitTyConApp_maybe ty
+    , Just bv <- cast @_ @(RuntimeValue S (SymWordN 1)) value
+    -> pure $ primCon model bv
+
   Opaque' _ty _value -> pure $ Unknown
 
   -- TODO: There should be a better error to emit than this no? Maybe we
@@ -243,8 +249,6 @@ primCon
   -> Concrete
 primCon model value = do
   let concrete = evalSymToCon @_ @(RuntimeValue C (ConType a)) model value
-  -- TODO: I think we should either add an instance of ToCon from Runtime to
-  -- Either, or we should expose a runRuntime function. This is bad!
-  case runIdentity . runExceptT . unRuntimeValue $ concrete of
+  case unRuntimeC concrete of
     Right value' -> Value $ ModelValue value'
     Left err -> Error err
