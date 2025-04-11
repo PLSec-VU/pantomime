@@ -29,6 +29,8 @@ import Clash.Sized.Internal.BitVector
   , slice#
   , (++#)
   , size#
+  , shiftL#
+  , shiftR#
   )
 
 import GHC.Plugins
@@ -78,6 +80,8 @@ clashInterp = sequence
   , interpLe
   , interpGt
   , interpGe
+  , interpShiftL
+  , interpShiftR
   , interpFromInteger
   , interpSlice
   , interpConcat
@@ -155,11 +159,12 @@ bvEquality
   -> TyCon
   -> Value m ws
 bvEquality cmp bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
-      Opaque' _ lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
+      Opaque' _ lhs -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
         Opaque' _ rhs -> do
-          SomeNat @n _ <- whyFail IllTyped $ someTyNat size
+          size <- whyFail IllTyped $ concreteNat nat
+          SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
           lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
           rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
@@ -174,6 +179,35 @@ bvEquality cmp bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
             , adtTag = tag
             , adtFields = [[], []]
             }
+
+        _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+bvShift
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall n. KnownNat n => WordN' S n -> SymInt ws -> WordN' S n)
+  -> TyCon
+  -> Value m ws
+bvShift op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
+      Opaque' ty lhs -> pure . Fun intTy $ \case
+        Data adt -> do
+          size <- whyFail IllTyped $ concreteNat nat
+          SomeNat @n _ <- pure $ TypeNats.someNatVal size
+
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+          fields <- whyFail IllTyped $ adtDataConFields adt intDataCon
+          rhs <- case fields of
+            [Primitive (Int rhs)] -> pure $ SymInt <$> rhs
+            _ -> throwError IllTyped
+
+          let result = liftA2 op lhs' rhs
+          pure $ Opaque' ty result
 
         _ -> throwError IllTyped
       _ -> throwError IllTyped
@@ -359,6 +393,52 @@ interpGe = do
   bvTyCon <- lookupThTyCon ''BitVector
   let value = bvEquality (.>=) bvTyCon
   pure (var, value)
+
+interpShiftL
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpShiftL = do
+  var <- lookupThId 'shiftL#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvShift symShiftL' bvTyCon
+  pure (var, value)
+
+symShiftL'
+  :: forall ws n
+   . KnownNat n
+  => KnownWordSize ws
+  => WordN' S n
+  -> SymInt ws
+  -> WordN' S n
+symShiftL' value (SymInt idx) = do
+  let idx' = symFromIntegral idx
+  symShift value idx'
+
+interpShiftR
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpShiftR = do
+  var <- lookupThId 'shiftR#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvShift symShiftRL' bvTyCon
+  pure (var, value)
+
+symShiftRL'
+  :: forall ws n
+   . KnownNat n
+  => KnownWordSize ws
+  => WordN' S n
+  -> SymInt ws
+  -> WordN' S n
+symShiftRL' value (SymInt idx) = do
+  let idx' = symFromIntegral idx
+  symShiftNegated value idx'
 
 interpFromInteger
   :: forall m ws
