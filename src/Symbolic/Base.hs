@@ -9,6 +9,7 @@ module Symbolic.Base
 import GHC.Plugins
 import GHC.Types.TyThing (lookupId)
 import GHC.MonadCore
+import GHC.Base (noinline)
 
 import GHC.Real (overflowError, divZeroError)
 import GHC.Num.Integer (integerToInt#, integerToWord#)
@@ -24,6 +25,7 @@ import Symbolic.Value
 import Symbolic.MonadEval
 import Symbolic.WordSize
 import Symbolic.Runtime
+import Symbolic.Clash.Util
 
 baseValues
   :: forall m ws
@@ -40,6 +42,7 @@ baseValues = sequence
   -- , integerMod'
   , overflowError'
   , divZeroError'
+  , interpNoInline
   ]
 
 integerToInt'#
@@ -334,4 +337,16 @@ divZeroError' = do
         Ty ty -> typedValue (throwError DivideByZero) ty
         _ -> throwError IllTyped
 
+  pure (var, value)
+
+interpNoInline
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpNoInline = do
+  var <- lookupThId 'noinline
+  let value = Fun tYPEKind $ \case
+        Ty ty -> pure . Fun ty $ \arg -> pure arg
+        _ -> throwError IllTyped
   pure (var, value)

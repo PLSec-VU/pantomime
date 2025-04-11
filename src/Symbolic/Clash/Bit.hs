@@ -26,7 +26,7 @@ import Grisette
 
 import Control.Monad.Except (MonadError (..))
 
-import Data.Typeable (cast, Proxy (..))
+import Data.Typeable (cast)
 
 import Symbolic.MonadEval
 import Symbolic.Value
@@ -35,6 +35,8 @@ import Symbolic.Runtime
 import Symbolic.Util
 import Symbolic.Clash.Util
 import Symbolic.Dict
+import Symbolic.Sized.BitVector
+import Symbolic.Sized.Class
 
 clashInterp
   :: forall m ws
@@ -54,14 +56,14 @@ bitEquality
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (SymWordN 1 -> SymWordN 1 -> SymBool)
+  => (WordN' S 1 -> WordN' S 1 -> SymBool)
   -> Type
   -> Value m ws
 bitEquality cmp bitTy = Fun bitTy $ \case
   Opaque' _ lhs -> pure . Fun bitTy $ \case
     Opaque' _ rhs -> do
-      lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN 1)) lhs
-      rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN 1)) rhs
+      lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S 1)) lhs
+      rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S 1)) rhs
 
       let conditional = mrgLiftA2 cmp lhs' rhs'
       let tr = dataConToTag trueDataCon
@@ -120,7 +122,7 @@ highValue
    . Type
   -> Value m ws
 highValue bitTy = do
-  let value :: SymWordN 1
+  let value :: WordN' S 1
       value = 1
   Opaque' bitTy $ pure value
 
@@ -141,7 +143,7 @@ lowValue
    . Type
   -> Value m ws
 lowValue bitTy = do
-  let value :: SymWordN 1
+  let value :: WordN' S 1
       value = 0
   Opaque' bitTy $ pure value
 
@@ -172,14 +174,13 @@ msbValue bvTyCon bitTy = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
       Opaque' _ value -> do
         size <- whyFail UnsupportedExpr $ concreteNat adt
         SomeNat @n _ <- pure $ someNatVal size
-        Dict <- whyFail IllTyped $ posNat @n
 
-        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) value
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
 
         SomeNat @idx _ <- pure . someNatVal $ size - 1
         Dict <- pure $ unsafeDict @(idx + 1 <= n)
-        let sliced :: RuntimeValue S (SymWordN 1)
-            sliced = sizedBVSelect @_ @n @idx @1 Proxy Proxy <$> value'
+        let sliced :: RuntimeValue S (WordN' S 1)
+            sliced = sizedBVSelect' @_ @idx @1 @n <$> value'
 
         pure $ Opaque' bitTy sliced
       _ -> throwError IllTyped
