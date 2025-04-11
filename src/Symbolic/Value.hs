@@ -1230,6 +1230,10 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive ws) where
     (Word64 lhs, Word64 rhs) -> weakEq lhs rhs
     (Float lhs, Float rhs) -> weakEq lhs rhs
     (Double lhs, Double rhs) -> weakEq lhs rhs
+    (ByteArray lsize larr, ByteArray rsize rarr) -> do
+      eqSize <- weakEq lsize rsize
+      eqArr <- weakEq larr rarr
+      pure $ eqSize .&& eqArr
     _ -> throwError IllTyped
 
 instance (MonadEval m, KnownWordSize ws) => StrictIte m (Primitive ws) where

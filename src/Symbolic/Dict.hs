@@ -11,6 +11,7 @@ module Symbolic.Dict
   , posNat
   , cmpNat'
   , someTyNat
+  , withSize
   ) where
 
 import GHC.Plugins hiding (empty)
@@ -67,3 +68,10 @@ someTyNat ty = do
   num <- isNumLitTy ty
   guard $ num >= 0
   pure $ someNatVal (fromInteger num)
+
+withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
+withSize con sym = case natVal $ Proxy @n of
+  0 -> case unsafeDict @(n ~ 0) of
+    Dict -> con
+  _ -> case unsafeDict @(1 <= n) of
+    Dict -> sym

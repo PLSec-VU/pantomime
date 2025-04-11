@@ -35,6 +35,7 @@ import GHC.Plugins
 import GHC.Builtin.Types.Prim
 
 import GHC.TypeLits
+import qualified GHC.TypeNats as TypeNats
 
 import Control.Monad.Except (MonadError(..))
 
@@ -367,12 +368,13 @@ fromIntegerValue
   => TyCon
   -> Value m ws
 fromIntegerValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ -> pure . Fun naturalTy $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun naturalTy $ \case
       Data _ -> pure . Fun integerTy $ \case
         Data adt -> do
-          SomeNat @n _ <- whyFail IllTyped $ someTyNat size
-          Dict <- whyFail IllTyped $ posNat @n
+          size <- whyFail IllTyped $ concreteNat nat
+          SomeNat @n _ <- pure $ TypeNats.someNatVal size
+          Dict <- whyFail UnsupportedExpr $ posNat @n
 
           let condIS = adtIsDataCon adt integerISDataCon
           valueIS <- case adtDataConFields adt integerISDataCon of
@@ -406,7 +408,7 @@ fromIntegerValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
                 cond' <- cond
                 mrgIte cond' body fl
 
-          let ty = mkTyConApp bvTyCon [size]
+          let ty = mkTyConApp bvTyCon [sizeTy]
           pure $ Opaque' ty final
 
         _ -> throwError IllTyped
@@ -580,4 +582,3 @@ sizeValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
-
