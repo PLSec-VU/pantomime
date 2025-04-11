@@ -39,11 +39,9 @@ import qualified GHC.TypeNats as TypeNats
 
 import Control.Monad.Except (MonadError(..))
 
-import Data.Typeable (cast, Proxy (..))
-
-import Unsafe.Coerce (unsafeCoerce)
-
 import Data.Bits (Bits (..))
+import Data.Coerce (coerce)
+import Data.Typeable (cast)
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -56,6 +54,7 @@ import Symbolic.WordSize
 import Symbolic.Dict
 import Symbolic.Clash.Util
 import Symbolic.Sized.WordN
+import Symbolic.Sized.Class
 
 clashInterp
   :: forall m ws
@@ -152,7 +151,7 @@ bvEquality
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymBool)
+  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> SymBool)
   -> TyCon
   -> Value m ws
 bvEquality cmp bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
@@ -161,10 +160,9 @@ bvEquality cmp bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
       Opaque' _ lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
         Opaque' _ rhs -> do
           SomeNat @n _ <- whyFail IllTyped $ someTyNat size
-          Dict <- whyFail IllTyped $ posNat @n
 
-          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
-          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
 
           let conditional = mrgLiftA2 cmp lhs' rhs'
           let tr = dataConToTag trueDataCon
@@ -473,9 +471,6 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
                 SomeNat @idx _ <- someNatVal' lower'
                 SomeNat @w _ <- someNatVal' $ (upper' + 1) - lower'
 
-                Dict <- whyFail IllTyped $ posNat @n
-                Dict <- whyFail IllTyped $ posNat @w
-
                 -- Note that this is equal to (idx + n).
                 SomeNat @req _ <- someNatVal' $ upper' + 1
 
@@ -485,8 +480,8 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
                 Dict <- whyFail IllTyped $ leqNat @req @n
                 Dict <- pure $ unsafeDict @(idx + w <= n)
 
-                value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) value
-                let sliced = sizedBVSelect @_ @n @idx @w Proxy Proxy <$> value'
+                value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
+                let sliced = sizedBVSelect' @_ @idx @w @n <$> value'
 
                 let size' = mkTyConApp subTyFam [upperInc, lower]
                 let resTy = mkTyConApp bvTyCon [size']
@@ -524,12 +519,10 @@ concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
         Opaque' _lty lhs -> pure . Fun (mkTyConApp bvTyCon [rsize]) $ \case
           Opaque' _rty rhs -> do
             SomeNat @l _ <- whyFail IllTyped $ someTyNat lsize
-            Dict <- whyFail IllTyped $ posNat @l
-            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN l)) lhs
+            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S l)) lhs
 
             SomeNat @r _ <- whyFail IllTyped $ someTyNat rsize
-            Dict <- whyFail IllTyped $ posNat @r
-            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN r)) rhs
+            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S r)) rhs
 
             -- We do this as we need to get the KnownNat constraint on the
             -- output.
@@ -537,17 +530,13 @@ concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
               lsize' <- isNumLitTy lsize
               rsize' <- isNumLitTy rsize
               someNatVal $ lsize' + rsize'
-            Dict <- whyFail IllTyped $ posNat @n
-            -- Refl <- pure $ unsafeAxiom @(l + r ~ n)
+            Dict <- pure $ unsafeDict @(l + r ~ n)
 
-            let concatted :: RuntimeValue S (SymWordN (l + r))
-                concatted = liftA2 sizedBVConcat lhs' rhs'
+            let concatted :: RuntimeValue S (WordN' S (l + r))
+                concatted = liftA2 sizedBVConcat' lhs' rhs'
 
-            -- TODO: Why can we not use the normal coercion if we add the unsafe
-            -- axiom that l + r ~ n? Of course, this is also still always valid,
-            -- but it is less obviously correct.
-            let concatted' :: RuntimeValue S (SymWordN n)
-                concatted' = unsafeCoerce concatted
+            let concatted' :: RuntimeValue S (WordN' S n)
+                concatted' = coerce concatted
 
             let size = mkTyConApp addTyFam [lsize, rsize]
             let resTy = mkTyConApp bvTyCon [size]

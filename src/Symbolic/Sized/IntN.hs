@@ -5,12 +5,14 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Symbolic.Sized.IntN
   ( IntN' (..)
   ) where
 
-import GHC.TypeNats (type (<=), Natural, KnownNat, natVal)
+import GHC.TypeNats (type (<=), type (+), Natural, KnownNat, natVal)
 
 import Grisette hiding (fill)
 import Grisette.Unified (EvalModeTag (..), GetIntN)
@@ -19,7 +21,8 @@ import qualified Grisette.Unified as Unified
 import Data.Bits (Bits (..), FiniteBits (..))
 import Data.Data (Proxy(..))
 
-import Symbolic.Dict (withSize)
+import Symbolic.Dict (withSize, Dict (..), unsafeDict)
+import Symbolic.Sized.Class
 
 data IntN' (mode :: EvalModeTag) (n :: Natural) where
   IntZ :: IntN' mode 0
@@ -210,3 +213,87 @@ instance ToSym (IntN' mode n) (IntN' mode n) where
 
 instance ConRep (IntN' S n) where
   type ConType (IntN' S n) = IntN' C n
+
+instance Unified.DecideEvalMode mode => SizedBV' (IntN' mode) where
+  sizedBVConcat'
+    :: forall l r
+     . KnownNat l
+    => KnownNat r
+    => IntN' mode l
+    -> IntN' mode r
+    -> IntN' mode (l + r)
+  sizedBVConcat' = curry $ \case
+    (IntZ, IntZ) -> IntZ
+    (IntZ, rhs) -> rhs
+    (lhs, IntZ) -> lhs
+    (IntP lhs, IntP rhs) -> do
+      let op :: GetIntN mode l -> GetIntN mode r -> GetIntN mode (l + r)
+          op = Unified.withMode @mode sizedBVConcat sizedBVConcat
+      -- SAFETY: Haskell isn't able to infer that the sum of two positives is
+      -- also positive, so we just unsafely get the proof for it.
+      case unsafeDict @(1 <= l + r) of
+        Dict -> IntP $ op lhs rhs
+
+  sizedBVZext'
+    :: forall l r
+     . KnownNat l
+    => KnownNat r
+    => l <= r
+    => IntN' mode l
+    -> IntN' mode r
+  sizedBVZext' = \case
+    IntZ -> do
+      let op :: 1 <= r => GetIntN mode r
+          op = Unified.withMode @mode
+            (sizedBVZext @_ @1 Proxy 0)
+            (sizedBVZext @_ @1 Proxy 0)
+      withSize' op
+    IntP value -> do
+      let op :: GetIntN mode l -> GetIntN mode r
+          op = Unified.withMode @mode
+            (sizedBVZext @_ @l @r Proxy)
+            (sizedBVZext @_ @l @r Proxy)
+      withSize' $ op value
+
+  sizedBVSext'
+    :: forall l r
+     . KnownNat l
+    => KnownNat r
+    => l <= r
+    => IntN' mode l
+    -> IntN' mode r
+  sizedBVSext' = \case
+    IntZ -> do
+      let op :: 1 <= r => GetIntN mode r
+          op = Unified.withMode @mode
+            (sizedBVSext @_ @1 Proxy 0)
+            (sizedBVSext @_ @1 Proxy 0)
+      withSize' op
+    IntP value -> do
+      let op :: GetIntN mode l -> GetIntN mode r
+          op = Unified.withMode @mode
+            (sizedBVSext @_ @l @r Proxy)
+            (sizedBVSext @_ @l @r Proxy)
+      withSize' $ op value
+
+  sizedBVExt' = sizedBVSext'
+
+  sizedBVSelect''
+    :: forall idx width n
+     . KnownNat idx
+    => KnownNat width
+    => KnownNat n
+    => idx + width <= n
+    => Proxy idx
+    -> Proxy width
+    -> IntN' mode n
+    -> IntN' mode width
+  sizedBVSelect'' _ _ = \case
+    IntZ -> case unsafeDict @(width ~ 0) of
+      Dict -> IntZ
+    IntP value -> do
+      let op :: 1 <= width => GetIntN mode n -> GetIntN mode width
+          op = Unified.withMode @mode
+            (sizedBVSelect @_ @n @idx @width Proxy Proxy)
+            (sizedBVSelect @_ @n @idx @width Proxy Proxy)
+      withSize' $ op value

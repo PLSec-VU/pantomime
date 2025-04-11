@@ -5,12 +5,14 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Symbolic.Sized.WordN
   ( WordN' (..)
   ) where
 
-import GHC.TypeNats (type (<=), Natural, KnownNat, natVal)
+import GHC.TypeNats (type (<=), type (+), Natural, KnownNat, natVal)
 
 import Grisette hiding (fill)
 import Grisette.Unified (EvalModeTag (..), GetWordN)
@@ -19,7 +21,8 @@ import qualified Grisette.Unified as Unified
 import Data.Bits (Bits (..), FiniteBits (..))
 import Data.Data (Proxy(..))
 
-import Symbolic.Dict (withSize)
+import Symbolic.Dict (withSize, Dict (..), unsafeDict)
+import Symbolic.Sized.Class
 
 data WordN' (mode :: EvalModeTag) (n :: Natural) where
   WordZ :: WordN' mode 0
@@ -117,7 +120,7 @@ instance (Unified.DecideEvalMode mode, KnownNat n) => Bits (WordN' mode n) where
 
   bitSizeMaybe = pure . finiteBitSize
 
-  isSigned _ = True
+  isSigned _ = False
 
   testBit value idx = case value of
     WordZ -> False
@@ -210,3 +213,87 @@ instance ToSym (WordN' mode n) (WordN' mode n) where
 
 instance ConRep (WordN' S n) where
   type ConType (WordN' S n) = WordN' C n
+
+instance Unified.DecideEvalMode mode => SizedBV' (WordN' mode) where
+  sizedBVConcat'
+    :: forall l r
+     . KnownNat l
+    => KnownNat r
+    => WordN' mode l
+    -> WordN' mode r
+    -> WordN' mode (l + r)
+  sizedBVConcat' = curry $ \case
+    (WordZ, WordZ) -> WordZ
+    (WordZ, rhs) -> rhs
+    (lhs, WordZ) -> lhs
+    (WordP lhs, WordP rhs) -> do
+      let op :: GetWordN mode l -> GetWordN mode r -> GetWordN mode (l + r)
+          op = Unified.withMode @mode sizedBVConcat sizedBVConcat
+      -- SAFETY: Haskell isn't able to infer that the sum of two positives is
+      -- also positive, so we just unsafely get the proof for it.
+      case unsafeDict @(1 <= l + r) of
+        Dict -> WordP $ op lhs rhs
+
+  sizedBVZext'
+    :: forall l r
+     . KnownNat l
+    => KnownNat r
+    => l <= r
+    => WordN' mode l
+    -> WordN' mode r
+  sizedBVZext' = \case
+    WordZ -> do
+      let op :: 1 <= r => GetWordN mode r
+          op = Unified.withMode @mode
+            (sizedBVZext @_ @1 Proxy 0)
+            (sizedBVZext @_ @1 Proxy 0)
+      withSize' op
+    WordP value -> do
+      let op :: GetWordN mode l -> GetWordN mode r
+          op = Unified.withMode @mode
+            (sizedBVZext @_ @l @r Proxy)
+            (sizedBVZext @_ @l @r Proxy)
+      withSize' $ op value
+
+  sizedBVSext'
+    :: forall l r
+     . KnownNat l
+    => KnownNat r
+    => l <= r
+    => WordN' mode l
+    -> WordN' mode r
+  sizedBVSext' = \case
+    WordZ -> do
+      let op :: 1 <= r => GetWordN mode r
+          op = Unified.withMode @mode
+            (sizedBVSext @_ @1 Proxy 0)
+            (sizedBVSext @_ @1 Proxy 0)
+      withSize' op
+    WordP value -> do
+      let op :: GetWordN mode l -> GetWordN mode r
+          op = Unified.withMode @mode
+            (sizedBVSext @_ @l @r Proxy)
+            (sizedBVSext @_ @l @r Proxy)
+      withSize' $ op value
+
+  sizedBVExt' = sizedBVZext'
+
+  sizedBVSelect''
+    :: forall idx width n
+     . KnownNat idx
+    => KnownNat width
+    => KnownNat n
+    => idx + width <= n
+    => Proxy idx
+    -> Proxy width
+    -> WordN' mode n
+    -> WordN' mode width
+  sizedBVSelect'' _ _ = \case
+    WordZ -> case unsafeDict @(width ~ 0) of
+      Dict -> WordZ
+    WordP value -> do
+      let op :: 1 <= width => GetWordN mode n -> GetWordN mode width
+          op = Unified.withMode @mode
+            (sizedBVSelect @_ @n @idx @width Proxy Proxy)
+            (sizedBVSelect @_ @n @idx @width Proxy Proxy)
+      withSize' $ op value
