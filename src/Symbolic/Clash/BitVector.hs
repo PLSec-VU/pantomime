@@ -53,7 +53,7 @@ import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Dict
 import Symbolic.Clash.Util
-import Symbolic.Sized.WordN
+import Symbolic.Sized.BitVector
 import Symbolic.Sized.Class
 
 clashInterp

@@ -80,8 +80,7 @@ import Symbolic.Runtime
 import Symbolic.Identifier
 import Symbolic.MonadEval
 import Symbolic.Dict
-import Symbolic.Sized.WordN
-import Symbolic.Sized.IntN
+import Symbolic.Sized.BitVector
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where

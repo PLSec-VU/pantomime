@@ -27,12 +27,14 @@ import Clash.Sized.Internal.Unsigned
   )
 
 import GHC.Plugins
-import GHC.TypeLits
 import GHC.Builtin.Types.Prim (alphaTyVar)
+
+import GHC.TypeLits
+import qualified GHC.TypeNats as TypeNats
 
 import Control.Monad.Except (MonadError(..))
 
-import Data.Typeable (cast, Proxy (..))
+import Data.Typeable (cast)
 
 import Data.Bits ((.&.), (.|.), xor)
 
@@ -45,6 +47,7 @@ import Symbolic.Runtime
 import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Clash.Util
+import Symbolic.Sized.BitVector
 
 clashInterp
   :: forall m ws
@@ -78,28 +81,26 @@ clashInterp = sequence
 unBinary
   :: forall m ws
    . MonadEval m
-  => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymWordN n)
+  => KnownWordSize ws
+  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> WordN' S n)
   -> TyCon
   -> Value m ws
 -- TODO: It is insanely ugly and error prone to define interpretations like
 -- this...
 unBinary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
-      Opaque' lty lhs -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp unTyCon [sizeTy]) $ \case
+      Opaque' lty lhs -> pure . Fun (mkTyConApp unTyCon [sizeTy]) $ \case
         Opaque' _rty rhs -> do
-          SomeNat @n _ <- whyFail IllTyped $ do
-            size' <- isNumLitTy size
-            someNatVal size'
+          size <- whyFail IllTyped $ concreteNat nat
+          SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          case cmpNat @1 @n Proxy Proxy of
-            LTI -> do
-              lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
-              rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
 
-              let result = mrgLiftA2 op lhs' rhs'
-              pure $ Opaque' lty result
-            _ -> throwError IllTyped
+          let result = mrgLiftA2 op lhs' rhs'
+          pure $ Opaque' lty result
+
         _ -> throwError IllTyped
       _ -> throwError IllTyped
     _ -> throwError IllTyped
@@ -112,24 +113,21 @@ unBinary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
 unUnary
   :: forall m ws
    . MonadEval m
-  => (forall n. KnownPos n => SymWordN n -> SymWordN n)
+  => KnownWordSize ws
+  => (forall n. KnownNat n => WordN' S n -> WordN' S n)
   -> TyCon
   -> Value m ws
 unUnary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp unTyCon [sizeTy]) $ \case
       Opaque' ty value -> do
-        SomeNat @n _ <- whyFail IllTyped $ do
-          size' <- isNumLitTy size
-          someNatVal size'
+        size <- whyFail IllTyped $ concreteNat nat
+        SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-        case cmpNat @1 @n Proxy Proxy of
-          LTI -> do
-            value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) value
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
 
-            let result = op <$> value'
-            pure $ Opaque' ty result
-          _ -> throwError IllTyped
+        let result = op <$> value'
+        pure $ Opaque' ty result
 
       _ -> throwError IllTyped
     _ -> throwError IllTyped
@@ -139,33 +137,30 @@ unEquality
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymBool)
+  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> SymBool)
   -> TyCon
   -> Value m ws
 unEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
   Ty size -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
     Opaque' _ lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
       Opaque' _ rhs -> do
-        SomeNat @n _ <- whyFail IllTyped $ do
+        SomeNat @n _ <- whyFail UnsupportedExpr $ do
           size' <- isNumLitTy size
           someNatVal size'
 
-        case cmpNat @1 @n Proxy Proxy of
-          LTI -> do
-            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
-            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
+        lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+        rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
 
-            let conditional = mrgLiftA2 cmp lhs' rhs'
-            let tr = dataConToTag trueDataCon
-            let fl = dataConToTag falseDataCon
-            let tag = (\c -> symIte c tr fl) <$> conditional
-            pure $ Data ADT
-              { adtTyCon = boolTyCon
-              , adtTyArgs = []
-              , adtTag = tag
-              , adtFields = [[], []]
-              }
-          _ -> throwError IllTyped
+        let conditional = mrgLiftA2 cmp lhs' rhs'
+        let tr = dataConToTag trueDataCon
+        let fl = dataConToTag falseDataCon
+        let tag = (\c -> symIte c tr fl) <$> conditional
+        pure $ Data ADT
+          { adtTyCon = boolTyCon
+          , adtTyArgs = []
+          , adtTag = tag
+          , adtFields = [[], []]
+          }
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
@@ -173,7 +168,7 @@ unEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
 unBitwise
   :: forall m ws
    . MonadEval m
-  => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymWordN n)
+  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> WordN' S n)
   -> TyCon
   -> Value m ws
 unBitwise op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
@@ -184,14 +179,11 @@ unBitwise op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
           size' <- isNumLitTy size
           someNatVal size'
 
-        case cmpNat @1 @n Proxy Proxy of
-          LTI -> do
-            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
-            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
+        lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+        rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
 
-            let result = mrgLiftA2 op lhs' rhs'
-            pure $ Opaque' lty result
-          _ -> throwError IllTyped
+        let result = mrgLiftA2 op lhs' rhs'
+        pure $ Opaque' lty result
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
@@ -200,6 +192,7 @@ interpAdd
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpAdd = do
   var <- lookupThId '(+#)
@@ -211,6 +204,7 @@ interpSub
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpSub = do
   var <- lookupThId '(-#)
@@ -222,6 +216,7 @@ interpMul
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpMul = do
   var <- lookupThId '(*#)
@@ -233,6 +228,7 @@ interpNeg
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpNeg = do
   var <- lookupThId 'negate#
@@ -364,50 +360,46 @@ fromIntegerValue
   => TyCon
   -> Value m ws
 fromIntegerValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ ->  pure . Fun integerTy $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) ->  pure . Fun integerTy $ \case
       Data adt -> do
-        SomeNat @n _ <- whyFail IllTyped $ do
-          size' <- isNumLitTy size
-          someNatVal size'
+        size <- whyFail IllTyped $ concreteNat nat
+        SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-        case cmpNat @1 @n Proxy Proxy of
-          LTI -> do
-            let condIS = adtIsDataCon adt integerISDataCon
-            valueIS <- case adtDataConFields adt integerISDataCon of
-              Just [Primitive (Int i)] -> pure $ symFromIntegral <$> i
-              _ -> throwError IllTyped
-
-            let condIP = adtIsDataCon adt integerIPDataCon
-            valueIP <- case adtDataConFields adt integerIPDataCon of
-              Just [Primitive (ByteArray _ i)] -> pure $ symFromIntegral <$> i
-              _ -> throwError IllTyped
-
-            let condIN = adtIsDataCon adt integerINDataCon
-            valueIN <- case adtDataConFields adt integerINDataCon of
-              Just [Primitive (ByteArray _ i)] -> pure $ negate . symFromIntegral <$> i
-              _ -> throwError IllTyped
-
-            let alts =
-                  [ (condIS, valueIS)
-                  , (condIP, valueIP)
-                  , (condIN, valueIN)
-                  ]
-
-            let invalid :: RuntimeValue S (SymWordN n)
-                invalid = throwError Invalid
-
-            let foldl'' acc xs f = foldl' f acc xs
-
-            -- FIXME: This unfolds the prerequisites for the tag multiple times,
-            -- potentially bloating the guard.
-            let final = foldl'' invalid alts $ \fl (cond, body) -> do
-                  cond' <- cond
-                  mrgIte cond' body fl
-
-            let ty = mkTyConApp bvTyCon [size]
-            pure $ Opaque' ty final
+        let condIS = adtIsDataCon adt integerISDataCon
+        valueIS <- case adtDataConFields adt integerISDataCon of
+          Just [Primitive (Int i)] -> pure $ symFromIntegral <$> i
           _ -> throwError IllTyped
+
+        let condIP = adtIsDataCon adt integerIPDataCon
+        valueIP <- case adtDataConFields adt integerIPDataCon of
+          Just [Primitive (ByteArray _ i)] -> pure $ symFromIntegral <$> i
+          _ -> throwError IllTyped
+
+        let condIN = adtIsDataCon adt integerINDataCon
+        valueIN <- case adtDataConFields adt integerINDataCon of
+          Just [Primitive (ByteArray _ i)] -> pure $ negate . symFromIntegral <$> i
+          _ -> throwError IllTyped
+
+        let alts =
+              [ (condIS, valueIS)
+              , (condIP, valueIP)
+              , (condIN, valueIN)
+              ]
+
+        let invalid :: RuntimeValue S (WordN' S n)
+            invalid = throwError Invalid
+
+        let foldl'' acc xs f = foldl' f acc xs
+
+        -- FIXME: This unfolds the prerequisites for the tag multiple times,
+        -- potentially bloating the guard.
+        let final = foldl'' invalid alts $ \fl (cond, body) -> do
+              cond' <- cond
+              mrgIte cond' body fl
+
+        let ty = mkTyConApp bvTyCon [sizeTy]
+        pure $ Opaque' ty final
 
       _ -> throwError IllTyped
     _ -> throwError IllTyped

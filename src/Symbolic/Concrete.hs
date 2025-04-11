@@ -43,8 +43,7 @@ import Symbolic.Util
 import Symbolic.Evaluate
 import Symbolic.MonadEval
 import Symbolic.Dict
-import Symbolic.Sized.IntN
-import Symbolic.Sized.WordN
+import Symbolic.Sized.BitVector
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.
