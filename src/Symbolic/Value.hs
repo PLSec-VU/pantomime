@@ -1,20 +1,11 @@
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE DerivingVia #-}
-{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE DeriveLift #-}
-{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeAbstractions #-}
-{-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE TemplateHaskellQuotes #-}
 
 module Symbolic.Value
   ( Value (..)
@@ -89,6 +80,8 @@ import Symbolic.Runtime
 import Symbolic.Identifier
 import Symbolic.MonadEval
 import Symbolic.Dict
+import Symbolic.Sized.WordN
+import Symbolic.Sized.IntN
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where
@@ -441,11 +434,8 @@ typedBitVector value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
-  -- that the natural is actually a positive value.
-  Dict <- whyFail UnsupportedExpr $ posNat @n
-  let bv :: RuntimeValue S (SymWordN n)
-      bv = value
+  let bv :: RuntimeValue S (WordN' S n)
+      bv = withSize @n (pure $ WordZ) (WordP <$> value)
   pure $ Opaque' ty bv
 
 -- TODO: This is a lot of code duplication. Can't we squash this one with
@@ -475,11 +465,8 @@ typedUnsigned value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
-  -- that the natural is actually a positive value.
-  Dict <- whyFail UnsupportedExpr $ posNat @n
-  let bv :: RuntimeValue S (SymWordN n)
-      bv = value
+  let bv :: RuntimeValue S (WordN' S n)
+      bv = withSize @n (pure $ WordZ) (WordP <$> value)
   pure $ Opaque' ty bv
 
 typedSigned
@@ -507,11 +494,8 @@ typedSigned value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  -- Wrap the sized BitVector into an Opaque value. Note that we need to ensure
-  -- that the natural is actually a positive value.
-  Dict <- whyFail UnsupportedExpr $ posNat @n
-  let bv :: RuntimeValue S (SymIntN n)
-      bv = value
+  let bv :: RuntimeValue S (IntN' S n)
+      bv = withSize @n (pure $ IntZ) (IntP <$> value)
   pure $ Opaque' ty bv
 
 typedBit
@@ -536,9 +520,8 @@ typedBit value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bitTyCon) $ throwError UnsupportedExpr
 
-  -- Wrap the Bit into an Opaque value.
-  let bv :: RuntimeValue S (SymWordN 1)
-      bv = value
+  let bv :: RuntimeValue S (WordN' S 1)
+      bv = withSize @1 (pure $ WordZ) (WordP <$> value)
   pure $ Opaque' ty bv
 
 typedTyFamInst
@@ -1160,9 +1143,9 @@ tagInRange tag tyCon = do
 
 -- | Primitive values supported by the symbolic solver.
 data Primitive (ws :: PlatformWordSize) where
+  -- TODO: Use our new sized word primitive, which supports zero sized values.
+  -- This way, we don't have to carry the extra word size constraint around.
   -- TODO: Add support for Char
-  -- TODO: Add support for ByteArray (as this is how big integers are
-  -- implemented under the hood).
   -- TODO: Add support for symbolic (higher order) functions.
   -- Char :: RuntimeValue (SymWordN 31) -> Value m n
   -- BigNat :: RuntimeValue SymInteger -> Value m n
@@ -1186,6 +1169,8 @@ data Primitive (ws :: PlatformWordSize) where
   -- ByteArray'
   --   :: RuntimeValue S (ByteArray ws)
   --   -> Primitive ws
+  -- TODO: This is a really poor implementation of ByteArrays. We should change
+  -- it!
   ByteArray
     :: RuntimeValue S (SymIntN (WordBits ws))
     -> RuntimeValue S SymInteger
@@ -1295,6 +1280,6 @@ typedPrimitive value ty
   | ty `eqType` doublePrimTy = pure $ Double value
   | ty `eqType` byteArrayPrimTy = do
     idx <- freshIdx
-    let array = pure . sym $ indexed "!fresh" idx
-    pure $ ByteArray value array
+    let size = pure . sym $ indexed "!fresh" idx
+    pure $ ByteArray size value
   | otherwise = throwError UnsupportedExpr

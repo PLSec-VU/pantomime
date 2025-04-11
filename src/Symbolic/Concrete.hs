@@ -29,7 +29,6 @@ import GHC.TypeLits (SomeNat(..), someNatVal)
 import Grisette (ToCon (..), EvalSym (..), evalSymToCon, indexed, Symbol)
 import Grisette.Unified (EvalModeTag (..))
 import Grisette.SymPrim
-import Grisette.Internal.SymPrim.Prim.Term (ModelValue (..), SupportedPrim (..))
 
 import Control.Monad.Identity (Identity (..))
 import Control.Monad.Except (MonadError (..), runExceptT)
@@ -44,13 +43,15 @@ import Symbolic.Util
 import Symbolic.Evaluate
 import Symbolic.MonadEval
 import Symbolic.Dict
+import Symbolic.Sized.IntN
+import Symbolic.Sized.WordN
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.
 data Concrete where
   Record :: DataCon -> [Concrete] -> Concrete
   Function :: Symbol -> Type -> Concrete -> Concrete
-  Value :: ModelValue -> Concrete
+  Value :: Show a => a -> Concrete
   Error :: RuntimeError -> Concrete
   Unknown :: Concrete
 
@@ -114,7 +115,7 @@ pprConcrete addHeader addParens = \case
     let body' = pprConcrete id id body
     addParens $ hang header 2 body'
 
-  Value (ModelValue value) -> addHeader $ text (pformatCon value)
+  Value value -> addHeader $ text (show value)
   Error err -> addHeader $ "RUNTIME ERROR" <+> ppr err
   Unknown -> addHeader $ "undefined"
 
@@ -182,7 +183,7 @@ concretise model = \case
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
     , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
     , Just Dict <- posNat @n
-    , Just bv <- cast @_ @(RuntimeValue S (SymWordN n)) value
+    , Just bv <- cast @_ @(RuntimeValue S (WordN' S n)) value
     -> pure $ primCon model bv
 
   Opaque' ty value
@@ -190,13 +191,13 @@ concretise model = \case
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
     , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
     , Just Dict <- posNat @n
-    , Just bv <- cast @_ @(RuntimeValue S (SymIntN n)) value
+    , Just bv <- cast @_ @(RuntimeValue S (IntN' S n)) value
     -> pure $ primCon model bv
 
   Opaque' ty value
     -- TODO Actually check the TyCon!
     | Just (_tyCon, []) <- tcSplitTyConApp_maybe ty
-    , Just bv <- cast @_ @(RuntimeValue S (SymWordN 1)) value
+    , Just bv <- cast @_ @(RuntimeValue S (WordN' S 1)) value
     -> pure $ primCon model bv
 
   Opaque' _ty _value -> pure $ Unknown
@@ -233,7 +234,7 @@ concretePrimitive model = \case
       :: forall a
        . ToCon a (ConType a)
       => EvalSym a
-      => SupportedPrim (ConType a)
+      => Show (ConType a)
       => RuntimeValue S a
       -> Concrete
     prim' = primCon model
@@ -243,12 +244,12 @@ primCon
   :: forall a
    . ToCon a (ConType a)
   => EvalSym a
-  => SupportedPrim (ConType a)
+  => Show (ConType a)
   => Model
   -> RuntimeValue S a
   -> Concrete
 primCon model value = do
   let concrete = evalSymToCon @_ @(RuntimeValue C (ConType a)) model value
   case unRuntimeC concrete of
-    Right value' -> Value $ ModelValue value'
+    Right value' -> Value $ value'
     Left err -> Error err

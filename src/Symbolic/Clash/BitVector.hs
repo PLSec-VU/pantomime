@@ -55,6 +55,7 @@ import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Dict
 import Symbolic.Clash.Util
+import Symbolic.Sized.WordN
 
 clashInterp
   :: forall m ws
@@ -95,21 +96,22 @@ mkNatTyVarTy tyVar = mkTyVarTy $ setVarType tyVar naturalTy
 bvBinary
   :: forall m ws
    . MonadEval m
-  => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymWordN n)
+  => KnownWordSize ws
+  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> WordN' S n)
   -> TyCon
   -> Value m ws
 -- TODO: It is insanely ugly and error prone to define interpretations like
 -- this...
 bvBinary op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
-      Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
+      Opaque' lty lhs -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
         Opaque' _rty rhs -> do
-          SomeNat @n _ <- whyFail IllTyped $ someTyNat size
-          Dict <- whyFail IllTyped $ posNat @n
+          size <- whyFail IllTyped $ concreteNat nat
+          SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
-          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
 
           let result = mrgLiftA2 op lhs' rhs'
           pure $ Opaque' lty result
@@ -126,16 +128,18 @@ bvBinary op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
 bvUnary
   :: forall m ws
    . MonadEval m
-  => (forall n. KnownPos n => SymWordN n -> SymWordN n)
+  => KnownWordSize ws
+  => (forall n. KnownNat n => WordN' S n -> WordN' S n)
   -> TyCon
   -> Value m ws
 bvUnary op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
-  Ty size -> pure . Fun cONSTRAINTKind $ \case
-    Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
       Opaque' ty value -> do
-        SomeNat @n _ <- whyFail IllTyped $ someTyNat size
-        Dict <- whyFail IllTyped $ posNat @n
-        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) value
+        size <- whyFail IllTyped $ concreteNat nat
+        SomeNat @n _ <- pure $ TypeNats.someNatVal size
+
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
 
         let result = op <$> value'
         pure $ Opaque' ty result
@@ -182,6 +186,7 @@ interpAdd
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpAdd = do
   var <- lookupThId '(+#)
@@ -193,6 +198,7 @@ interpSub
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpSub = do
   var <- lookupThId '(-#)
@@ -204,6 +210,7 @@ interpMul
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpMul = do
   var <- lookupThId '(*#)
@@ -215,6 +222,7 @@ interpNeg
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpNeg = do
   var <- lookupThId 'negate#
@@ -226,6 +234,7 @@ interpComplement
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpComplement = do
   var <- lookupThId 'complement#
@@ -237,6 +246,7 @@ interpAnd
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpAnd = do
   var <- lookupThId 'and#
@@ -248,6 +258,7 @@ interpOr
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpOr = do
   var <- lookupThId 'or#
@@ -259,6 +270,7 @@ interpXor
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpXor = do
   var <- lookupThId 'xor#
@@ -270,6 +282,7 @@ interpXToBV
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpXToBV = do
   var <- lookupThId 'xToBV
@@ -374,7 +387,6 @@ fromIntegerValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
         Data adt -> do
           size <- whyFail IllTyped $ concreteNat nat
           SomeNat @n _ <- pure $ TypeNats.someNatVal size
-          Dict <- whyFail UnsupportedExpr $ posNat @n
 
           let condIS = adtIsDataCon adt integerISDataCon
           valueIS <- case adtDataConFields adt integerISDataCon of
@@ -397,7 +409,7 @@ fromIntegerValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
                 , (condIN, valueIN)
                 ]
 
-          let invalid :: RuntimeValue S (SymWordN n)
+          let invalid :: RuntimeValue S (WordN' S n)
               invalid = throwError Invalid
 
           let foldl'' acc xs f = foldl' f acc xs
