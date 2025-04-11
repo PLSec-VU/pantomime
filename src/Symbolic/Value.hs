@@ -293,7 +293,8 @@ mkCast' c v = case (optimiseCo c, v) of
     -- transformation may be wrong for other types!
     , tyCon == tyCon'
     , size `eqType` coercionLKind sizeCo -> do
-    let ty' = coercionRKind sizeCo
+    let size' = coercionRKind sizeCo
+    let ty' = mkTyConApp tyCon [size']
     pure $ Opaque' ty' value
 
   -- TODO: Check whether the coercion actually fits the value.
