@@ -286,6 +286,16 @@ mkCast' c v = case (optimiseCo c, v) of
     let cast = mkCoCast co' co
     pure $ Co cast
 
+  -- TODO: This should be part of an interface to add support for opaque types.
+  (TyConAppCo _ tyCon [sizeCo], Opaque' ty value)
+    | Just (tyCon', [size]) <- splitTyConApp_maybe ty
+    -- TODO: Ensure that we actually deal with the Clash bitvector types! This
+    -- transformation may be wrong for other types!
+    , tyCon == tyCon'
+    , size `eqType` coercionLKind sizeCo -> do
+    let ty' = coercionRKind sizeCo
+    pure $ Opaque' ty' value
+
   -- TODO: Check whether the coercion actually fits the value.
   (co, value) -> pure $ Cast' co value
 
