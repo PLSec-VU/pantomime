@@ -13,6 +13,9 @@ import Clash.Sized.Internal.Signed
   , (-#)
   , (*#)
   , negate#
+  , and#
+  , or#
+  , xor#
   , abs#
   , eq#
   , neq#
@@ -32,6 +35,8 @@ import GHC.Builtin.Types.Prim (alphaTyVar)
 import Control.Monad.Except (MonadError(..))
 
 import Data.Typeable (cast, Proxy (..))
+
+import Data.Bits ((.&.), (.|.), xor)
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -54,6 +59,9 @@ clashInterp = sequence
   , interpSub
   , interpMul
   , interpNeg
+  , interpAnd
+  , interpOr
+  , interpXor
   , interpAbs
   , interpEq
   , interpNeq
@@ -207,6 +215,39 @@ interpNeg = do
   var <- lookupThId 'negate#
   siTyCon <- lookupThTyCon ''Signed
   let value = siUnary negate siTyCon
+  pure (var, value)
+
+interpAnd
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpAnd = do
+  var <- lookupThId 'and#
+  siTyCon <- lookupThTyCon ''Signed
+  let value = siBinary (.&.) siTyCon
+  pure (var, value)
+
+interpOr
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpOr = do
+  var <- lookupThId 'or#
+  siTyCon <- lookupThTyCon ''Signed
+  let value = siBinary (.|.) siTyCon
+  pure (var, value)
+
+interpXor
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpXor = do
+  var <- lookupThId 'xor#
+  siTyCon <- lookupThTyCon ''Signed
+  let value = siBinary xor siTyCon
   pure (var, value)
 
 interpAbs

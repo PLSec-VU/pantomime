@@ -14,6 +14,9 @@ import Clash.Sized.Internal.BitVector
   , (-#)
   , (*#)
   , negate#
+  , and#
+  , or#
+  , xor#
   , xToBV
   , eq#
   , neq#
@@ -41,6 +44,8 @@ import Data.Typeable (cast, Proxy (..))
 
 import Unsafe.Coerce (unsafeCoerce)
 
+import Data.Bits ((.&.), (.|.), xor)
+
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
 
@@ -63,6 +68,9 @@ clashInterp = sequence
   , interpSub
   , interpMul
   , interpNeg
+  , interpAnd
+  , interpOr
+  , interpXor
   , interpXToBV
   , interpEq
   , interpNeq
@@ -211,6 +219,39 @@ interpNeg = do
   var <- lookupThId 'negate#
   bvTyCon <- lookupThTyCon ''BitVector
   let value = bvUnary negate bvTyCon
+  pure (var, value)
+
+interpAnd
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpAnd = do
+  var <- lookupThId 'and#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvBinary (.&.) bvTyCon
+  pure (var, value)
+
+interpOr
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpOr = do
+  var <- lookupThId 'or#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvBinary (.|.) bvTyCon
+  pure (var, value)
+
+interpXor
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpXor = do
+  var <- lookupThId 'xor#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = bvBinary xor bvTyCon
   pure (var, value)
 
 interpXToBV

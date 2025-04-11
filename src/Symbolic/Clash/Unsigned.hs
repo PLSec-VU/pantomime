@@ -12,6 +12,9 @@ import Clash.Sized.Internal.Unsigned
   , (-#)
   , (*#)
   , negate#
+  , and#
+  , or#
+  , xor#
   , eq#
   , neq#
   , lt#
@@ -30,6 +33,8 @@ import GHC.Builtin.Types.Prim (alphaTyVar)
 import Control.Monad.Except (MonadError(..))
 
 import Data.Typeable (cast, Proxy (..))
+
+import Data.Bits ((.&.), (.|.), xor)
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -52,6 +57,9 @@ clashInterp = sequence
   , interpSub
   , interpMul
   , interpNeg
+  , interpAnd
+  , interpOr
+  , interpXor
   , interpEq
   , interpNeq
   , interpLt
@@ -162,6 +170,32 @@ unEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
     _ -> throwError IllTyped
   _ -> throwError IllTyped
 
+unBitwise
+  :: forall m ws
+   . MonadEval m
+  => (forall n. KnownPos n => SymWordN n -> SymWordN n -> SymWordN n)
+  -> TyCon
+  -> Value m ws
+unBitwise op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty size -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
+    Opaque' lty lhs -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
+      Opaque' _rty rhs -> do
+        SomeNat @n _ <- whyFail IllTyped $ do
+          size' <- isNumLitTy size
+          someNatVal size'
+
+        case cmpNat @1 @n Proxy Proxy of
+          LTI -> do
+            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) lhs
+            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymWordN n)) rhs
+
+            let result = mrgLiftA2 op lhs' rhs'
+            pure $ Opaque' lty result
+          _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
 interpAdd
   :: forall m ws
    . MonadFail m
@@ -204,6 +238,39 @@ interpNeg = do
   var <- lookupThId 'negate#
   unTyCon <- lookupThTyCon ''Unsigned
   let value = unUnary negate unTyCon
+  pure (var, value)
+
+interpAnd
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpAnd = do
+  var <- lookupThId 'and#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unBitwise (.&.) unTyCon
+  pure (var, value)
+
+interpOr
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpOr = do
+  var <- lookupThId 'or#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unBitwise (.|.) unTyCon
+  pure (var, value)
+
+interpXor
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => m (Var, Value m ws)
+interpXor = do
+  var <- lookupThId 'xor#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unBitwise xor unTyCon
   pure (var, value)
 
 interpEq
