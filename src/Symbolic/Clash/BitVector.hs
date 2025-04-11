@@ -30,11 +30,7 @@ import Clash.Sized.Internal.BitVector
   )
 
 import GHC.Plugins
-import GHC.Core.FamInstEnv
-import GHC.Core.Reduction (Reduction (..))
-import GHC.Core.TyCo.Rep (Coercion(SymCo))
 import GHC.Builtin.Types.Prim
-import GHC.MonadCore
 
 import GHC.TypeLits
 
@@ -407,7 +403,6 @@ interpSlice
   :: forall m ws
    . MonadFail m
   => MonadEval m
-  => KnownWordSize ws
   => m (Var, Value m ws)
 interpSlice = do
   var <- lookupThId 'slice#
@@ -418,24 +413,9 @@ interpSlice = do
   let value = sliceValue bvTyCon snTyCon addTyFam subTyFam
   pure (var, value)
 
--- TODO: We copied this code over from type family instantiation for when
--- creating symbolic versions of values. Could we deduplicate?
--- FIXME: We should really get the local instances from the ModGuts via
--- mg_fam_inst_env.
-normTyFam
-  :: MonadEval m
-  => Type
-  -> m Reduction
-normTyFam ty = do
-  let locFamInst = emptyFamInstEnv
-  extFamInst <- liftCore getPackageFamInstEnv
-  let famInst = (locFamInst, extFamInst)
-  pure $ normaliseType famInst Representational ty
-
 sliceValue
   :: forall m ws
    . MonadEval m
-  => KnownWordSize ws
   => TyCon
   -> TyCon
   -> TyCon
@@ -451,10 +431,10 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
         let bvTy = mkTyConApp bvTyCon [size]
 
         pure . Fun bvTy $ \case
-          Cast' _ (Opaque' _ value) -> pure . Fun (mkTyConApp snTyCon [upper]) $ \case
+          Opaque' _ value -> pure . Fun (mkTyConApp snTyCon [upper]) $ \case
             Data _ -> pure . Fun (mkTyConApp snTyCon [upper]) $ \case
               Data _ -> do
-                let isNumLitTy' = whyFail IllTyped . isNumLitTy
+                let isNumLitTy' = whyFail UnsupportedExpr . isNumLitTy
                 let someNatVal' = whyFail IllTyped . someNatVal
                 upper' <- isNumLitTy' upper
                 lower' <- isNumLitTy' lower
@@ -480,15 +460,8 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
                 let sliced = sizedBVSelect @_ @n @idx @w Proxy Proxy <$> value'
 
                 let size' = mkTyConApp subTyFam [upperInc, lower]
-                let bvTy' = mkTyConApp bvTyCon [size']
-
-                reduction <- normTyFam bvTy'
-                let co' = SymCo $ reductionCoercion reduction
-                let ty' = reductionReducedType reduction
-
-                let result = Opaque' ty' sliced
-
-                mkCast' co' result
+                let resTy = mkTyConApp bvTyCon [size']
+                pure $ Opaque' resTy sliced
 
               _ -> throwError IllTyped
             _ -> throwError IllTyped
@@ -501,7 +474,6 @@ interpConcat
   :: forall m ws
    . MonadFail m
   => MonadEval m
-  => KnownWordSize ws
   => m (Var, Value m ws)
 interpConcat = do
   var <- lookupThId '(++#)
@@ -513,7 +485,6 @@ interpConcat = do
 concatValue
   :: forall m ws
    . MonadEval m
-  => KnownWordSize ws
   => TyCon
   -> TyCon
   -> Value m ws
@@ -551,13 +522,7 @@ concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
 
             let size = mkTyConApp addTyFam [lsize, rsize]
             let resTy = mkTyConApp bvTyCon [size]
-            reduction <- normTyFam resTy
-            let co = SymCo $ reductionCoercion reduction
-            let ty = reductionReducedType reduction
-
-            let result = Opaque' ty concatted'
-
-            mkCast' co result
+            pure $ Opaque' resTy concatted'
 
           _ -> throwError IllTyped
         _ -> throwError IllTyped
