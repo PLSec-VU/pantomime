@@ -147,7 +147,7 @@ siEquality
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownPos n => SymIntN n -> SymIntN n -> SymBool)
+  => (forall n. KnownPos n => IntN' S n -> IntN' S n -> SymBool)
   -> TyCon
   -> Value m ws
 siEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
@@ -160,8 +160,8 @@ siEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
 
         case cmpNat @1 @n Proxy Proxy of
           LTI -> do
-            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) lhs
-            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (SymIntN n)) rhs
+            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (IntN' S n)) lhs
+            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (IntN' S n)) rhs
 
             let conditional = mrgLiftA2 cmp lhs' rhs'
             let tr = dataConToTag trueDataCon
