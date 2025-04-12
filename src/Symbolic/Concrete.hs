@@ -180,7 +180,7 @@ concretise model = \case
   Opaque' ty value
     -- TODO Actually check the TyCon!
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
-    , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
+    , Just (SomeNat @n _) <- normNumLitTy size >>= someNatVal
     , Just Dict <- posNat @n
     , Just bv <- cast @_ @(RuntimeValue S (WordN' S n)) value
     -> pure $ primCon model bv
@@ -188,7 +188,7 @@ concretise model = \case
   Opaque' ty value
     -- TODO Actually check the TyCon!
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
-    , Just (SomeNat @n _) <- isNumLitTy size >>= someNatVal
+    , Just (SomeNat @n _) <- normNumLitTy size >>= someNatVal
     , Just Dict <- posNat @n
     , Just bv <- cast @_ @(RuntimeValue S (IntN' S n)) value
     -> pure $ primCon model bv

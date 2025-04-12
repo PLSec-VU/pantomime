@@ -578,11 +578,11 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
           Opaque' _ value -> pure . Fun (mkTyConApp snTyCon [upper]) $ \case
             Data _ -> pure . Fun (mkTyConApp snTyCon [upper]) $ \case
               Data _ -> do
-                let isNumLitTy' = whyFail UnsupportedExpr . isNumLitTy
+                let normNumLitTy' = whyFail UnsupportedExpr . normNumLitTy
                 let someNatVal' = whyFail IllTyped . someNatVal
-                upper' <- isNumLitTy' upper
-                lower' <- isNumLitTy' lower
-                top' <- isNumLitTy' top
+                upper' <- normNumLitTy' upper
+                lower' <- normNumLitTy' lower
+                top' <- normNumLitTy' top
 
                 SomeNat @n _ <- someNatVal' $ upper' + 1 + top'
                 SomeNat @idx _ <- someNatVal' lower'
@@ -615,6 +615,7 @@ interpConcat
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpConcat = do
   var <- lookupThId '(++#)
@@ -626,27 +627,28 @@ interpConcat = do
 concatValue
   :: forall m ws
    . MonadEval m
+  => KnownWordSize ws
   => TyCon
   -> TyCon
   -> Value m ws
 concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
-  Ty rsize -> pure . Fun (mkNatTyVarTy betaTyVar) $ \case
+  Ty rsizeTy -> pure . Fun (mkNatTyVarTy betaTyVar) $ \case
     Ty lsize -> pure . Fun cONSTRAINTKind $ \case
-      Cast' _ _ -> pure . Fun (mkTyConApp bvTyCon [lsize]) $ \case
-        Opaque' _lty lhs -> pure . Fun (mkTyConApp bvTyCon [rsize]) $ \case
+      Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [lsize]) $ \case
+        Opaque' _lty lhs -> pure . Fun (mkTyConApp bvTyCon [rsizeTy]) $ \case
           Opaque' _rty rhs -> do
-            SomeNat @l _ <- whyFail IllTyped $ someTyNat lsize
+            SomeNat @l _ <- whyFail UnsupportedExpr $ someTyNat lsize
             lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S l)) lhs
 
-            SomeNat @r _ <- whyFail IllTyped $ someTyNat rsize
+            rsize <- whyFail UnsupportedExpr $ concreteNat nat
+            SomeNat @r _ <- pure $ TypeNats.someNatVal rsize
             rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S r)) rhs
 
             -- We do this as we need to get the KnownNat constraint on the
             -- output.
             SomeNat @n _ <- whyFail IllTyped $ do
-              lsize' <- isNumLitTy lsize
-              rsize' <- isNumLitTy rsize
-              someNatVal $ lsize' + rsize'
+              lsize' <- normNumLitTy lsize
+              someNatVal $ lsize' + toInteger rsize
             Dict <- pure $ unsafeDict @(l + r ~ n)
 
             let concatted :: RuntimeValue S (WordN' S (l + r))
@@ -655,7 +657,7 @@ concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
             let concatted' :: RuntimeValue S (WordN' S n)
                 concatted' = coerce concatted
 
-            let size = mkTyConApp addTyFam [lsize, rsize]
+            let size = mkTyConApp addTyFam [lsize, rsizeTy]
             let resTy = mkTyConApp bvTyCon [size]
             pure $ Opaque' resTy concatted'
 

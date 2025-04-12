@@ -419,7 +419,7 @@ typedBitVector value ty = do
   -- Get the TyCon and type literal of this type, if possible.
   (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, [size])
-      | Just size' <- isNumLitTy size >>= someNatVal
+      | Just size' <- normNumLitTy size >>= someNatVal
       -- TODO: Additionally check whether the integer conversion is not lossy.
       -> pure (tyCon, size')
     _ -> throwError UnsupportedExpr
@@ -450,7 +450,7 @@ typedUnsigned value ty = do
   -- Get the TyCon and type literal of this type, if possible.
   (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, [size])
-      | Just size' <- isNumLitTy size >>= someNatVal
+      | Just size' <- normNumLitTy size >>= someNatVal
       -- TODO: Additionally check whether the integer conversion is not lossy.
       -> pure (tyCon, size')
     _ -> throwError UnsupportedExpr

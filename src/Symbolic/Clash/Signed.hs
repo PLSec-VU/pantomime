@@ -54,6 +54,7 @@ import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Clash.Util
 import Symbolic.Sized.BitVector
+import Symbolic.Dict (normNumLitTy)
 
 clashInterp
   :: forall m ws
@@ -155,7 +156,7 @@ siEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
     Opaque' _ lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
       Opaque' _ rhs -> do
         SomeNat @n _ <- whyFail IllTyped $ do
-          size' <- isNumLitTy size
+          size' <- normNumLitTy size
           someNatVal size'
 
         case cmpNat @1 @n Proxy Proxy of

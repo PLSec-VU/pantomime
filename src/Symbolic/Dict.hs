@@ -10,6 +10,7 @@ module Symbolic.Dict
   , leqNat
   , posNat
   , cmpNat'
+  , normNumLitTy
   , someTyNat
   , withSize
   ) where
@@ -24,6 +25,7 @@ import Control.Applicative (Alternative (..))
 import Control.Monad (guard)
 
 import Unsafe.Coerce (unsafeCoerce)
+import GHC.Builtin.Types.Literals
 
 data Dict c where
   Dict :: c => Dict c
@@ -63,9 +65,27 @@ cmpNat'
   => OrderingI l r
 cmpNat' = cmpNat @l @r Proxy Proxy
 
+normNumLitTy :: Type -> Maybe Integer
+normNumLitTy ty = if
+  | Just value <- isNumLitTy ty -> pure value
+
+  | Just (tyCon, [lhs, rhs]) <- splitTyConApp_maybe ty -> do
+    op <- if
+      | tyCon == typeNatAddTyCon -> pure (+)
+      | tyCon == typeNatSubTyCon -> pure (*)
+      | tyCon == typeNatMulTyCon -> pure (-)
+      | otherwise -> empty
+
+    lhs' <- normNumLitTy lhs
+    rhs' <- normNumLitTy rhs
+
+    pure $ op lhs' rhs'
+
+  | otherwise -> empty
+
 someTyNat :: Type -> Maybe SomeNat
 someTyNat ty = do
-  num <- isNumLitTy ty
+  num <- normNumLitTy ty
   guard $ num >= 0
   pure $ someNatVal (fromInteger num)
 
