@@ -8,14 +8,18 @@ module Symbolic.MonadEval
   , SymbolicState (..)
   , freshIdx
 
-  , StrictIte (..)
+  , Constraints
+  , Forceable (..)
+  , Spineable (..)
+
+  , EvalIte (..)
   , WeakEq (..)
   ) where
 
 import GHC.Plugins
 import GHC.MonadCore
 
-import Grisette.Unified (GetBool, EvalModeTag (..))
+import Grisette.Unified (EvalModeTag (..))
 import Grisette 
   ( SymBool
   , LogicalOp (..)
@@ -25,8 +29,11 @@ import Grisette
   , simpleMerge
   )
 
-import Control.Monad.Except (MonadError, runExceptT)
+import Control.Monad (void)
+import Control.Monad.Except (MonadError)
 import Control.Monad.State (MonadState (..))
+
+import Data.Composition ((.:.))
 
 import Types (HasModGuts')
 
@@ -64,13 +71,31 @@ freshIdx = state $ \s -> do
     let s' = s { nextIdx = idx + 1 }
     (idx, s')
 
-class MonadEval m => StrictIte m a where
-  strictIte :: RuntimeValue S (GetBool S) -> a -> a -> m a
+type Constraints = RuntimeValue S ()
 
-instance (MonadEval m, Mergeable a) => StrictIte m (RuntimeValue S a) where
-  strictIte cond tr fl = pure $ do
-    cond' <- cond
-    mrgIte cond' tr fl
+-- | Forceable values, which can take any constraints produced when a value is
+-- forced.
+class Forceable a where
+  -- | Force the spine of the given argument, passing any constraints onto
+  -- itself.
+  force :: Constraints -> a -> a
+
+instance Forceable (RuntimeValue S a) where
+  force s v = s >> v
+
+-- | Any value with a spine whose error constraints can be extracted.
+class Spineable a where
+  -- | Gather the error constraints from the spine of the expression.
+  spine :: a -> Constraints
+
+instance Spineable (RuntimeValue S a) where
+  spine = void
+
+class MonadEval m => EvalIte m a where
+  evalIte :: SymBool -> a -> a -> m a
+
+instance (MonadEval m, Mergeable a) => EvalIte m (RuntimeValue S a) where
+  evalIte = pure .:. mrgIte
 
 -- TODO: We don't distinguish between weak and strong equivalence anymore.
 -- We should perhaps change the name?
@@ -84,10 +109,8 @@ instance (MonadEval m, SymEq a) => WeakEq m (RuntimeValue S a) where
           (_, Left Invalid) -> true
           (lhs', rhs') -> lhs' .== rhs'
 
-    let unwrap = runExceptT . unRuntimeValue
-
-    let lhs' = unwrap lhs
-    let rhs' = unwrap rhs
+    let lhs' = unRuntimeS lhs
+    let rhs' = unRuntimeS rhs
     let result = liftA2 cmp lhs' rhs'
 
     pure $ simpleMerge result

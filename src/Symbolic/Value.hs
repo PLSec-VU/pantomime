@@ -10,6 +10,7 @@
 module Symbolic.Value
   ( Value (..)
   , mkCast'
+  , dumpValue
 
   , typedValue
   , freshValue
@@ -67,7 +68,7 @@ import Data.List ((!?))
 import Data.Foldable (find)
 import qualified Data.Typeable as Typeable
 
-import Control.Monad (foldM, unless, forM, guard, when)
+import Control.Monad (foldM, unless, forM, guard, when, void)
 import Control.Monad.Except (MonadError (..))
 
 import Clash.Prelude (BitVector, Unsigned, Signed, Bit)
@@ -106,6 +107,20 @@ data Value m ws where
     -> RuntimeValue S a
     -> Value m ws
 
+dumpValue
+  :: KnownWordSize ws
+  => Value m ws
+  -> SDoc
+dumpValue = \case
+  Data adt -> do
+    let tag = "tag" <+> ppr (adtType adt) <+> ":" <+> text (show $ adtTag adt)
+    let fields = ppr $ fmap dumpValue <$> adtFields adt
+    hang tag 2 fields
+  Poly _ value -> "poly: " <+> text (show value)
+  Primitive (Int value) -> "int: " <+> text (show value)
+  Cast' co val -> dumpValue val <+> "<->" <+> ppr (coercionKindRole co)
+  _ -> "todo"
+
 instance KnownWordSize ws => Outputable (Value m ws) where
   ppr = \case
     Primitive prim -> ppr prim
@@ -117,23 +132,50 @@ instance KnownWordSize ws => Outputable (Value m ws) where
     Co co -> ppr co
     Opaque' ty _ -> ppr ty
 
-instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
-  strictIte cond = curry $ \case
-    (Primitive lhs, Primitive rhs) -> Primitive <$> strictIte cond lhs rhs
+instance Functor m => Forceable (Value m ws) where
+  force constraints = \case
+    Primitive prim -> Primitive $ force' prim
+    Poly ty value -> Poly ty $ force' value
+    Data adt -> Data $ force' adt
+    Cast' co value -> Cast' co $ force' value
+    Fun argTy fun -> Fun argTy $ \arg -> force' <$> fun arg
+    Opaque' ty value -> Opaque' ty $ force' value
+    -- TODO: These aren't really forceable. I guess they needn't be, but it
+    -- might create unexpected behaviour.
+    Ty ty -> Ty ty
+    Co co -> Co co
+    where
+      force' :: Forceable a => a -> a
+      force' = force constraints
+
+instance Spineable (Value m ws) where
+  spine = \case
+    Primitive prim -> spine prim
+    Poly _ value -> spine value
+    Data adt -> spine adt
+    Cast' _ value -> spine value
+    Fun _ _ -> pure ()
+    Ty _ -> pure ()
+    Co _ -> pure ()
+    Opaque' _ value -> spine value
+
+instance (MonadEval m, KnownWordSize ws) => EvalIte m (Value m ws) where
+  evalIte cond = curry $ \case
+    (Primitive lhs, Primitive rhs) -> Primitive <$> evalIte cond lhs rhs
     (Poly lty lhs, Poly rty rhs) -> do
       unless (lty `eqType` rty) $ throwError IllTyped
-      Poly lty <$> strictIte cond lhs rhs
-    (Data lhs, Data rhs) -> Data <$> strictIte cond lhs rhs
+      Poly lty <$> evalIte cond lhs rhs
+    (Data lhs, Data rhs) -> Data <$> evalIte cond lhs rhs
     (Cast' lco lhs, Cast' rco rhs) -> do
       unless (lco `eqCoercion` rco) $ throwError IllTyped
-      result <- strictIte cond lhs rhs
+      result <- evalIte cond lhs rhs
       pure $ Cast' lco result
     (Fun larg lhs, Fun rarg rhs) -> do
       unless (larg `eqType` rarg) $ throwError IllTyped
       pure . Fun larg $ \arg -> do
         lhs' <- lhs arg
         rhs' <- rhs arg
-        strictIte cond lhs' rhs'
+        evalIte cond lhs' rhs'
     (Ty lty, Ty rty) -> do
       unless (lty `eqType` rty) $ throwError IllTyped
       pure $ Ty lty
@@ -143,7 +185,7 @@ instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
     (Opaque' @_ @_ @l lty lhs, Opaque' @_ @_ @r rty rhs) -> do
       unless (lty `eqType` rty) $ throwError IllTyped
       Typeable.Refl <- whyFail IllTyped $ Typeable.eqT @l @r
-      Opaque' lty <$> strictIte cond lhs rhs
+      Opaque' lty <$> evalIte cond lhs rhs
     _ -> throwError IllTyped
 
 -- TODO: We removed strong equivalence now, pehaps this shouldn't be called weak
@@ -567,15 +609,21 @@ typedADT value ty = do
 
   -- TODO: I don't really like this tag creation. Should the tagInRange
   -- maybe just return the condition?
-  let tag = tagInRange value tyCon
+  let tag = value
+  let tag' = tagInRange tag tyCon
 
+  -- TODO: This is really hacky (as is the whole typed value business), but it
+  -- ensures that the enture ADT becomes invalid if the root is invalid.
   -- Create fresh values for all fields.
-  fields <- forM dataCons $ flip freshDataConBndrs tyArgs
+  let create = newDataConBndrs $ if
+        | tag == throwError Invalid -> invalidValue
+        | otherwise -> freshValue
+  fields <- forM dataCons $ flip create tyArgs
 
   pure $ Data ADT
     { adtTyCon = tyCon
     , adtTyArgs = tyArgs
-    , adtTag = tag
+    , adtTag = tag'
     , adtFields = fields
     }
 
@@ -589,9 +637,9 @@ typedLambda'
 typedLambda' value ty = do
   (_, _, argTy, resTy) <- whyFail UnsupportedExpr $ splitFunTy_maybe ty
   let ident = value
-  -- FIXME: These functions generate a fresh copies of a typed value **for
-  -- each** call. We cannot lift this operation outside of the lambda it seems.
-  -- I think we'll have to rethink the Fun pattern. Returning an actual function
+  -- FIXME: These functions generate fresh copies of typed values **for each**
+  -- call. We cannot lift this operation outside of the lambda it seems. I
+  -- think we'll have to rethink the Fun pattern. Returning an actual function
   -- breaks so many things. Perhaps it would be better to create a substitution
   -- function? Something similar to the GHC Subst? I.e. that's a way to generate
   -- a Value without the annoyance of these function scoping problems I'm facing
@@ -893,15 +941,15 @@ freshValue ty = do
 --
 -- Note the type arguments will instantiate the universal quantifiers of the
 -- DataCon. They in general do not correspond to the types of the binders.
-freshDataConBndrs
-  :: MonadEval m
-  => KnownWordSize ws
-  => DataCon
+newDataConBndrs
+  :: Monad m
+  => (Type -> m (Value m ws))
+  -> DataCon
   -> [Type]
   -> m [Value m ws]
-freshDataConBndrs dataCon tyArgs = do
+newDataConBndrs new dataCon tyArgs = do
   let fieldTys = scaledThing <$> dataConInstArgTys dataCon tyArgs
-  forM fieldTys freshValue
+  forM fieldTys new
 
 -- | A value that should not be reachable.
 --
@@ -969,18 +1017,26 @@ data ADT m ws where
 instance KnownWordSize ws => Outputable (ADT m ws) where
   ppr = ppr . adtType
 
-instance (MonadEval m, KnownWordSize ws) => StrictIte m (ADT m ws) where
-  strictIte cond lhs rhs = do
+instance (MonadEval m, KnownWordSize ws) => EvalIte m (ADT m ws) where
+  evalIte cond lhs rhs = do
     unless (adtType lhs `eqType` adtType rhs) $ throwError IllTyped
 
     -- If-then-else both the tag and the fields.
-    tag <- strictIte cond (adtTag lhs) (adtTag rhs)
-    fields' <- zipFieldsWith (strictIte cond) lhs rhs
+    tag <- evalIte cond (adtTag lhs) (adtTag rhs)
+    fields' <- zipFieldsWith (evalIte cond) lhs rhs
 
     pure lhs
       { adtTag = tag
       , adtFields = fields'
       }
+
+instance Forceable (ADT m ws) where
+  force constraints adt = adt
+    { adtTag = force constraints $ adtTag adt
+    }
+
+instance Spineable (ADT m ws) where
+  spine = spine . adtTag
 
 instance (MonadEval m, KnownWordSize ws) => WeakEq m (ADT m ws) where
   weakEq lhs rhs = do
@@ -1037,7 +1093,7 @@ adtFromDataCon dataCon tyArgs fields = do
   -- Populate the remaining fields with fresh values.
   fields' <- forM dataCons $ \dataCon' -> if
     | dataCon == dataCon' -> pure fields
-    | otherwise -> freshDataConBndrs dataCon' tyArgs
+    | otherwise -> newDataConBndrs invalidValue dataCon' tyArgs
 
   pure ADT
     { adtTyCon = tyCon
@@ -1184,6 +1240,42 @@ instance KnownWordSize ws => Outputable (Primitive ws) where
     Double _ -> "Double#"
     ByteArray _ _ -> "ByteArray#"
 
+instance Forceable (Primitive ws) where
+  force constraints = \case
+    Int value -> Int $ force' value
+    Int8 value -> Int8 $ force' value
+    Int16 value -> Int16 $ force' value
+    Int32 value -> Int32 $ force' value
+    Int64 value -> Int64 $ force' value
+    Word value -> Word $ force' value
+    Word8 value -> Word8 $ force' value
+    Word16 value -> Word16 $ force' value
+    Word32 value -> Word32 $ force' value
+    Word64 value -> Word64 $ force' value
+    Float value -> Float $ force' value
+    Double value -> Double $ force' value
+    -- TODO: Maybe we should force the size. Not sure yet.
+    ByteArray size value -> ByteArray size $ force' value
+    where
+      force' :: Forceable a => a -> a
+      force' = force constraints
+
+instance Spineable (Primitive ws) where
+  spine = \case
+    Int value -> void value
+    Int8 value -> void value
+    Int16 value -> void value
+    Int32 value -> void value
+    Int64 value -> void value
+    Word value -> void value
+    Word8 value -> void value
+    Word16 value -> void value
+    Word32 value -> void value
+    Word64 value -> void value
+    Float value -> void value
+    Double value -> void value
+    ByteArray size value -> size >> void value
+
 instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive ws) where
   weakEq = curry $ \case
     (Int lhs, Int rhs) -> weakEq lhs rhs
@@ -1204,23 +1296,23 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive ws) where
       pure $ eqSize .&& eqArr
     _ -> throwError IllTyped
 
-instance (MonadEval m, KnownWordSize ws) => StrictIte m (Primitive ws) where
-  strictIte cond = curry $ \case
-    (Int lhs, Int rhs) -> Int <$> strictIte cond lhs rhs
-    (Int8 lhs, Int8 rhs) -> Int8 <$> strictIte cond lhs rhs
-    (Int16 lhs, Int16 rhs) -> Int16 <$> strictIte cond lhs rhs
-    (Int32 lhs, Int32 rhs) -> Int32 <$> strictIte cond lhs rhs
-    (Int64 lhs, Int64 rhs) -> Int64 <$> strictIte cond lhs rhs
-    (Word lhs, Word rhs) -> Word <$> strictIte cond lhs rhs
-    (Word8 lhs, Word8 rhs) -> Word8 <$> strictIte cond lhs rhs
-    (Word16 lhs, Word16 rhs) -> Word16 <$> strictIte cond lhs rhs
-    (Word32 lhs, Word32 rhs) -> Word32 <$> strictIte cond lhs rhs
-    (Word64 lhs, Word64 rhs) -> Word64 <$> strictIte cond lhs rhs
-    (Float lhs, Float rhs) -> Float <$> strictIte cond lhs rhs
-    (Double lhs, Double rhs) -> Double <$> strictIte cond lhs rhs
+instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive ws) where
+  evalIte cond = curry $ \case
+    (Int lhs, Int rhs) -> Int <$> evalIte cond lhs rhs
+    (Int8 lhs, Int8 rhs) -> Int8 <$> evalIte cond lhs rhs
+    (Int16 lhs, Int16 rhs) -> Int16 <$> evalIte cond lhs rhs
+    (Int32 lhs, Int32 rhs) -> Int32 <$> evalIte cond lhs rhs
+    (Int64 lhs, Int64 rhs) -> Int64 <$> evalIte cond lhs rhs
+    (Word lhs, Word rhs) -> Word <$> evalIte cond lhs rhs
+    (Word8 lhs, Word8 rhs) -> Word8 <$> evalIte cond lhs rhs
+    (Word16 lhs, Word16 rhs) -> Word16 <$> evalIte cond lhs rhs
+    (Word32 lhs, Word32 rhs) -> Word32 <$> evalIte cond lhs rhs
+    (Word64 lhs, Word64 rhs) -> Word64 <$> evalIte cond lhs rhs
+    (Float lhs, Float rhs) -> Float <$> evalIte cond lhs rhs
+    (Double lhs, Double rhs) -> Double <$> evalIte cond lhs rhs
     (ByteArray lsize larr, ByteArray rsize rarr) -> do
-      size <- strictIte cond lsize rsize
-      array <- strictIte cond larr rarr
+      size <- evalIte cond lsize rsize
+      array <- evalIte cond larr rarr
       pure $ ByteArray size array
     _ -> throwError IllTyped
 
@@ -1246,7 +1338,14 @@ typedPrimitive value ty
   | ty `eqType` floatPrimTy = pure $ Float value
   | ty `eqType` doublePrimTy = pure $ Double value
   | ty `eqType` byteArrayPrimTy = do
-    idx <- freshIdx
-    let size = pure . sym $ indexed "!fresh" idx
-    pure $ ByteArray size value
+    let value' = value
+    -- TODO: This is super hacky, but it avoid creating Invalid roots with
+    -- valid fields.
+    size <- if
+          | value' == throwError Invalid -> pure $ throwError Invalid
+          | otherwise -> do
+            idx <- freshIdx
+            let size = sym $ indexed "!fresh" idx
+            pure $ pure size
+    pure $ ByteArray size value'
   | otherwise = throwError UnsupportedExpr

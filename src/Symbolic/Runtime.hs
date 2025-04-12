@@ -17,6 +17,7 @@
 module Symbolic.Runtime
   ( RuntimeValue (..)
   , unRuntimeC
+  , unRuntimeS
   , RuntimeError (..)
   ) where
 
@@ -43,6 +44,7 @@ import Grisette
   , ToCon (..)
   , Default (..)
   , PPrint
+  , Union
   )
 
 newtype RuntimeValue mode a where
@@ -52,6 +54,9 @@ newtype RuntimeValue mode a where
 
 unRuntimeC :: RuntimeValue C a -> Either RuntimeError a
 unRuntimeC = runIdentity . runExceptT . unRuntimeValue
+
+unRuntimeS :: RuntimeValue S a -> Union (Either RuntimeError a)
+unRuntimeS = runExceptT . unRuntimeValue
 
 deriving via ExceptT RuntimeError (BaseMonad mode)
   instance Monad (BaseMonad mode)

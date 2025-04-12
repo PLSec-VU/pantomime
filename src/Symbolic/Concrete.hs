@@ -30,8 +30,7 @@ import Grisette (ToCon (..), EvalSym (..), evalSymToCon, indexed, Symbol)
 import Grisette.Unified (EvalModeTag (..))
 import Grisette.SymPrim
 
-import Control.Monad.Identity (Identity (..))
-import Control.Monad.Except (MonadError (..), runExceptT)
+import Control.Monad.Except (MonadError (..))
 import Control.Monad (forM)
 
 import Data.Typeable (cast)
@@ -132,8 +131,9 @@ concretise model = \case
   -- TODO: Clean this horrible piece of code up!
   Data adt -> do
     let tag = evalSymToCon @_ @(Tag C ws) model $ adtTag adt
-    let runRuntime = runIdentity . runExceptT . unRuntimeValue
-    case runRuntime $ tag of
+
+    -- dbg' . show $ adtTag adt
+    case unRuntimeC tag of
       Right tag'
         | Just dataCon <- tagToDataCon tag' $ adtTyCon adt
         , Just fields <- adtDataConFields adt dataCon -> do

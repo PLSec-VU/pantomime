@@ -38,6 +38,8 @@ import Symbolic.Value
 import Symbolic.Environment
 import Symbolic.MonadEval
 import GHC.MonadCore
+import GHC.Data.Maybe (rightToMaybe, catMaybes)
+import Data.Composition ((.:))
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate
@@ -61,8 +63,8 @@ evaluate env = \case
     evaluate env uf_tmpl
 
   Var var | DFunUnfolding { df_bndrs, df_con, df_args } <- idUnfolding var -> do
-    let spine = Var $ dataConWorkId df_con
-    let inner = mkApps spine df_args
+    let dataCon = Var $ dataConWorkId df_con
+    let inner = mkApps dataCon df_args
     let quantified = mkLams df_bndrs inner
     evaluate env quantified
 
@@ -107,6 +109,11 @@ evaluate env = \case
 
   Case scrut bndr ty alts -> do
     -- Evaluate the scrutinee and extend the environment using the case binder.
+    -- TODO: Since we force the scrutinee later anyway, couldn't just drop the
+    -- constraints on the spine? Maybe we should add it to the typeclass? It
+    -- seems we are duplicating a constraint with the current setup! Actually,
+    -- something similar seems to happen with normal lambdas. We definitely
+    -- duplicate constraints if the variable occurs more than once.
     scrut' <- evaluate env scrut
     env' <- extendEnv env bndr scrut'
 
@@ -120,8 +127,10 @@ evaluate env = \case
     invalid <- invalidValue ty'
 
     -- Fold the alternatives into a large if-then-else.
-    foldM' invalid alts' $ \fl (cond, rhs) -> do
-      strictIte cond rhs fl
+    result <- foldM' invalid alts' $ \fl (cond, rhs) -> do
+      evalIte cond rhs fl
+
+    pure $ force (spine scrut') result
 
   Cast expr co -> do
     let co' = substCoEnv env co
@@ -150,7 +159,7 @@ evalAlt
   => Environment m ws
   -> Value m ws
   -> CoreAlt
-  -> m (RuntimeValue S SymBool, Value m ws)
+  -> m (SymBool, Value m ws)
 evalAlt env scrut = \case
   Alt (DataAlt dataCon) bndrs rhs -> do
     -- Ensure the scrutinee is actually an ADT.
@@ -159,11 +168,7 @@ evalAlt env scrut = \case
       _ -> throwError IllTyped
 
     -- Whether the tag of this ADT is equivalent to the DataCon.
-    -- FIXME: This ends up duplicating the prerequisite a lot (i.e. whether
-    -- it goes to Invalid or errors). For every branch we unroll it once. In
-    -- reality, we should be able to unwrap the condition only once since all
-    -- the branch conditions rely on the same tag.
-    let conditional = adtIsDataCon scrut' dataCon
+    let conditional = onlyBool $ adtIsDataCon scrut' dataCon
 
     -- Extend the environment with the field for each binder.
     fields <- whyFail IllTyped $ adtDataConFields scrut' dataCon
@@ -195,9 +200,21 @@ evalAlt env scrut = \case
 
   Alt DEFAULT [] rhs -> do
     rhs' <- evaluate env rhs
-    pure (pure true, rhs')
+    pure (true, rhs')
 
   _ -> throwError UnsupportedExpr
+
+-- | Gathers only the boolean part of the constraint.
+--
+-- This will discard any of the constraints that lead to runtime errors. This is
+-- to ensure we do not duplicate constraints. Instead, use Forceable instances
+-- to actually force values.
+onlyBool :: RuntimeValue S SymBool -> SymBool
+onlyBool = symAnd
+  . catMaybes
+  . fmap rightToMaybe
+  . overestimateUnionValues
+  . unRuntimeS
 
 strictPrimEq
   :: forall m ws
@@ -205,21 +222,29 @@ strictPrimEq
   => KnownWordSize ws
   => Primitive ws
   -> Primitive ws
-  -> m (RuntimeValue S SymBool)
+  -> m SymBool
 strictPrimEq = curry $ \case
-  (Int lhs, Int rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Int8 lhs, Int8 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Int16 lhs, Int16 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Int32 lhs, Int32 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Int64 lhs, Int64 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Word lhs, Word rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Word8 lhs, Word8 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Word16 lhs, Word16 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Word32 lhs, Word32 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Word64 lhs, Word64 rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Float lhs, Float rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
-  (Double lhs, Double rhs) -> pure $ mrgLiftA2 (.==) lhs rhs
+  (Int lhs, Int rhs) -> cmp lhs rhs
+  (Int8 lhs, Int8 rhs) -> cmp lhs rhs
+  (Int16 lhs, Int16 rhs) -> cmp lhs rhs
+  (Int32 lhs, Int32 rhs) -> cmp lhs rhs
+  (Int64 lhs, Int64 rhs) -> cmp lhs rhs
+  (Word lhs, Word rhs) -> cmp lhs rhs
+  (Word8 lhs, Word8 rhs) -> cmp lhs rhs
+  (Word16 lhs, Word16 rhs) -> cmp lhs rhs
+  (Word32 lhs, Word32 rhs) -> cmp lhs rhs
+  (Word64 lhs, Word64 rhs) -> cmp lhs rhs
+  (Float lhs, Float rhs) -> cmp lhs rhs
+  (Double lhs, Double rhs) -> cmp lhs rhs
   _ -> throwError IllTyped
+  where
+    cmp
+      :: Mergeable a
+      => SymEq a
+      => RuntimeValue S a
+      -> RuntimeValue S a
+      -> m SymBool
+    cmp = pure . onlyBool .: mrgLiftA2 (.==)
 
 evalDataCon
   :: forall m ws
