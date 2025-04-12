@@ -10,13 +10,11 @@ module Symbolic.MonadEval
 
   , StrictIte (..)
   , WeakEq (..)
-  , Assume (..)
   ) where
 
 import GHC.Plugins
 import GHC.MonadCore
 
-import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 import Grisette.Unified (GetBool, EvalModeTag (..))
 import Grisette 
   ( SymBool
@@ -93,13 +91,3 @@ instance (MonadEval m, SymEq a) => WeakEq m (RuntimeValue S a) where
     let result = liftA2 cmp lhs' rhs'
 
     pure $ simpleMerge result
-
--- | A typeclass for operations that allow for symbolic assumptions.
---
--- Note that it does not take a RuntimeValue as its conditional, as an assume
--- should not force any values.
-class Assume a where
-  assume :: GetBool S -> a -> a
-
-instance SimpleMergeable a => Assume (RuntimeValue S a) where
-  assume cond tr = mrgIte cond tr $ mrgThrowError Invalid

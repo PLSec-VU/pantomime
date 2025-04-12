@@ -50,11 +50,11 @@ import GHC.Platform (PlatformWordSize)
 import GHC.MonadCore
 
 import Grisette.SymPrim
-import Grisette.Unified (EvalModeTag (..), GetIntN)
+import Grisette.Unified (EvalModeTag (..), GetIntN, GetWordN)
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 import Grisette
   ( Solvable (..)
-  , SimpleMergeable
+  , SimpleMergeable (..)
   , Mergeable
   , Function (..)
   , LogicalOp (..)
@@ -77,7 +77,6 @@ import Util (getFamInstEnvs')
 import Symbolic.Util
 import Symbolic.WordSize
 import Symbolic.Runtime
-import Symbolic.Identifier
 import Symbolic.MonadEval
 import Symbolic.Dict
 import Symbolic.Sized.BitVector
@@ -146,22 +145,6 @@ instance (MonadEval m, KnownWordSize ws) => StrictIte m (Value m ws) where
       Typeable.Refl <- whyFail IllTyped $ Typeable.eqT @l @r
       Opaque' lty <$> strictIte cond lhs rhs
     _ -> throwError IllTyped
-
-instance (MonadEval m, KnownWordSize ws) => Assume (Value m ws) where
-  assume cond = \case
-    Primitive prim -> Primitive $ assume cond prim
-    Poly ty value -> Poly ty $ assume cond value
-    Data adt -> Data $ assume cond adt
-    Cast' co value -> Cast' co $ assume cond value
-    Fun argTy fun -> do
-      Fun argTy $ \arg -> do
-        assume cond <$> fun arg
-    -- TODO: I guess there is nothing to assume in these cases. Still this seems
-    -- like it could introduce some unexpected behaviour if we're not careful.
-    -- I think we should change this. We shouldn't just drop assumptions...
-    Ty ty -> Ty ty
-    Co co -> Co co
-    Opaque' ty value -> Opaque' ty $ assume cond value
 
 -- TODO: We removed strong equivalence now, pehaps this shouldn't be called weak
 -- equivalence anymore! Also, I think it would be better if this would return a
@@ -295,6 +278,14 @@ mkCast' c v = case (optimiseCo c, v) of
 optimiseCo :: Coercion -> Coercion
 optimiseCo = optCoercion (OptCoercionOpts True) emptySubst
 
+-- | Unintepreted identifier.
+--
+-- This may represent any abstract value, such as a function pointer.
+type Ident mode = GetWordN mode 64
+
+-- | A Constraint alias that captures interpretations on an identifier.
+type Interpretable t = Solvable (Ident C --> ConType t) (Ident S -~> t)
+
 -- | Constraints for creating the symbolic values we require.
 --
 -- These constraints are picked such that we can avoid overlapping instances
@@ -318,6 +309,7 @@ type Symbolisable t ws =
   , Interpretable (SymFP64 -~> t)
   )
 
+-- TODO: Maybe move this somewhere else? This is more of a utility function.
 eqTyConRole :: TyCon -> Maybe Role
 eqTyConRole tyCon = if
   | tyCon == eqPrimTyCon -> Just Nominal
@@ -687,6 +679,8 @@ typedPoly value ty = if
 -- concretely. I did some trickery to not have to write this for every product
 -- via 'typedValue' and its constraints. Still we get this abominable
 -- duplication because we explicitely need to spell out each instance.
+-- FIXME: This is completely broken. We should not be creating fresh values
+-- inside of lambdas, as this will create separate instances per call.
 typedLambda
   :: forall m ws
    . KnownWordSize ws
@@ -975,9 +969,6 @@ data ADT m ws where
 instance KnownWordSize ws => Outputable (ADT m ws) where
   ppr = ppr . adtType
 
-instance KnownWordSize ws => Assume (ADT m ws) where
-  assume cond adt = adt { adtTag = assume cond $ adtTag adt }
-
 instance (MonadEval m, KnownWordSize ws) => StrictIte m (ADT m ws) where
   strictIte cond lhs rhs = do
     unless (adtType lhs `eqType` adtType rhs) $ throwError IllTyped
@@ -1131,7 +1122,7 @@ tagInRange tag tyCon = do
   -- evaluation mode. We could of course implement this (.&&) ourselves already,
   -- but we leave it for now.
   let cond =  0 .<= tag' .&& tag' .< fromIntegral amount
-  assume cond $ pure tag'
+  mrgIte cond (pure tag') $ mrgThrowError Invalid
 
 -- | Primitive values supported by the symbolic solver.
 data Primitive (ws :: PlatformWordSize) where
@@ -1232,22 +1223,6 @@ instance (MonadEval m, KnownWordSize ws) => StrictIte m (Primitive ws) where
       array <- strictIte cond larr rarr
       pure $ ByteArray size array
     _ -> throwError IllTyped
-
-instance KnownWordSize ws => Assume (Primitive ws) where
-  assume cond = \case
-    Int value -> Int $ assume cond value
-    Int8 value -> Int8 $ assume cond value
-    Int16 value -> Int16 $ assume cond value
-    Int32 value -> Int32 $ assume cond value
-    Int64 value -> Int64 $ assume cond value
-    Word value -> Word $ assume cond value
-    Word8 value -> Word8 $ assume cond value
-    Word16 value -> Word16 $ assume cond value
-    Word32 value -> Word32 $ assume cond value
-    Word64 value -> Word64 $ assume cond value
-    Float value -> Float $ assume cond value
-    Double value -> Double $ assume cond value
-    ByteArray size array -> ByteArray (assume cond size) array
 
 -- | Construct a primitive, symbolic value with the given type.
 typedPrimitive
