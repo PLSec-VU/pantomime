@@ -227,7 +227,7 @@ concretePrimitive model = \case
   Word64 value -> prim' value
   Float value -> prim' value
   Double value -> prim' value
-  ByteArray _ _ -> error "Unsupported for now!"
+  ByteArray _ value -> prim' value
   where
     prim'
       :: forall a

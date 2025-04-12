@@ -190,11 +190,26 @@ instance (KnownNat n, KnownNat n') => SymFromIntegral (IntN' S n) (IntN' S n') w
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymWordN n) (IntN' S n') where
   symFromIntegral value = withSizeI $ symFromIntegral value
 
+instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (IntN' S n') (SymWordN n) where
+  symFromIntegral = \case
+    IntZ -> 0
+    IntP value -> symFromIntegral value
+
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymIntN n) (IntN' S n') where
   symFromIntegral value = withSizeI $ symFromIntegral value
 
+instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (IntN' S n') (SymIntN n) where
+  symFromIntegral = \case
+    IntZ -> 0
+    IntP value -> symFromIntegral value
+
 instance KnownNat n => SymFromIntegral SymInteger (IntN' S n) where
   symFromIntegral value = withSizeI $ symFromIntegral value
+
+instance KnownNat n => SymFromIntegral (IntN' S n) SymInteger where
+  symFromIntegral = \case
+    IntZ -> 0
+    IntP value -> symFromIntegral value
 
 instance KnownNat n => ToCon (IntN' S n) (IntN' C n) where
   toCon = \case
@@ -464,11 +479,26 @@ instance (KnownNat n, KnownNat n') => SymFromIntegral (WordN' S n) (WordN' S n')
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymWordN n) (WordN' S n') where
   symFromIntegral value = withSizeW $ symFromIntegral value
 
+instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (WordN' S n') (SymWordN n) where
+  symFromIntegral = \case
+    WordZ -> 0
+    WordP value -> symFromIntegral value
+
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymIntN n) (WordN' S n') where
   symFromIntegral value = withSizeW $ symFromIntegral value
 
+instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (WordN' S n') (SymIntN n) where
+  symFromIntegral = \case
+    WordZ -> 0
+    WordP value -> symFromIntegral value
+
 instance KnownNat n => SymFromIntegral SymInteger (WordN' S n) where
   symFromIntegral value = withSizeW $ symFromIntegral value
+
+instance KnownNat n => SymFromIntegral (WordN' S n) SymInteger where
+  symFromIntegral = \case
+    WordZ -> 0
+    WordP value -> symFromIntegral value
 
 instance KnownNat n => ToCon (WordN' S n) (WordN' C n) where
   toCon = \case

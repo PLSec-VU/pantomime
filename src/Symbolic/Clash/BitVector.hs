@@ -30,7 +30,7 @@ import Clash.Sized.Internal.BitVector
   , (++#)
   , size#
   , shiftL#
-  , shiftR#
+  , shiftR#, toInteger#
   )
 
 import GHC.Plugins
@@ -43,7 +43,7 @@ import Control.Monad.Except (MonadError(..))
 
 import Data.Bits (Bits (..))
 import Data.Coerce (coerce)
-import Data.Typeable (cast)
+import Data.Typeable (cast, Proxy (..))
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -82,6 +82,7 @@ clashInterp = sequence
   , interpGe
   , interpShiftL
   , interpShiftR
+  , interpToInteger
   , interpFromInteger
   , interpSlice
   , interpConcat
@@ -439,6 +440,67 @@ symShiftRL'
 symShiftRL' value (SymInt idx) = do
   let idx' = symFromIntegral idx
   symShiftNegated value idx'
+
+interpToInteger
+  :: forall m ws
+   . MonadFail m
+  => KnownWordSize ws
+  => MonadEval m
+  => m (Var, Value m ws)
+interpToInteger = do
+  var <- lookupThId 'toInteger#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = toIntegerValue bvTyCon
+  pure (var, value)
+
+toIntegerValue
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => TyCon
+  -> Value m ws
+toIntegerValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
+      Opaque' _ value -> do
+        size <- whyFail IllTyped $ concreteNat nat
+        SomeNat @n _ <- pure $ TypeNats.someNatVal size
+
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
+
+
+        let wordSize = natVal $ Proxy @(WordBits ws)
+        let mask = (2 ^ (wordSize - 1)) - 1
+
+        let tagIS = dataConToTag integerISDataCon
+        let tagIP = dataConToTag integerIPDataCon
+
+        let tag = do
+              inner <- value'
+              let condition = inner .<= mask
+              pure $ symIte condition tagIS tagIP
+
+        let fieldIS = Primitive . Int $ symFromIntegral <$> value'
+        let fieldIP = do
+              let bsize = pure $ fromIntegral wordSize
+              let array = symFromIntegral <$> value'
+              Primitive $ ByteArray bsize array
+        let fieldIN = Primitive $ ByteArray (throwError Invalid) (throwError Invalid) 
+
+        pure $ Data ADT
+          { adtTyCon = integerTyCon
+          , adtTyArgs = []
+          , adtTag = tag
+          , adtFields =
+            [ [fieldIS]
+            , [fieldIP]
+            , [fieldIN]
+            ]
+          }
+
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
 
 interpFromInteger
   :: forall m ws
