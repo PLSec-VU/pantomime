@@ -13,6 +13,7 @@ import Clash.Sized.Internal.Signed
   , (-#)
   , (*#)
   , negate#
+  , complement#
   , and#
   , or#
   , xor#
@@ -23,6 +24,8 @@ import Clash.Sized.Internal.Signed
   , le#
   , gt#
   , ge#
+  , shiftL#
+  , shiftR#
   , fromInteger#
   , unpack#
   , pack#
@@ -38,7 +41,7 @@ import Control.Monad.Except (MonadError(..))
 
 import Data.Typeable (cast, Proxy (..))
 
-import Data.Bits ((.&.), (.|.), xor)
+import Data.Bits (Bits (..))
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -62,6 +65,7 @@ clashInterp = sequence
   , interpSub
   , interpMul
   , interpNeg
+  , interpComplement
   , interpAnd
   , interpOr
   , interpXor
@@ -72,6 +76,8 @@ clashInterp = sequence
   , interpLe
   , interpGt
   , interpGe
+  , interpShiftL
+  , interpShiftR
   , interpFromInteger
   , interpUnpack#
   , interpPack#
@@ -170,6 +176,35 @@ siEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
     _ -> throwError IllTyped
   _ -> throwError IllTyped
 
+siShift
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => (forall n. KnownNat n => IntN' S n -> SymInt ws -> IntN' S n)
+  -> TyCon
+  -> Value m ws
+siShift op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
+      Opaque' ty lhs -> pure . Fun intTy $ \case
+        Data adt -> do
+          size <- whyFail IllTyped $ concreteNat nat
+          SomeNat @n _ <- pure $ TypeNats.someNatVal size
+
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (IntN' S n)) lhs
+          fields <- whyFail IllTyped $ adtDataConFields adt intDataCon
+          rhs <- case fields of
+            [Primitive (Int rhs)] -> pure $ SymInt <$> rhs
+            _ -> throwError IllTyped
+
+          let result = liftA2 op lhs' rhs
+          pure $ Opaque' ty result
+
+        _ -> throwError IllTyped
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
 interpAdd
   :: forall m ws
    . MonadFail m
@@ -216,6 +251,18 @@ interpNeg = do
   var <- lookupThId 'negate#
   siTyCon <- lookupThTyCon ''Signed
   let value = siUnary negate siTyCon
+  pure (var, value)
+
+interpComplement
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpComplement = do
+  var <- lookupThId 'complement#
+  siTyCon <- lookupThTyCon ''Signed
+  let value = siUnary complement siTyCon
   pure (var, value)
 
 interpAnd
@@ -336,6 +383,30 @@ interpGe = do
   var <- lookupThId 'ge#
   unTyCon <- lookupThTyCon ''Signed
   let value = siEquality (.>=) unTyCon
+  pure (var, value)
+
+interpShiftL
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpShiftL = do
+  var <- lookupThId 'shiftL#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = siShift symShiftL' bvTyCon
+  pure (var, value)
+
+interpShiftR
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpShiftR = do
+  var <- lookupThId 'shiftR#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = siShift symShiftRL' bvTyCon
   pure (var, value)
 
 interpFromInteger

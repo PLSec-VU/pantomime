@@ -25,12 +25,13 @@ import Clash.Sized.Internal.BitVector
   , le#
   , gt#
   , ge#
+  , toInteger#
   , fromInteger#
   , slice#
   , (++#)
   , size#
   , shiftL#
-  , shiftR#, toInteger#
+  , shiftR#
   )
 
 import GHC.Plugins
@@ -407,17 +408,6 @@ interpShiftL = do
   let value = bvShift symShiftL' bvTyCon
   pure (var, value)
 
-symShiftL'
-  :: forall ws n
-   . KnownNat n
-  => KnownWordSize ws
-  => WordN' S n
-  -> SymInt ws
-  -> WordN' S n
-symShiftL' value (SymInt idx) = do
-  let idx' = symFromIntegral idx
-  symShift value idx'
-
 interpShiftR
   :: forall m ws
    . MonadFail m
@@ -429,17 +419,6 @@ interpShiftR = do
   bvTyCon <- lookupThTyCon ''BitVector
   let value = bvShift symShiftRL' bvTyCon
   pure (var, value)
-
-symShiftRL'
-  :: forall ws n
-   . KnownNat n
-  => KnownWordSize ws
-  => WordN' S n
-  -> SymInt ws
-  -> WordN' S n
-symShiftRL' value (SymInt idx) = do
-  let idx' = symFromIntegral idx
-  symShiftNegated value idx'
 
 interpToInteger
   :: forall m ws

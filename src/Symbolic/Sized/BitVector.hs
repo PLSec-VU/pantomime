@@ -187,6 +187,11 @@ instance (KnownNat n, KnownNat n') => SymFromIntegral (IntN' S n) (IntN' S n') w
     IntZ -> withSizeI 0
     IntP value -> withSizeI $ symFromIntegral value
 
+instance (KnownNat n, KnownNat n') => SymFromIntegral (WordN' S n) (IntN' S n') where
+  symFromIntegral = \case
+    WordZ -> withSizeI 0
+    WordP value -> withSizeI $ symFromIntegral value
+
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymWordN n) (IntN' S n') where
   symFromIntegral value = withSizeI $ symFromIntegral value
 
@@ -475,6 +480,11 @@ instance (KnownNat n, KnownNat n') => SymFromIntegral (WordN' S n) (WordN' S n')
   symFromIntegral = \case
     WordZ -> withSizeW 0
     WordP value -> withSizeW $ symFromIntegral value
+
+instance (KnownNat n, KnownNat n') => SymFromIntegral (IntN' S n) (WordN' S n') where
+  symFromIntegral = \case
+    IntZ -> withSizeW 0
+    IntP value -> withSizeW $ symFromIntegral value
 
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymWordN n) (WordN' S n') where
   symFromIntegral value = withSizeW $ symFromIntegral value
