@@ -68,11 +68,11 @@ evaluate env = \case
 
   Var var | Just expr <- lookupLocalEnv env var -> evaluate env expr
 
-  Var var -> lookupIdEnv env var
-  -- Var var -> lookupIdEnv env var `catchError` \err -> do
-  --   dbg $ varType var
-  --   dbg var
-  --   throwError err
+  -- Var var -> lookupIdEnv env var
+  Var var -> lookupIdEnv env var `catchError` \err -> do
+    dbg $ varType var
+    dbg var
+    throwError err
 
   -- Var var -> lookupIdEnv env var `catchError` \_ -> do
   --   dbg $ "Unbound variable:" <+> ppr var $+$ "Using uninterpreted function."
@@ -555,8 +555,27 @@ evalPrimOp = \case
         pure $ Data adt
       _ -> throwError IllTyped
     _ -> throwError IllTyped
+  DataToTagSmallOp -> pure dataToTag
+  DataToTagLargeOp -> pure dataToTag
   _ -> throwError UnsupportedExpr
   where
+    -- We don't distinguish between small or large tags, thus we have one
+    -- implementation for dataToTag.
+    --
+    -- This function has the following Haskell type:
+    --
+    -- forall {l::levity} (a::TYPE (BoxedRep l)). a -> Int#
+    dataToTag :: Value m ws
+    dataToTag = Fun levPolyAlphaTy $ \case
+      Ty levity -> pure . Fun (mkTyConApp boxedRepDataConTyCon [levity]) $ \case
+        Ty ty -> pure . Fun ty $ \case
+          Data adt -> do
+            let tag = Int $ adtTag adt
+            pure $ Primitive tag
+          _ -> throwError IllTyped
+        _ -> throwError IllTyped
+      _ -> throwError IllTyped
+
     symShiftRA'
       :: forall bv
        . KnownBitSize bv

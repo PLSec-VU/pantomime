@@ -361,16 +361,9 @@ eqTyConRole tyCon = if
 --   values.
 
 -- TODO: I guess this should just return a maybe, as there is only one reason
--- why this would possibly fail.
--- TODO: Instead of having one giant guard, wouldn't it be better to make a
--- separate function for each instance? We can write top level functions by
--- putting them in a list and trying until there is a hit. catchError can be
--- used to continuously probe and try the next one when hitting UnsupportedExpr.
--- The same holds for all the other types of functions like this! I guess like
--- the function above says, we really just need to add a Maybe for return. We
--- only return IllTyped when nested values occur. I think we can actually
--- capture this idea in a typeclass (perhaps called symbolise), which takes a
--- Type and returns itself (if possible).
+-- why this would possibly fail. We only return IllTyped when nested values
+-- occur. I think we can actually capture this idea in a typeclass (perhaps
+-- called symbolise), which takes a Type and returns itself (if possible).
 typedValue
   :: forall m ws
    . MonadEval m
