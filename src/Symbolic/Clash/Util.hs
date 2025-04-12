@@ -5,6 +5,7 @@ module Symbolic.Clash.Util
   ( lookupThId
   , lookupThTyCon
   , concreteNat
+  , mkNatTyVarTy
   , symShiftL'
   , symShiftRL'
   , symShiftRA'
@@ -75,6 +76,10 @@ concreteNat adt = do
       value' <- rightToMaybe $ unRuntimeC rvalue
       pure $ fromIntegral value'
     _ -> empty
+
+-- | Create a type-variable type with the natural kind.
+mkNatTyVarTy :: TyVar -> Type
+mkNatTyVarTy tyVar = mkTyVarTy $ setVarType tyVar naturalTy
 
 symShiftL'
   :: forall bv ws (n :: Natural)

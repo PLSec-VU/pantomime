@@ -90,10 +90,6 @@ clashInterp = sequence
   , interpSize
   ]
 
--- | Create a type-variable type with the natural kind.
-mkNatTyVarTy :: TyVar -> Type
-mkNatTyVarTy tyVar = mkTyVarTy $ setVarType tyVar naturalTy
-
 -- | Perform a binary operation on two bit vectors.
 --
 -- The result value has type:

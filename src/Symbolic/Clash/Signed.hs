@@ -29,6 +29,7 @@ import Clash.Sized.Internal.Signed
   , fromInteger#
   , unpack#
   , pack#
+  , size#
   )
 
 import GHC.Plugins
@@ -81,6 +82,7 @@ clashInterp = sequence
   , interpFromInteger
   , interpUnpack#
   , interpPack#
+  , interpSize
   ]
 
 -- | Perform a binary operation on two Signed bit vectors.
@@ -541,6 +543,42 @@ packValue bvTyCon siTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ 
         let ty = mkTyConApp bvTyCon [sizeTy]
         let result = toUnsigned <$> value'
         pure $ Opaque' ty result
+
+      _ -> throwError IllTyped
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpSize
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpSize = do
+  var <- lookupThId 'size#
+  bvTyCon <- lookupThTyCon ''Signed
+  let value = sizeValue bvTyCon
+  pure (var, value)
+
+sizeValue
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => TyCon
+  -> Value m ws
+sizeValue siTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data adt) -> pure . Fun (mkTyConApp siTyCon [sizeTy]) $ \case
+      Opaque' _ _ -> do
+        size <- whyFail UnsupportedExpr $ concreteNat adt
+        let size' = pure $ fromIntegral size
+
+        pure $ Data ADT
+          { adtTyCon = intTyCon
+          , adtTyArgs = []
+          , adtTag = pure $ dataConToTag intDataCon
+          , adtFields = [[Primitive $ Int size']]
+          }
 
       _ -> throwError IllTyped
     _ -> throwError IllTyped

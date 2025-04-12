@@ -12,6 +12,7 @@ import Clash.Sized.Internal.Unsigned
   , (-#)
   , (*#)
   , negate#
+  , complement#
   , and#
   , or#
   , xor#
@@ -21,9 +22,12 @@ import Clash.Sized.Internal.Unsigned
   , le#
   , gt#
   , ge#
+  , shiftL#
+  , shiftR#
   , fromInteger#
   , unpack#
   , pack#
+  , size#
   )
 
 import GHC.Plugins
@@ -36,7 +40,7 @@ import Control.Monad.Except (MonadError(..))
 
 import Data.Typeable (cast)
 
-import Data.Bits ((.&.), (.|.), xor)
+import Data.Bits (Bits (..))
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -60,6 +64,7 @@ clashInterp = sequence
   , interpSub
   , interpMul
   , interpNeg
+  , interpComplement
   , interpAnd
   , interpOr
   , interpXor
@@ -69,9 +74,12 @@ clashInterp = sequence
   , interpLe
   , interpGt
   , interpGe
+  , interpShiftL
+  , interpShiftR
   , interpFromInteger
   , interpPack#
   , interpUnpack#
+  , interpSize
   ]
 
 -- | Perform a binary operation on two Unsigned bit vectors.
@@ -165,25 +173,31 @@ unEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
     _ -> throwError IllTyped
   _ -> throwError IllTyped
 
-unBitwise
+unShift
   :: forall m ws
    . MonadEval m
-  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> WordN' S n)
+  => KnownWordSize ws
+  => (forall n. KnownNat n => WordN' S n -> SymInt ws -> WordN' S n)
   -> TyCon
   -> Value m ws
-unBitwise op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
-  Ty size -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
-    Opaque' lty lhs -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
-      Opaque' _rty rhs -> do
-        SomeNat @n _ <- whyFail IllTyped $ do
-          size' <- isNumLitTy size
-          someNatVal size'
+unShift op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
+      Opaque' ty lhs -> pure . Fun intTy $ \case
+        Data adt -> do
+          size <- whyFail IllTyped $ concreteNat nat
+          SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-        lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
-        rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+          fields <- whyFail IllTyped $ adtDataConFields adt intDataCon
+          rhs <- case fields of
+            [Primitive (Int rhs)] -> pure $ SymInt <$> rhs
+            _ -> throwError IllTyped
 
-        let result = mrgLiftA2 op lhs' rhs'
-        pure $ Opaque' lty result
+          let result = liftA2 op lhs' rhs
+          pure $ Opaque' ty result
+
+        _ -> throwError IllTyped
       _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
@@ -236,37 +250,52 @@ interpNeg = do
   let value = unUnary negate unTyCon
   pure (var, value)
 
+interpComplement
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpComplement = do
+  var <- lookupThId 'complement#
+  unTyCon <- lookupThTyCon ''Unsigned
+  let value = unUnary complement unTyCon
+  pure (var, value)
+
 interpAnd
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpAnd = do
   var <- lookupThId 'and#
   unTyCon <- lookupThTyCon ''Unsigned
-  let value = unBitwise (.&.) unTyCon
+  let value = unBinary (.&.) unTyCon
   pure (var, value)
 
 interpOr
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpOr = do
   var <- lookupThId 'or#
   unTyCon <- lookupThTyCon ''Unsigned
-  let value = unBitwise (.|.) unTyCon
+  let value = unBinary (.|.) unTyCon
   pure (var, value)
 
 interpXor
   :: forall m ws
    . MonadFail m
   => MonadEval m
+  => KnownWordSize ws
   => m (Var, Value m ws)
 interpXor = do
   var <- lookupThId 'xor#
   unTyCon <- lookupThTyCon ''Unsigned
-  let value = unBitwise xor unTyCon
+  let value = unBinary xor unTyCon
   pure (var, value)
 
 interpEq
@@ -339,6 +368,31 @@ interpGe = do
   var <- lookupThId 'ge#
   unTyCon <- lookupThTyCon ''Unsigned
   let value = unEquality (.>=) unTyCon
+  pure (var, value)
+
+
+interpShiftL
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpShiftL = do
+  var <- lookupThId 'shiftL#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = unShift symShiftL' bvTyCon
+  pure (var, value)
+
+interpShiftR
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpShiftR = do
+  var <- lookupThId 'shiftR#
+  bvTyCon <- lookupThTyCon ''BitVector
+  let value = unShift symShiftRL' bvTyCon
   pure (var, value)
 
 interpFromInteger
@@ -454,5 +508,41 @@ packValue bvTyCon unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ 
   Ty size -> pure . Fun (mkTyConApp unTyCon [size]) $ \case
     Opaque' _ value -> do
       pure $ Opaque' (mkTyConApp bvTyCon [size]) value
+    _ -> throwError IllTyped
+  _ -> throwError IllTyped
+
+interpSize
+  :: forall m ws
+   . MonadFail m
+  => MonadEval m
+  => KnownWordSize ws
+  => m (Var, Value m ws)
+interpSize = do
+  var <- lookupThId 'size#
+  bvTyCon <- lookupThTyCon ''Unsigned
+  let value = sizeValue bvTyCon
+  pure (var, value)
+
+sizeValue
+  :: forall m ws
+   . MonadEval m
+  => KnownWordSize ws
+  => TyCon
+  -> Value m ws
+sizeValue unTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
+  Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
+    Cast' _ (Data adt) -> pure . Fun (mkTyConApp unTyCon [sizeTy]) $ \case
+      Opaque' _ _ -> do
+        size <- whyFail UnsupportedExpr $ concreteNat adt
+        let size' = pure $ fromIntegral size
+
+        pure $ Data ADT
+          { adtTyCon = intTyCon
+          , adtTyArgs = []
+          , adtTag = pure $ dataConToTag intDataCon
+          , adtFields = [[Primitive $ Int size']]
+          }
+
+      _ -> throwError IllTyped
     _ -> throwError IllTyped
   _ -> throwError IllTyped
