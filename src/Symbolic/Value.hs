@@ -61,6 +61,7 @@ import Grisette
   , LogicalOp (..)
   , SymOrd (..)
   , SymEq (..)
+  , EvalSym (..)
   , indexed
   )
 
@@ -102,6 +103,9 @@ data Value m ws where
        , SimpleMergeable a
        , Mergeable a
        , SymEq a
+       , EvalSym a
+      -- TODO: Remove the show constraint.
+       , Show a
        )
     => Type
     -> RuntimeValue S a
@@ -112,14 +116,39 @@ dumpValue
   => Value m ws
   -> SDoc
 dumpValue = \case
+  Primitive prim -> dumpPrimitive prim
   Data adt -> do
     let tag = "tag" <+> ppr (adtType adt) <+> ":" <+> text (show $ adtTag adt)
     let fields = ppr $ fmap dumpValue <$> adtFields adt
     hang tag 2 fields
-  Poly _ value -> "poly: " <+> text (show value)
-  Primitive (Int value) -> "int: " <+> text (show value)
+  Poly _ value -> "poly:" <+> text (show value)
   Cast' co val -> dumpValue val <+> "<->" <+> ppr (coercionKindRole co)
-  _ -> "todo"
+  Fun _ _ -> "function: ?"
+  Ty ty -> "ty:" <+> ppr ty
+  Co co -> "co:" <+> ppr co
+  Opaque' ty value -> "opaque" <+> ppr ty <+> ":" <+> text (show value)
+
+dumpPrimitive
+  :: KnownWordSize ws
+  => Primitive ws
+  -> SDoc
+dumpPrimitive = \case
+  Int value -> "int:" <+> text' value
+  Int8 value -> "int8:" <+> text' value
+  Int16 value -> "int16:" <+> text' value
+  Int32 value -> "int32:" <+> text' value
+  Int64 value -> "int64:" <+> text' value
+  Word value -> "word:" <+> text' value
+  Word8 value -> "word8:" <+> text' value
+  Word16 value -> "word16:" <+> text' value
+  Word32 value -> "word32:" <+> text' value
+  Word64 value -> "word64:" <+> text' value
+  Float value -> "float:" <+> text' value
+  Double value -> "doube:" <+> text' value
+  ByteArray size value -> "bytearray:" <+> text' size <+> text' value
+  where
+    text' :: Show a => a -> SDoc
+    text' = text . show
 
 instance KnownWordSize ws => Outputable (Value m ws) where
   ppr = \case
@@ -132,6 +161,20 @@ instance KnownWordSize ws => Outputable (Value m ws) where
     Co co -> ppr co
     Opaque' ty _ -> ppr ty
 
+instance (KnownWordSize ws, Functor m) => EvalSym (Value m ws) where
+  evalSym fill model = \case
+    Primitive prim -> Primitive $ evalSym' prim
+    Data adt -> Data $ evalSym' adt
+    Poly ty value -> Poly ty $ evalSym' value
+    Cast' co value -> Cast' co $ evalSym' value
+    Fun argTy fun -> Fun argTy $ \arg -> evalSym' <$> fun arg
+    Ty ty -> Ty ty
+    Co co -> Co co
+    Opaque' ty value -> Opaque' ty $ evalSym' value
+    where
+      evalSym' :: EvalSym a => a -> a
+      evalSym' = evalSym fill model
+
 instance Functor m => Forceable (Value m ws) where
   force constraints = \case
     Primitive prim -> Primitive $ force' prim
@@ -142,8 +185,8 @@ instance Functor m => Forceable (Value m ws) where
     Opaque' ty value -> Opaque' ty $ force' value
     -- TODO: These aren't really forceable. I guess they needn't be, but it
     -- might create unexpected behaviour.
-    Ty ty -> Ty ty
-    Co co -> Co co
+    Ty _ty -> error "We fail for now"
+    Co _co -> error "We fail for now"
     where
       force' :: Forceable a => a -> a
       force' = force constraints
@@ -644,7 +687,7 @@ typedLambda' value ty = do
   -- function? Something similar to the GHC Subst? I.e. that's a way to generate
   -- a Value without the annoyance of these function scoping problems I'm facing
   -- all the time...
-  -- unless (ident == throwError Invalid) $ throwError UnsupportedExpr
+  unless (ident == throwError Invalid) $ throwError UnsupportedExpr
   typedLambda ident argTy resTy
 
 typedForall
@@ -1017,6 +1060,15 @@ data ADT m ws where
 instance KnownWordSize ws => Outputable (ADT m ws) where
   ppr = ppr . adtType
 
+instance (Functor m, KnownWordSize ws) => EvalSym (ADT m ws) where
+  evalSym fill model adt = do
+    let evalSym' :: EvalSym a => a -> a
+        evalSym' = evalSym fill model
+    adt
+      { adtTag = evalSym' $ adtTag adt
+      , adtFields = fmap evalSym' <$> adtFields adt
+      }
+
 instance (MonadEval m, KnownWordSize ws) => EvalIte m (ADT m ws) where
   evalIte cond lhs rhs = do
     unless (adtType lhs `eqType` adtType rhs) $ throwError IllTyped
@@ -1043,7 +1095,14 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (ADT m ws) where
     unless (adtType lhs `eqType` adtType rhs) $ throwError IllTyped
 
     -- Ensure the tags are equivalent.
-    tagEq <- weakEq (adtTag lhs) (adtTag rhs)
+    -- FIXME: This doesn't deal with comparison of error values. The semantic
+    -- for errors should be that the fields can be any value if both tags are
+    -- the same error.
+    -- TODO: This probably also creates duplicate constraints. There should be
+    -- a better way to encode this.
+    let tagCmp = liftA2 (.==) (adtTag lhs) (adtTag rhs)
+    let invalidTag = tagCmp .== throwError Invalid
+    let tagEq = tagCmp .== pure true
 
     -- First join all fields in pairs. I.e. for every DataCon, we pair all
     -- fields.
@@ -1066,7 +1125,7 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (ADT m ws) where
 
     -- The tags should be equivalent and the fields of the matching DataCon
     -- should be equivalent.
-    pure $ foldl' (.&&) tagEq fieldEq
+    pure $ invalidTag .|| foldl' (.&&) tagEq fieldEq
 
 -- | Get the Type of an ADT.
 adtType :: ADT m ws -> Type
@@ -1239,6 +1298,25 @@ instance KnownWordSize ws => Outputable (Primitive ws) where
     Float _ -> "Float#"
     Double _ -> "Double#"
     ByteArray _ _ -> "ByteArray#"
+
+instance KnownWordSize ws => EvalSym (Primitive ws) where
+  evalSym fill model = \case
+    Int value -> Int $ evalSym' value
+    Int8 value -> Int8 $ evalSym' value
+    Int16 value -> Int16 $ evalSym' value
+    Int32 value -> Int32 $ evalSym' value
+    Int64 value -> Int64 $ evalSym' value
+    Word value -> Word $ evalSym' value
+    Word8 value -> Word8 $ evalSym' value
+    Word16 value -> Word16 $ evalSym' value
+    Word32 value -> Word32 $ evalSym' value
+    Word64 value -> Word64 $ evalSym' value
+    Float value -> Float $ evalSym' value
+    Double value -> Double $ evalSym' value
+    ByteArray size array -> ByteArray (evalSym' size) (evalSym' array)
+    where
+      evalSym' :: EvalSym a => a -> a
+      evalSym' = evalSym fill model
 
 instance Forceable (Primitive ws) where
   force constraints = \case

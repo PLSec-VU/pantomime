@@ -111,7 +111,7 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
   unless (exprType lhs `eqType` exprType rhs) $ do
     throwError $ EvalError IllTyped
 
-  (bndrs, lres, rres, neq) <- modifyError EvalError $ do
+  (bndrs, lres, rres, eq) <- modifyError EvalError $ do
     bndrs <- symbolicBndrs $ exprType lhs
 
     base <- baseValues
@@ -127,8 +127,8 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
 
     lresult <- saturate lhs
     rresult <- saturate rhs
-    neq <- symNot <$> weakEq lresult rresult
-    pure (bndrs, lresult, rresult, neq)
+    eq <- weakEq lresult rresult
+    pure (bndrs, lresult, rresult, eq)
 
   -- TODO: We could let the user decide which solver no?
   let z3' = z3
@@ -138,7 +138,7 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
           }
         }
 
-  result <- liftCore . liftIO $ solve z3' neq
+  result <- liftCore . liftIO .  solve z3' . symNot $ eq
 
   case result of
     Right model -> do
