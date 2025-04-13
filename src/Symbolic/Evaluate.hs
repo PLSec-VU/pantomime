@@ -188,9 +188,7 @@ evalAlt env scrut = \case
 
     -- Compare the literal, to the scrutinee.
     lit' <- evalLiteral lit
-    -- TODO: This equivalence needs to force the scrutinee. We should probably
-    -- differentiate between the type of equality we support.
-    conditional <- strictPrimEq scrut' lit'
+    conditional <- onlyPrimEq scrut' lit'
 
     -- Evaluate the rhs.
     rhs' <- evaluate env rhs
@@ -216,14 +214,14 @@ onlyBool = symAnd
   . overestimateUnionValues
   . unRuntimeS
 
-strictPrimEq
+onlyPrimEq
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
   => Primitive ws
   -> Primitive ws
   -> m SymBool
-strictPrimEq = curry $ \case
+onlyPrimEq = curry $ \case
   (Int lhs, Int rhs) -> cmp lhs rhs
   (Int8 lhs, Int8 rhs) -> cmp lhs rhs
   (Int16 lhs, Int16 rhs) -> cmp lhs rhs

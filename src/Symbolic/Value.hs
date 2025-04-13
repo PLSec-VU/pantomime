@@ -645,7 +645,8 @@ typedADT
 typedADT value ty = do
   -- Ensure this is a ADT we can construct
   (tyCon, tyArgs) <- whyFail UnsupportedExpr $ tcSplitTyConApp_maybe ty
-  unless (isDataTyCon tyCon) $ throwError UnsupportedExpr
+  unless (or [isDataTyCon tyCon, isUnboxedTupleTyCon tyCon, isUnboxedSumTyCon tyCon]) $ do
+    throwError UnsupportedExpr
   dataCons <- whyFail UnsupportedExpr $ tyConDataCons_maybe tyCon
   -- TODO: This will loop infinitely for recursive types. We need to resolve
   -- that somehow.
