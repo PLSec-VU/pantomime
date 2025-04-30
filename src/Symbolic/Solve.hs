@@ -138,7 +138,7 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
           }
         }
 
-  result <- liftCore . liftIO .  solve z3' . symNot $ eq
+  result <- liftCore . liftIO . solve z3' . symNot $ eq
 
   case result of
     Right model -> do
