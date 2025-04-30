@@ -28,7 +28,6 @@ import Lens.Micro
 import Lens.Micro.Extras (view)
 
 import Util
-import qualified Subst
 
 -- | Mapping used to track information for unification.
 data Unification = Unification
@@ -78,6 +77,12 @@ quantifiers f unif = do
         }
   rebuild <$> f (_quantifiers unif)
 
+-- | A lens into the 'InScopeSet' of a 'Subst'.
+scopeSubst :: Lens' Subst InScopeSet
+scopeSubst f (Subst scope' ids tvs cvs) = do
+  let rebuild scope'' = Subst scope'' ids tvs cvs
+  rebuild <$> f scope'
+
 -- | Lookup a dictionary identifier given a type.
 --
 -- This will not resolve instances. The purpose of this lookup is to not have
@@ -101,7 +106,7 @@ lookupDict ty unif = do
   let new = do
         let scaled = Scaled ManyTy ty'
         let (fresh, unif') = unif
-              & substitution . Subst.scope %~~ freshId "dict" scaled
+              & substitution . scopeSubst %~~ freshId "dict" scaled
 
         let fresh' = Var fresh
         let unif'' = unif' & dictionaries %~ insertTM ty' fresh'
@@ -381,6 +386,7 @@ matchArgsApp scope fun args = do
   let fun' = substExpr subst' fun
   pure $ mkApps fun' args
 
+-- TODO: I think this is dead code. Remove it!
 -- TODO: Comment this!
 -- TODO: I think we actually want to provide the full substitution no? It would
 -- reduce the number of traversals I think. Same for 'matchArgsApp'.

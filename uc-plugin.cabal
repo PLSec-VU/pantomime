@@ -25,25 +25,29 @@ source-repository head
 
 library
   exposed-modules:
-      Diverge
       GHC.MonadCore
       Lint
-      Monomorph
       Projection
       Subst
       Symbolic.Base
       Symbolic.Clash
+      Symbolic.Clash.Bit
+      Symbolic.Clash.BitVector
+      Symbolic.Clash.Signed
+      Symbolic.Clash.Unsigned
+      Symbolic.Clash.Util
       Symbolic.Concrete
+      Symbolic.Dict
       Symbolic.Environment
       Symbolic.Evaluate
-      Symbolic.Identifier
       Symbolic.MonadEval
       Symbolic.Runtime
+      Symbolic.Sized.BitVector
+      Symbolic.Sized.Class
       Symbolic.Solve
       Symbolic.Util
       Symbolic.Value
       Symbolic.WordSize
-      Transform
       Types
       UC
       Unification

@@ -1,8 +1,5 @@
 module Types
-  ( UC (..)
-  , UCNorm (..)
-  , UCCompare (..)
-  , SymCompare (..)
+  ( SymCompare (..)
   , Spec (..)
 
   , UCGenerated (..)
@@ -28,57 +25,39 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.State (StateT)
 import Control.Monad.Trans.Maybe (MaybeT)
 
--- | Tactic based UC check.
---
--- Annotation on a circuit with type: s -> i -> (s, o)
-data UC a = UC
-  { observation :: a
-  -- ^ Observation function: o -> o'
-  , leakage :: a
-  -- ^ Leakage function: s1 -> i -> (s1, a)
-  , simulator :: a
-  -- ^ Simulator: s2 -> a -> (s2, o)
-  , projection :: a
-  -- ^ State projection: s -> (s1, s2)
-  }
-  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
-
-instance Outputable a => Outputable (UC a) where
-  ppr uc = text "UC" $+$ nest 2 fields
-    where
-      fields = vcat
-        [ text "{" <+> ppr (observation uc)
-        , text "," <+> ppr (leakage uc)
-        , text "," <+> ppr (simulator uc)
-        , text "," <+> ppr (projection uc)
-        , text "}"
-        ]
-
-newtype UCCompare a = UCCompare a
-  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
-
 -- | Leakage specification of a circuit.
 --
 -- Annotation should be on a circuit of type: Circuit si i o
 -- TODO: At some point this type should replace the original UC annotation and
 -- we should remove the prime on the field names.
+-- TODO: Rebrand this to a Pantomime annotation.
 data Spec a = Spec
-  { observation' :: a
-  -- ^ Observation circuit: Circuit so o o'
-  , leakage' :: a
-  -- ^ Leakage circuit: Circuit sl i a
-  , simulator' :: a
-  -- ^ Simulator circuit: Circuit ss a o'
-  , projection' :: a
-  -- ^ State projection: (si, so) -> (sl, ss)
+  { observation :: a
+  -- ^ Observation: Circuit so o o'
+  , leakage :: a
+  -- ^ Leakage: Circuit sl i a
+  , simulator :: a
+  -- ^ Simulator: Circuit ss a o'
+  , projection :: a
+  -- ^ State Projection: (si, so) -> (sl, ss)
   }
   deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
 
+instance Outputable a => Outputable (Spec a) where
+  ppr spec = text "UC" $+$ nest 2 fields
+    where
+      fields = vcat
+        [ text "{" <+> ppr (observation spec)
+        , text "," <+> ppr (leakage spec)
+        , text "," <+> ppr (simulator spec)
+        , text "," <+> ppr (projection spec)
+        , text "}"
+        ]
+
+-- TODO: Maybe remove the Sym part. We should also rebrand this to a Pantomime
+-- named operation perhaps?
 newtype SymCompare a = SymCompare a
   deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
-
-data UCNorm = UCNorm
-  deriving (Show, Data, Typeable)
 
 -- | An annotation we use to denote binders that were generated for a UC check.
 --

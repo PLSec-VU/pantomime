@@ -1,8 +1,5 @@
 module UC
   ( plugin
-  , UC (..)
-  , UCCompare (..)
-  , UCNorm (..)
   , SymCompare (..)
   , Spec (..)
   , Projection.Circuit
@@ -11,7 +8,6 @@ module UC
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Lint
 import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
-import GHC.Core.Map.Expr (eqCoreExpr)
 import GHC.Driver.Config.Core.Lint (initLintConfig)
 import GHC.MonadCore
 
@@ -19,7 +15,7 @@ import Data.Maybe (catMaybes)
 import Data.Data
 
 import Control.Monad.Reader (MonadReader, ReaderT (..), reader)
-import Control.Monad (forM, unless)
+import Control.Monad (forM)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
@@ -27,7 +23,6 @@ import qualified Lint
 import qualified Projection
 import Types
 import Util
-import Transform
 import Unification
 import Symbolic.Solve
 
@@ -43,9 +38,6 @@ install :: MonadCore m => [CommandLineOption] -> Pass m [CoreToDo]
 install _ todo = pure $ mconcat
   [ symComparePasses
   , checkSpecPasses
-  , normalizePasses
-  , comparePasses
-  , tacticPasses
   , todo
   ]
   where
@@ -59,33 +51,12 @@ install _ todo = pure $ mconcat
       ]
 
     -- TODO: I don't really need to create new binds to do this pass, since I'm
-    -- not modifying the binds anyway.
+    -- not modifying the binds anyway. Same for the other symbolic check
+    -- actually!
     checkSpecPasses = withProxy (Proxy @(UCGenerated (Spec TH.Name)))
       [ createUCBindsPass
       , printAndLintPass
       , checkSpecPass
-      , removeUCBindsPass
-      ]
-
-    normalizePasses = withProxy (Proxy @(UCGenerated UCNorm))
-      [ createUCBindsPass
-      , printAndLintPass
-      , normalizePass
-      , printAndLintPass
-      , removeUCBindsPass
-      ]
-
-    comparePasses = withProxy (Proxy @(UCGenerated (UCCompare TH.Name)))
-      [ createUCBindsPass
-      , ucComparePass
-      , printAndLintPass
-      , removeUCBindsPass
-      ]
-
-    tacticPasses = withProxy (Proxy @(UCGenerated (UC TH.Name)))
-      [ createUCBindsPass
-      , ucCheckPass
-      , printAndLintPass
       , removeUCBindsPass
       ]
 
@@ -191,30 +162,6 @@ checkSpecPass _ = CoreDoPluginPass name pass
     name = TH.nameBase 'checkSpecPass
     pass = annBindsPassWithGuts checkSpec
 
-normalizePass
-  :: forall a
-   . Data a
-  => Proxy a
-  -> CoreToDo
-normalizePass _ = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'normalizePass
-    pass = annBindsPassWithGuts $ \(_ :: a) bind -> do
-      guts <- reader modGuts
-      bindPass (normalize guts) bind
-
-ucCheckPass :: proxy -> CoreToDo
-ucCheckPass _ = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'ucCheckPass
-    pass = annBindsPassWithGuts ucCheck
-
-ucComparePass :: proxy -> CoreToDo
-ucComparePass _ = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'ucComparePass
-    pass = annBindsPassWithGuts ucCompare
-
 printAndLint
   :: MonadCore m
   => MonadReader r m
@@ -229,69 +176,44 @@ printAndLint bind = do
   dbg res
   pure bind
 
--- TODO: Clean up this function. It's pretty much the same as composeSim.
--- It feels as though we could do better...
 composeImpl
-  :: MonadFail m
-  => MonadCore m
-  => HasModGuts' m
-  => UC TH.Name
-  -> Pass m CoreExpr
-composeImpl uc expr = do
-  let resolve name = Var <$> resolveTH' name
-
-  oproj <- resolve 'Projection.oproj
-  obs <- resolve $ observation uc
-
-  expr' <- unifyApps oproj [obs, expr]
-    ??= "Incompatible types on observation/implementation pair"
-
-  sproj <- resolve 'Projection.sproj
-  proj <- resolve $ projection uc
-
-  expr'' <- unifyApps sproj [proj, expr']
-    ??= "Incompatible types on (implementation/observation)/projection pair"
-
-  pure $ occurAnalyseExpr expr''
-
-composeImpl'
   :: MonadFail m
   => MonadCore m
   => HasModGuts' m
   => Spec TH.Name
   -> Pass m CoreExpr
-composeImpl' spec expr = do
+composeImpl spec expr = do
   let resolve name = Var <$> resolveTH' name
 
   compose <- resolve 'Projection.compose
-  obs <- resolve $ observation' spec
+  obs <- resolve $ observation spec
 
   expr' <- unifyApps compose [expr, obs]
     ??= "Incompatible types on observation/implementation pair"
 
   sproj <- resolve 'Projection.sproj
-  proj <- resolve $ projection' spec
+  proj <- resolve $ projection spec
 
   expr'' <- unifyApps sproj [proj, expr']
     ??= "Incompatible types on (implementation/observation)/projection pair"
 
   pure $ occurAnalyseExpr expr''
 
-composeSim'
+composeSim
   :: MonadFail m
   => MonadCore m
   => HasModGuts' m
   => Spec TH.Name
   -> m CoreExpr
-composeSim' uc = do
+composeSim uc = do
   let resolve name = Var <$> resolveTH' name
 
   compose <- resolve 'Projection.compose
   sproj' <- resolve 'Projection.sproj'
 
-  sim <- resolve $ simulator' uc
-  leak <- resolve $ leakage' uc
-  proj <- resolve $ projection' uc
+  sim <- resolve $ simulator uc
+  leak <- resolve $ leakage uc
+  proj <- resolve $ projection uc
 
   expr' <- unifyApps compose [leak, sim]
     ??= "Incompatible types on leakage/simulator pair"
@@ -300,55 +222,6 @@ composeSim' uc = do
     ??= "Incompatible types on projection/(leakage/simulator) pair"
 
   pure $ occurAnalyseExpr expr''
-
-composeSim
-  :: MonadFail m
-  => MonadCore m
-  => HasModGuts' m
-  => UC TH.Name
-  -> m CoreExpr
-composeSim uc = do
-  let resolve name = Var <$> resolveTH' name
-
-  sim <- resolve $ simulator uc
-
-  iproj <- resolve 'Projection.iproj
-  leak <- resolve $ leakage uc
-
-  sproj' <- resolve 'Projection.sproj'
-  proj <- resolve $ projection uc
-
-  expr' <- unifyApps iproj [leak, sim]
-    ??= "Incompatible types on leakage/simulator pair"
-
-  expr'' <- unifyApps sproj' [proj, expr']
-    ??= "Incompatible types on projection/(leakage/simulator) pair"
-
-  pure $ occurAnalyseExpr expr''
-
-ucCheck
-  :: MonadFail m
-  => MonadCore m
-  => HasModGuts' m
-  => HasDynFlags m
-  => UCGenerated (UC TH.Name)
-  -> Pass m CoreBind'
-ucCheck (UCGenerated uc) (Bind' var expr) = do
-  expr' <- composeImpl uc expr
-  sim <- composeSim uc
-
-  (sim', expr'') <- unifyAndNorm sim expr'
-
-  -- Check whether they are equal
-  unless (expr'' `eqCoreExpr` sim') $ do
-    dbg' "implementation:"
-    dbg expr''
-    dbg' "simulator:"
-    dbg sim'
-    fail "Implementation does not equal simulator"
-
-  let var' = setVarType var $ exprType expr''
-  pure $ Bind' var' expr''
 
 checkSpec
   :: MonadFail m
@@ -362,10 +235,10 @@ checkSpec (UCGenerated spec) (Bind' var expr) = do
   let program = mg_binds guts
   let scope = extendInScopeSetBndrs emptyInScopeSet program
 
-  imp <- composeImpl' spec expr
+  imp <- composeImpl spec expr
   Lint.panic Lint.base scope imp
 
-  sim <- composeSim' spec
+  sim <- composeSim spec
   Lint.panic Lint.base scope sim
 
   (imp', sim') <- unifyExprs imp sim
@@ -410,57 +283,6 @@ symCompare (UCGenerated (SymCompare other)) (Bind' var expr) = do
     Left err -> do
       dbg err
       fail "Expressions were not equal"
-
-ucCompare
-  :: MonadFail m
-  => MonadCore m
-  => HasModGuts' m
-  => HasDynFlags m
-  => UCGenerated (UCCompare TH.Name)
-  -> Pass m CoreBind'
-ucCompare (UCGenerated (UCCompare other)) (Bind' var expr) = do
-  let resolve name = Var <$> resolveTH' name
-  other' <- resolve other
-
-  (expr', other'') <- unifyAndNorm expr other'
-
-  -- Check whether they are equal
-  unless (expr' `eqCoreExpr` other'') $ do
-    dbg expr'
-    dbg other''
-    fail "Expressions were not equal"
-
-  pure $ Bind' var expr
-
-unifyAndNorm
-  :: MonadFail m
-  => MonadCore m
-  => HasModGuts' m
-  => HasDynFlags m
-  => CoreExpr
-  -> CoreExpr
-  -> m (CoreExpr, CoreExpr)
-unifyAndNorm this other = do
-  (this', other') <- unifyExprs this other
-    ??= "Unable to unify ignore/circuit pair with current/ignore pair"
-
-  instEnv <- getInstEnvs'
-
-  prog <- mg_binds <$> modGuts'
-  let scope = extendInScopeSetBndrs emptyInScopeSet prog
-
-  let instantiateAndNormalize expr = do
-          let expr' = resolveInstances instEnv expr
-          Lint.panic Lint.base scope expr'
-          guts <- modGuts'
-          -- monomorphize guts expr'
-          normalize guts expr'
-
-  -- Normalize circuits
-  this'' <- instantiateAndNormalize this'
-  other'' <- instantiateAndNormalize other'
-
-  pure (this'', other'')
 
 -- TODO: Implement this!
 removeUCBinds :: MonadCore m => Pass m ModGuts
