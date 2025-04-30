@@ -162,7 +162,8 @@ normalize guts expr = do
 saturate
   :: Foldable f
   => Functor f
-  => Monad m
+  -- => Monad m
+  => MonadCore m
   => HasDynFlags m
   => Subst.Class s
   => f (Transform (MaybeT m) s CoreExpr)

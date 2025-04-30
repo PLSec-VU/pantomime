@@ -24,15 +24,15 @@ monomorphize guts expr = do
   rules <- liftCore $ initRuleEnv guts
   let runPass = flip runReaderT rules
 
-  let passes =
-        [ inlineUnfolding
-        , betaReduce
-        , caseReduce
+  let passes = []
+        -- [ inlineUnfolding
+        -- , betaReduce
+        -- , caseReduce
         -- , dropReflCast
         -- , joinCasts
         -- , floatCast
-        , applyRule
-        ]
+        -- , applyRule
+        -- ]
 
   -- Run passes on the expression until saturation.
   let subst = initSubst $ mg_binds guts :: Subst
