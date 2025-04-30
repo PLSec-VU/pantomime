@@ -4,13 +4,10 @@ module Unification
   , unifyApps
   , unifyExprs
   , resolveInstances
-
-  , matchArgsApp
-  , matchExpr
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
-import GHC.Core.Unify (tcMatchTyX, tcMatchTysX, tcUnifyTys, alwaysBindFun)
+import GHC.Core.Unify (tcUnifyTys, alwaysBindFun)
 import GHC.Core.Map.Type (TypeMap)
 import GHC.Core.Predicate (isDictId)
 import GHC.Core.InstEnv (InstEnvs, lookupUniqueInstEnv, instanceDFunId)
@@ -355,49 +352,3 @@ resolveInstances env expr = do
   -- Apply the unification using the resolved instances and close it.
   let (expr', unif') = applyUnification expr unif
   closeExpr unif' expr'
-
--- | Transforms the types in the function to match the argument, if possible.
---
--- Note that this thus expects both the function and argument to not contain
--- any type arguments and such. It should just be the case that these could be
--- applied given that their types matched up.
-matchArgsApp
-  :: Alternative m
-  => Monad m
-  => InScopeSet
-  -> CoreExpr
-  -> [CoreExpr]
-  -> m CoreExpr
-matchArgsApp scope fun args = do
-  -- Split the quantifiers and typeclass constraints from the type
-  let funTy = exprType fun
-  let argTys = exprType <$> args
-
-  -- Get the required argument type, that is, the given argument needs to be of
-  -- this type.
-  let (argTysRequired, _) = splitFunTys funTy
-  let argTysRequired' = scaledThing <$> argTysRequired
-
-  -- Try to match the required type for the function to the argument.
-  let subst = mkEmptySubst scope
-  subst' <- maybeM $ tcMatchTysX subst argTysRequired' argTys
-
-  -- Perform the substitution as dictated by the match.
-  let fun' = substExpr subst' fun
-  pure $ mkApps fun' args
-
--- TODO: I think this is dead code. Remove it!
--- TODO: Comment this!
--- TODO: I think we actually want to provide the full substitution no? It would
--- reduce the number of traversals I think. Same for 'matchArgsApp'.
-matchExpr
-  :: Alternative m
-  => Monad m
-  => InScopeSet
-  -> CoreExpr
-  -> Type
-  -> m CoreExpr
-matchExpr scope expr ty = do
-  let subst = mkEmptySubst scope
-  subst' <- maybeM $ tcMatchTyX subst (exprType expr) ty
-  pure $ substExpr subst' expr
