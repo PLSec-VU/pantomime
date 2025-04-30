@@ -17,12 +17,12 @@ oproj obs impl s i = do
   (s', obs o)
 
 sproj :: (s -> s') -> Circuit s i o -> (s -> i -> (s', o))
-sproj obs impl s i = do
-  let (s', o) = impl s i
-  (obs s', o)
+sproj proj circuit s i = do
+  let (s', o) = circuit s i
+  (proj s', o)
 
 sproj' :: (s -> s') -> Circuit s' i o -> (s -> i -> (s', o))
-sproj' obs impl s = impl (obs s)
+sproj' proj circuit s = circuit (proj s)
 
 iproj :: Circuit s0 i i' -> Circuit s1 i' o -> Circuit (s0, s1) i o
 iproj = compose
