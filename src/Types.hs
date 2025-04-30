@@ -2,9 +2,6 @@ module Types
   ( SymCompare (..)
   , Spec (..)
 
-  , UCGenerated (..)
-  , ucGenAnn
-
   , Pass
   , Bind' (..)
   , CoreBind'
@@ -58,25 +55,6 @@ instance Outputable a => Outputable (Spec a) where
 -- named operation perhaps?
 newtype SymCompare a = SymCompare a
   deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
-
--- | An annotation we use to denote binders that were generated for a UC check.
---
--- The checks will perform rewrites that are generally not optimal for codegen.
--- Hence, we create new binders so we can perform rewrites without affecting the
--- final program code. This annotations allows us to track which declarations
--- should eventually be removed.
-newtype UCGenerated a = UCGenerated a
-  deriving (Show, Data, Typeable)
-
--- | Create an annotation to mark that the given binder was generated.
-ucGenAnn :: Data a => a -> CoreBind' -> Annotation
-ucGenAnn x (Bind' var _) = Annotation
-  { ann_target = NamedTarget $ varName var
-  , ann_value = toSerialized serializeWithData (UCGenerated x)
-  }
-
-instance Outputable a => Outputable (UCGenerated a) where
-  ppr x = text "UCGenerated:" <+> ppr x
 
 -- | An always non-recursive binder.
 data Bind' a = Bind' a (Expr a)

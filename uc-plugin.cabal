@@ -28,7 +28,6 @@ library
       GHC.MonadCore
       Lint
       Projection
-      Subst
       Symbolic.Base
       Symbolic.Clash
       Symbolic.Clash.Bit

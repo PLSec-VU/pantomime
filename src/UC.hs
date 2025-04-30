@@ -1,3 +1,4 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
 module UC
   ( plugin
   , SymCompare (..)
@@ -11,7 +12,6 @@ import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
 import GHC.Driver.Config.Core.Lint (initLintConfig)
 import GHC.MonadCore
 
-import Data.Maybe (catMaybes)
 import Data.Data
 
 import Control.Monad.Reader (MonadReader, ReaderT (..), reader)
@@ -32,8 +32,6 @@ plugin = defaultPlugin
   , pluginRecompile = purePlugin
   }
 
--- TODO: We should take in a flag which tells normalisation to lint intermediate
--- steps! Maybe we can just call it debug?
 install :: MonadCore m => [CommandLineOption] -> Pass m [CoreToDo]
 install _ todo = pure $ mconcat
   [ symComparePasses
@@ -41,60 +39,18 @@ install _ todo = pure $ mconcat
   , todo
   ]
   where
-    withProxy proxy ls = ($ proxy) <$> ls
-
-    symComparePasses = withProxy (Proxy @(UCGenerated (SymCompare TH.Name)))
-      [ createUCBindsPass
-      , printAndLintPass
+    symComparePasses =
+      [ printAndLintPass @(SymCompare TH.Name)
       , symComparePass
-      , removeUCBindsPass
       ]
 
     -- TODO: I don't really need to create new binds to do this pass, since I'm
     -- not modifying the binds anyway. Same for the other symbolic check
     -- actually!
-    checkSpecPasses = withProxy (Proxy @(UCGenerated (Spec TH.Name)))
-      [ createUCBindsPass
-      , printAndLintPass
+    checkSpecPasses =
+      [ printAndLintPass @(Spec TH.Name)
       , checkSpecPass
-      , removeUCBindsPass
       ]
-
-createUCBinds
-  :: forall m a b
-   . Data a
-  => Data b
-  => MonadFail m
-  => MonadCore m
-  => (a -> m b)
-  -> Pass m ModGuts
-createUCBinds f guts = do
-  -- FIXME: We should check that there exists strictly one annotation per bind
-  -- (and ideally that all of them are non-recursive).
-  (_, anns) <- liftCore $ getFirstAnnotations @a deserializeWithData guts
-
-  -- Runs the function on the given CoreBind, given that the CoreBind is
-  -- non-recursive.
-  let genBind :: CoreBind -> m (Maybe (b, CoreBind'))
-      genBind = \case
-        NonRec var expr | Just ann <- lookupUFM anns $ varName var -> do
-          let name = "ucgenerated_" <> occNameString (occName var)
-          var' <- freshGlobalVar name $ varType var
-          ann' <- f ann
-          let bind = Bind' var' expr
-          return $ Just (ann', bind)
-        _ -> return Nothing
-
-  -- Get all generated bindings.
-  gen <- catMaybes <$> mapM genBind (mg_binds guts)
-  let annots = uncurry ucGenAnn <$> gen
-  let binds = nonRec . snd <$> gen
-
-  -- Return the guts with the additional binders.
-  return guts
-    { mg_binds = binds <> mg_binds guts
-    , mg_anns = annots <> mg_anns guts
-    }
 
 -- | Run the given pass on all binders that have the given annotation.
 annBindsPass
@@ -104,6 +60,7 @@ annBindsPass
   => (a -> Pass m CoreBind')
   -> Pass m ModGuts
 annBindsPass pass guts = do
+  -- TODO: We should probably run every annotation!
   (_, anns) <- liftCore $ getFirstAnnotations @a deserializeWithData guts
 
   binds <- forM (mg_binds guts) $ \case
@@ -122,42 +79,26 @@ annBindsPassWithGuts f mods = annBindsPass f' mods
   where
     f' a = flip runReaderT mods . f a
 
-createUCBindsPass
-  :: forall a
-   . Data a
-  => Proxy (UCGenerated a)
-  -> CoreToDo
-createUCBindsPass _ = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'createUCBindsPass
-    pass = createUCBinds $ return @_ @a
-
-removeUCBindsPass :: Proxy (UCGenerated a) -> CoreToDo
-removeUCBindsPass _ = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'removeUCBindsPass
-    pass = removeUCBinds
-
 printAndLintPass
   :: forall a
    . Data a
-  => Proxy a
-  -> CoreToDo
-printAndLintPass _ = CoreDoPluginPass name pass
+  => CoreToDo
+printAndLintPass = CoreDoPluginPass name pass
   where
     name = TH.nameBase 'printAndLintPass
     pass = annBindsPassWithGuts $ \(_ :: a) -> printAndLint
 
-symComparePass
-  :: proxy
-  -> CoreToDo
-symComparePass _ = CoreDoPluginPass name pass
+symComparePass :: CoreToDo
+symComparePass = CoreDoPluginPass name pass
   where
     name = TH.nameBase 'symComparePass
     pass = annBindsPassWithGuts symCompare
 
-checkSpecPass :: proxy -> CoreToDo
-checkSpecPass _ = CoreDoPluginPass name pass
+-- TODO: Instead of just running a pass per binder, I want to accumulate the
+-- results for all checks. In fact, this isn't even a pass as we do not modify
+-- the CoreExpr.
+checkSpecPass :: CoreToDo
+checkSpecPass = CoreDoPluginPass name pass
   where
     name = TH.nameBase 'checkSpecPass
     pass = annBindsPassWithGuts checkSpec
@@ -228,9 +169,9 @@ checkSpec
   => MonadCore m
   => HasModGuts' m
   => HasDynFlags m
-  => UCGenerated (Spec TH.Name)
+  => Spec TH.Name
   -> Pass m CoreBind'
-checkSpec (UCGenerated spec) (Bind' var expr) = do
+checkSpec spec (Bind' var expr) = do
   guts <- modGuts'
   let program = mg_binds guts
   let scope = extendInScopeSetBndrs emptyInScopeSet program
@@ -267,9 +208,9 @@ symCompare
   => MonadCore m
   => HasModGuts' m
   => HasDynFlags m
-  => UCGenerated (SymCompare TH.Name)
+  => SymCompare TH.Name
   -> Pass m CoreBind'
-symCompare (UCGenerated (SymCompare other)) (Bind' var expr) = do
+symCompare (SymCompare other) (Bind' var expr) = do
   let resolve name = Var <$> resolveTH' name
 
   other' <- resolve other
@@ -283,8 +224,3 @@ symCompare (UCGenerated (SymCompare other)) (Bind' var expr) = do
     Left err -> do
       dbg err
       fail "Expressions were not equal"
-
--- TODO: Implement this!
-removeUCBinds :: MonadCore m => Pass m ModGuts
-removeUCBinds guts = do
-  pure guts
