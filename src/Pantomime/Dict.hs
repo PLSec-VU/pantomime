@@ -3,7 +3,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module Symbolic.Dict
+module Pantomime.Dict
   ( Dict (..)
   , unsafeDict
   , eqNat

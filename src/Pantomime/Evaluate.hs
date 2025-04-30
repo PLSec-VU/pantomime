@@ -11,7 +11,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
-module Symbolic.Evaluate
+module Pantomime.Evaluate
   ( evaluate
   , MonadEval
   , SymbolicState (..)
@@ -21,25 +21,26 @@ import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
+import GHC.MonadCore
+
+import GHC.Data.Maybe (rightToMaybe, catMaybes)
 
 import Control.Monad (forM)
 import Control.Monad.Except
 
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
+import Data.Composition ((.:))
 
 import Grisette hiding (Rec, (<+>))
 import Grisette.Unified (EvalModeTag (..))
 
-import Symbolic.Util
-import Symbolic.WordSize
-import Symbolic.Runtime
-import Symbolic.Value
-import Symbolic.Environment
-import Symbolic.MonadEval
-import GHC.MonadCore
-import GHC.Data.Maybe (rightToMaybe, catMaybes)
-import Data.Composition ((.:))
+import Pantomime.Util
+import Pantomime.WordSize
+import Pantomime.Runtime
+import Pantomime.Value
+import Pantomime.Environment
+import Pantomime.MonadEval
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate

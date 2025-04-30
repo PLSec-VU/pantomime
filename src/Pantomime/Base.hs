@@ -1,7 +1,7 @@
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
-module Symbolic.Base
+module Pantomime.Base
   ( baseValues
   , integerToInt'#
   ) where
@@ -21,11 +21,11 @@ import Grisette
 
 import Util
 
-import Symbolic.Value
-import Symbolic.MonadEval
-import Symbolic.WordSize
-import Symbolic.Runtime
-import Symbolic.Clash.Util
+import Pantomime.Value
+import Pantomime.MonadEval
+import Pantomime.WordSize
+import Pantomime.Runtime
+import Pantomime.Clash.Util
 
 baseValues
   :: forall m ws

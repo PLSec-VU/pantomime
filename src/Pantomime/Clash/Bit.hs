@@ -4,7 +4,7 @@
 {-# LANGUAGE TypeAbstractions #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Symbolic.Clash.Bit
+module Pantomime.Clash.Bit
   ( clashInterp
   ) where
 
@@ -28,15 +28,15 @@ import Control.Monad.Except (MonadError (..))
 
 import Data.Typeable (cast)
 
-import Symbolic.MonadEval
-import Symbolic.Value
-import Symbolic.WordSize
-import Symbolic.Runtime
-import Symbolic.Util
-import Symbolic.Clash.Util
-import Symbolic.Dict
-import Symbolic.Sized.BitVector
-import Symbolic.Sized.Class
+import Pantomime.MonadEval
+import Pantomime.Value
+import Pantomime.WordSize
+import Pantomime.Runtime
+import Pantomime.Util
+import Pantomime.Clash.Util
+import Pantomime.Dict
+import Pantomime.Sized.BitVector
+import Pantomime.Sized.Class
 
 clashInterp
   :: forall m ws

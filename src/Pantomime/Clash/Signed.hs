@@ -3,7 +3,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeAbstractions #-}
 
-module Symbolic.Clash.Signed
+module Pantomime.Clash.Signed
   ( clashInterp
   ) where
 
@@ -47,14 +47,14 @@ import Data.Bits (Bits (..))
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
 
-import Symbolic.Value
-import Symbolic.MonadEval
-import Symbolic.Runtime
-import Symbolic.Util
-import Symbolic.WordSize
-import Symbolic.Clash.Util
-import Symbolic.Sized.BitVector
-import Symbolic.Dict (normNumLitTy)
+import Pantomime.Value
+import Pantomime.MonadEval
+import Pantomime.Runtime
+import Pantomime.Util
+import Pantomime.WordSize
+import Pantomime.Clash.Util
+import Pantomime.Sized.BitVector
+import Pantomime.Dict (normNumLitTy)
 
 clashInterp
   :: forall m ws

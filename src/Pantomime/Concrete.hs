@@ -14,7 +14,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeAbstractions #-}
 
-module Symbolic.Concrete
+module Pantomime.Concrete
   ( Concrete (..)
   , concretise
   ) where
@@ -35,14 +35,14 @@ import Control.Monad (forM)
 
 import Data.Typeable (cast)
 
-import Symbolic.WordSize
-import Symbolic.Value
-import Symbolic.Runtime
-import Symbolic.Util
-import Symbolic.Evaluate
-import Symbolic.MonadEval
-import Symbolic.Dict
-import Symbolic.Sized.BitVector
+import Pantomime.WordSize
+import Pantomime.Value
+import Pantomime.Runtime
+import Pantomime.Util
+import Pantomime.Evaluate
+import Pantomime.MonadEval
+import Pantomime.Dict
+import Pantomime.Sized.BitVector
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.

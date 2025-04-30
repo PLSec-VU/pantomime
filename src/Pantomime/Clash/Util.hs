@@ -1,7 +1,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
 
-module Symbolic.Clash.Util
+module Pantomime.Clash.Util
   ( lookupThId
   , lookupThTyCon
   , concreteNat
@@ -28,10 +28,10 @@ import Control.Applicative (Alternative (empty))
 
 import Util
 
-import Symbolic.Value
-import Symbolic.WordSize
-import Symbolic.Runtime
-import Symbolic.Sized.BitVector
+import Pantomime.Value
+import Pantomime.WordSize
+import Pantomime.Runtime
+import Pantomime.Sized.BitVector
 
 lookupThId
   :: MonadCore m

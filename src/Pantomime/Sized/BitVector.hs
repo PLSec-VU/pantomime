@@ -8,7 +8,7 @@
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module Symbolic.Sized.BitVector
+module Pantomime.Sized.BitVector
   ( IntN' (..)
   , WordN' (..)
   ) where
@@ -22,8 +22,8 @@ import qualified Grisette.Unified as Unified
 import Data.Bits (Bits (..), FiniteBits (..))
 import Data.Data (Proxy(..))
 
-import Symbolic.Dict (withSize, Dict (..), unsafeDict)
-import Symbolic.Sized.Class
+import Pantomime.Dict (withSize, Dict (..), unsafeDict)
+import Pantomime.Sized.Class
 
 data IntN' (mode :: EvalModeTag) (n :: Natural) where
   IntZ :: IntN' mode 0

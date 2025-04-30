@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 
-module Symbolic.Util
+module Pantomime.Util
   ( foldM'
   , foldM_'
   , foldrM'

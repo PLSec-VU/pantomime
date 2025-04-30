@@ -7,7 +7,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeAbstractions #-}
 
-module Symbolic.Value
+module Pantomime.Value
   ( Value (..)
   , mkCast'
   , dumpValue
@@ -76,12 +76,12 @@ import Clash.Prelude (BitVector, Unsigned, Signed, Bit)
 
 import Util (getFamInstEnvs')
 
-import Symbolic.Util
-import Symbolic.WordSize
-import Symbolic.Runtime
-import Symbolic.MonadEval
-import Symbolic.Dict
-import Symbolic.Sized.BitVector
+import Pantomime.Util
+import Pantomime.WordSize
+import Pantomime.Runtime
+import Pantomime.MonadEval
+import Pantomime.Dict
+import Pantomime.Sized.BitVector
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where

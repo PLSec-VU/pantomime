@@ -14,7 +14,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 
-module Symbolic.Runtime
+module Pantomime.Runtime
   ( RuntimeValue (..)
   , unRuntimeC
   , unRuntimeS

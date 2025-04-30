@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE DataKinds #-}
 
-module Symbolic.MonadEval
+module Pantomime.MonadEval
   ( MonadEval
   , EvalError (..)
 
@@ -37,7 +37,7 @@ import Data.Composition ((.:.))
 
 import Types (HasModGuts')
 
-import Symbolic.Runtime
+import Pantomime.Runtime
 
 -- TODO: Remove MonadCore from the requirements.
 type MonadEval m =

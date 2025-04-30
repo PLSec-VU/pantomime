@@ -2,20 +2,20 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeAbstractions #-}
-module Symbolic.Clash
+module Pantomime.Clash
   ( clashInterp
   ) where
 
 import GHC.Plugins
 
-import qualified Symbolic.Clash.BitVector as BitVector
-import qualified Symbolic.Clash.Unsigned as Unsigned
-import qualified Symbolic.Clash.Signed as Signed
-import qualified Symbolic.Clash.Bit as Bit
+import qualified Pantomime.Clash.BitVector as BitVector
+import qualified Pantomime.Clash.Unsigned as Unsigned
+import qualified Pantomime.Clash.Signed as Signed
+import qualified Pantomime.Clash.Bit as Bit
 
-import Symbolic.MonadEval
-import Symbolic.Value
-import Symbolic.WordSize
+import Pantomime.MonadEval
+import Pantomime.Value
+import Pantomime.WordSize
 
 clashInterp
   :: forall m ws

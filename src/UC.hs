@@ -24,7 +24,7 @@ import qualified Projection
 import Types
 import Util
 import Unification
-import Symbolic.Solve
+import Pantomime.Solve
 
 plugin :: Plugin
 plugin = defaultPlugin

@@ -4,7 +4,7 @@
 {-# LANGUAGE TypeAbstractions #-}
 {-# LANGUAGE TypeOperators #-}
 
-module Symbolic.Clash.BitVector
+module Pantomime.Clash.BitVector
   ( clashInterp
   ) where
 
@@ -49,15 +49,15 @@ import Data.Typeable (cast, Proxy (..))
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
 
-import Symbolic.Value
-import Symbolic.MonadEval
-import Symbolic.Runtime
-import Symbolic.Util
-import Symbolic.WordSize
-import Symbolic.Dict
-import Symbolic.Clash.Util
-import Symbolic.Sized.BitVector
-import Symbolic.Sized.Class
+import Pantomime.Value
+import Pantomime.MonadEval
+import Pantomime.Runtime
+import Pantomime.Util
+import Pantomime.WordSize
+import Pantomime.Dict
+import Pantomime.Clash.Util
+import Pantomime.Sized.BitVector
+import Pantomime.Sized.Class
 
 clashInterp
   :: forall m ws

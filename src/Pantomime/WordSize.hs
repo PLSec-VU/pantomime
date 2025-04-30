@@ -11,7 +11,7 @@
 {-# LANGUAGE UndecidableSuperClasses #-}
 -- {-# LANGUAGE UndecidableInstances #-}
 
-module Symbolic.WordSize
+module Pantomime.WordSize
   ( KnownWordSize
   , WordBits
   , KnownPos

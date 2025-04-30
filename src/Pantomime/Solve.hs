@@ -17,7 +17,7 @@
 -- be a lot of obsolete stuff. Perhaps its good to first find out which flags
 -- are actually used.
 
-module Symbolic.Solve
+module Pantomime.Solve
   ( NonEq (..)
   , exprSymEq
   ) where
@@ -50,18 +50,18 @@ import Data.Foldable (forM_)
 
 import Types (HasModGuts' (..))
 
-import Symbolic.WordSize
-import Symbolic.Evaluate
-import Symbolic.Environment
-import Symbolic.Value
-import Symbolic.Concrete
-import Symbolic.Runtime
-import Symbolic.MonadEval
+import Pantomime.WordSize
+import Pantomime.Evaluate
+import Pantomime.Environment
+import Pantomime.Value
+import Pantomime.Concrete
+import Pantomime.Runtime
+import Pantomime.MonadEval
 
 -- TODO: These modules should just get their own package such that a user can
 -- just provide the interpretations they require for the code!
-import Symbolic.Base
-import Symbolic.Clash
+import Pantomime.Base
+import Pantomime.Clash
 
 -- TODO: Rename this thing.
 data NonEq

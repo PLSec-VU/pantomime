@@ -4,10 +4,11 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE TypeAbstractions #-}
 
-module Symbolic.Sized.Class
+module Pantomime.Sized.Class
   ( SizedBV' (..)
   , sizedBVSelect'
   ) where
+
 import GHC.TypeNats (type (<=), type (+), KnownNat)
 import Data.Data (Proxy(..))
 

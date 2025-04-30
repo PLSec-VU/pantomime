@@ -27,26 +27,26 @@ library
   exposed-modules:
       GHC.MonadCore
       Lint
+      Pantomime.Base
+      Pantomime.Clash
+      Pantomime.Clash.Bit
+      Pantomime.Clash.BitVector
+      Pantomime.Clash.Signed
+      Pantomime.Clash.Unsigned
+      Pantomime.Clash.Util
+      Pantomime.Concrete
+      Pantomime.Dict
+      Pantomime.Environment
+      Pantomime.Evaluate
+      Pantomime.MonadEval
+      Pantomime.Runtime
+      Pantomime.Sized.BitVector
+      Pantomime.Sized.Class
+      Pantomime.Solve
+      Pantomime.Util
+      Pantomime.Value
+      Pantomime.WordSize
       Projection
-      Symbolic.Base
-      Symbolic.Clash
-      Symbolic.Clash.Bit
-      Symbolic.Clash.BitVector
-      Symbolic.Clash.Signed
-      Symbolic.Clash.Unsigned
-      Symbolic.Clash.Util
-      Symbolic.Concrete
-      Symbolic.Dict
-      Symbolic.Environment
-      Symbolic.Evaluate
-      Symbolic.MonadEval
-      Symbolic.Runtime
-      Symbolic.Sized.BitVector
-      Symbolic.Sized.Class
-      Symbolic.Solve
-      Symbolic.Util
-      Symbolic.Value
-      Symbolic.WordSize
       Types
       UC
       Unification

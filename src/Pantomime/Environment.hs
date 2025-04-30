@@ -1,4 +1,4 @@
-module Symbolic.Environment
+module Pantomime.Environment
   ( Environment (..)
   , emptyEnv
   , lookupLocalEnv
@@ -17,9 +17,9 @@ import Control.Monad (foldM)
 import Control.Monad.Except (MonadError (..))
 import Control.Applicative (Alternative(..))
 
-import Symbolic.Value
-import Symbolic.Util
-import Symbolic.MonadEval
+import Pantomime.Value
+import Pantomime.Util
+import Pantomime.MonadEval
 
 -- TODO: Add comments to this module! In short, an environment is like a Subst,
 -- but for symbolic lookups.
