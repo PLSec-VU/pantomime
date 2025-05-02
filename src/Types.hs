@@ -1,12 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Types
-  ( Pass
-  , Bind' (..)
-  , CoreBind'
-  , nonRec
-
-  , HasModGuts (..)
+  ( HasModGuts (..)
   , HasModGuts' (..)
   , HasRuleEnv (..)
   ) where
@@ -18,22 +13,6 @@ import Control.Monad.Reader (MonadReader (..), ReaderT)
 import Control.Monad.Except (ExceptT)
 import Control.Monad.State (StateT)
 import Control.Monad.Trans.Maybe (MaybeT)
-
--- | An always non-recursive binder.
-data Bind' a = Bind' a (Expr a)
-
--- | Transform an always non-recursive binder into a normal binder.
-nonRec :: Bind' a -> Bind a
-nonRec (Bind' x e) = NonRec x e
-
-instance OutputableBndr a => Outputable (Bind' a) where
-  ppr (Bind' x e) = ppr $ NonRec x e
-
--- | A core binder that is non-recursive.
-type CoreBind' = Bind' CoreBndr
-
--- | A pass transforms some value of type a inside of monad m.
-type Pass m a = a -> m a
 
 -- | Anything that has module guts.
 class HasModGuts a where

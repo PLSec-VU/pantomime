@@ -1,7 +1,5 @@
 module Util
-  ( bindPass
-
-  , maybeM
+  ( maybeM
   , unwrap
   , (??=)
 
@@ -46,10 +44,6 @@ import Lens.Micro (Lens)
 
 import Types
 import GHC.Core.FamInstEnv (FamInstEnvs)
-
--- | Maps an expression pass over a binder.
-bindPass :: Functor m => Pass m (Expr a) -> Pass m (Bind' a)
-bindPass f (Bind' x e) = Bind' x <$> f e
 
 -- | Convert the given maybe into an alternative.
 maybeM :: Alternative m => Maybe a -> m a
@@ -168,11 +162,7 @@ resolveTH
   -> m Var
 resolveTH thName = do
   name <- thNameToGhcName' thName
-  let lookupLocal' = do
-        Bind' x _ <- lookupLocal $ \v -> varName v == name
-        pure x
-  let lookupId' = liftCore $ lookupId name
-  lookupLocal' <|> lookupId'
+  asum [lookupLocal name, liftCore $ lookupId name]
 
 -- | Same as `lookupTH`, but emits an error on failure.
 resolveTH'
@@ -184,17 +174,17 @@ resolveTH'
 resolveTH' name = resolveTH name
   ??= "Could not resolve expression: " <> TH.nameBase name
 
--- | Lookup a local non-recursive binder.
+-- | Lookup a local non-recursive variable.
 lookupLocal
   :: Alternative m
   => HasModGuts' m
-  => (Var -> Bool)
-  -> m CoreBind'
-lookupLocal cmp = do
+  => Name
+  -> m Var
+lookupLocal name = do
   prog <- mg_binds <$> modGuts'
   let firstJust f = maybeM . listToMaybe . mapMaybe f
   let cmp' = \case
-        NonRec x e | cmp x -> Just $ Bind' x e
+        NonRec x _ | name == varName x -> Just x
         _ -> Nothing
   firstJust cmp' prog
 
