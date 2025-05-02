@@ -27,11 +27,12 @@ import Control.Monad.Trans.Maybe
 import Control.Monad ((>=>))
 import Control.Monad.State (state, runState)
 
-import GHC.MonadCore
 import GHC.Plugins hiding (empty, (<>))
+import GHC.MonadCore
 import GHC.Types.TyThing (lookupId)
 import GHC.Core.InstEnv (InstEnvs (..))
 import GHC.Core.TyCo.Rep (Scaled (..))
+import GHC.Core.FamInstEnv (FamInstEnvs)
 import GHC.Unit.External (eps_inst_env)
 
 import qualified Language.Haskell.TH.Syntax as TH
@@ -42,8 +43,7 @@ import Data.Generics.Schemes (everywhere)
 
 import Lens.Micro (Lens)
 
-import Types
-import GHC.Core.FamInstEnv (FamInstEnvs)
+import Pantomime.Monad.GHC
 
 -- | Convert the given maybe into an alternative.
 maybeM :: Alternative m => Maybe a -> m a

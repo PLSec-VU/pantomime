@@ -14,17 +14,17 @@ import GHC.MonadCore
 
 import Data.Data
 
-import Control.Monad.Reader (MonadReader, ReaderT (..), reader)
+import Control.Monad.Reader (ReaderT (..))
 import Control.Monad (forM)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
 import qualified Projection
-import Types
 import Util
 import Unification
 import Pantomime.Solve
 import Pantomime.Annotation
+import Pantomime.Monad.GHC
 
 -- | An always non-recursive binder.
 data Bind' a = Bind' a (Expr a)
@@ -120,13 +120,12 @@ checkSpecPass = CoreDoPluginPass name pass
 
 printAndLint
   :: MonadCore m
-  => MonadReader r m
-  => HasModGuts r
+  => HasModGuts' m
   => Pass m CoreBind'
 printAndLint bind = do
   dflags <- liftCore getDynFlags
   let cfg = initLintConfig dflags []
-  prog <- reader $ mg_binds . modGuts
+  prog <- mg_binds <$> modGuts'
   let res = lintCoreBindings' cfg prog
   dbg bind
   dbg res

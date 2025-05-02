@@ -48,8 +48,7 @@ import Control.Monad (forM, unless)
 import Data.Functor ((<&>))
 import Data.Foldable (forM_)
 
-import Types (HasModGuts' (..))
-
+import Pantomime.Monad.GHC
 import Pantomime.WordSize
 import Pantomime.Evaluate
 import Pantomime.Environment

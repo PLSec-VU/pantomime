@@ -39,6 +39,7 @@ library
       Pantomime.Dict
       Pantomime.Environment
       Pantomime.Evaluate
+      Pantomime.Monad.GHC
       Pantomime.MonadEval
       Pantomime.Passes
       Pantomime.Runtime
@@ -49,7 +50,6 @@ library
       Pantomime.Value
       Pantomime.WordSize
       Projection
-      Types
       Unification
       Util
   other-modules:

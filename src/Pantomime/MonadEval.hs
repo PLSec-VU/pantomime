@@ -35,8 +35,7 @@ import Control.Monad.State (MonadState (..))
 
 import Data.Composition ((.:.))
 
-import Types (HasModGuts')
-
+import Pantomime.Monad.GHC (HasModGuts')
 import Pantomime.Runtime
 
 -- TODO: Remove MonadCore from the requirements.
