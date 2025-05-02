@@ -3,16 +3,10 @@ module Util
   , unwrap
   , (??=)
 
-  , fuse
-  , (<|-|>)
-
   , accumL
   , (%~~)
   , freshId
   , freshIds
-  , freshLocalVar
-  , freshGlobalVar
-  , zapOccInfo
 
   , resolveTH
   , resolveTH'
@@ -37,8 +31,6 @@ import GHC.Unit.External (eps_inst_env)
 import qualified Language.Haskell.TH.Syntax as TH
 
 import Data.Maybe (mapMaybe, listToMaybe)
-import Data.Generics.Aliases (mkT)
-import Data.Generics.Schemes (everywhere)
 
 import Lens.Micro (Lens)
 
@@ -59,14 +51,6 @@ infixl 0 ??=
 -- | An infix version of [`unwrap`].
 (??=) :: MonadFail m => MaybeT m a -> String -> m a
 (??=) = unwrap
-
--- | Fuse all the given passes; the first succesful pass wil return its result.
-fuse :: Alternative m => [a -> m b] -> a -> m b
-fuse = foldl' (<|-|>) $ const empty
-
--- | Fuses two passes; the first succesful pass will return its result.
-(<|-|>) :: Alternative m => (a -> m b) -> (a -> m b) -> (a -> m b)
-(<|-|>) p p' e = p e <|> p' e
 
 -- | Accumulate a stateful function over a traversable input.
 accumL :: Traversable f => (a -> s -> (b, s)) -> f a -> s -> (f b, s)
@@ -122,35 +106,6 @@ freshIds
   -> InScopeSet
   -> (f Id, InScopeSet)
 freshIds = accumL $ uncurry freshId
-
--- TODO: I think we don't use this anymore. We should prune it!
--- | Creates a fresh variable.
-freshLocalVar :: MonadCore m => String -> Mult -> Type -> m Var
-freshLocalVar name mult ty = do
-  unique <- liftCore getUniqueM
-  let name' = mkSystemName unique $ mkVarOcc name
-  let var = mkLocalVar VanillaId name' mult ty vanillaIdInfo
-  return var
-
--- TODO: I think we don't use this anymore. We should prune it!
--- | Creates a fresh variable.
-freshGlobalVar :: MonadCore m => String -> Type -> m Var
-freshGlobalVar name ty = do
-  unique <- liftCore getUniqueM
-  let name' = mkSystemName unique $ mkVarOcc name
-  let var = mkGlobalVar VanillaId name' ty vanillaIdInfo
-  return var
-
--- | Zap occurance information of an expression.
---
--- The main purpose for this function is to inspect variable shadowing of a term
--- within the context of dead variables, which are not printed otherwise.
-zapOccInfo :: CoreExpr -> CoreExpr
-zapOccInfo = everywhere $ mkT zap
-  where
-    zap var
-      | isId var = zapIdOccInfo var
-      | otherwise = var
 
 -- | Resolves a template haskell name to a non-recursive variable.
 resolveTH
