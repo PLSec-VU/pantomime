@@ -20,7 +20,7 @@ import qualified Language.Haskell.TH.Syntax as TH
 
 import qualified Projection
 import Util
-import Unification
+import Pantomime.Unification
 import Pantomime.Solve
 import Pantomime.Annotation
 import Pantomime.Monad.GHC

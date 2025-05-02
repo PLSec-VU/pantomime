@@ -1,5 +1,5 @@
 -- TODO: Add module docs.
-module Unification
+module Pantomime.Unification
   ( unifyApp
   , unifyApps
   , unifyExprs

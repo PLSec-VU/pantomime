@@ -42,7 +42,7 @@ instance MonadCore m => MonadCore (ExceptT s m) where
 -- FIXME: We should perhaps make a wrapper for CoreM, because this orphan is
 -- not so nice...
 instance MonadFail CoreM where
-  fail msg = liftIO $ ioError (userError msg)
+  fail = liftIO . ioError . userError
 
 -- | Debug print GHC structures in a CoreM monad stack.
 dbg :: (MonadCore m, Outputable o) => o -> m ()

@@ -45,11 +45,11 @@ library
       Pantomime.Sized.BitVector
       Pantomime.Sized.Class
       Pantomime.Solve
+      Pantomime.Unification
       Pantomime.Util
       Pantomime.Value
       Pantomime.WordSize
       Projection
-      Unification
       Util
   other-modules:
       Paths_uc_plugin
