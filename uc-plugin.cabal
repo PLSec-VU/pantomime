@@ -27,6 +27,7 @@ library
   exposed-modules:
       GHC.MonadCore
       Lint
+      Pantomime
       Pantomime.Base
       Pantomime.Clash
       Pantomime.Clash.Bit
@@ -39,6 +40,7 @@ library
       Pantomime.Environment
       Pantomime.Evaluate
       Pantomime.MonadEval
+      Pantomime.Passes
       Pantomime.Runtime
       Pantomime.Sized.BitVector
       Pantomime.Sized.Class
@@ -123,7 +125,7 @@ executable uc-plugin-exe
       TemplateHaskell
       TupleSections
       TypeApplications
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -fplugin UC -fexpose-all-unfoldings
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -fplugin Pantomime -fexpose-all-unfoldings
   build-depends:
       QuickCheck
     , base >=4.7 && <5

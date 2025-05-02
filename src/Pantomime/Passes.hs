@@ -1,9 +1,9 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-module UC
-  ( plugin
-  , SymCompare (..)
-  , Spec (..)
-  , Projection.Circuit
+
+module Pantomime.Passes
+  ( printAndLintPass
+  , symComparePass
+  , checkSpecPass
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
@@ -26,32 +26,9 @@ import Util
 import Unification
 import Pantomime.Solve
 
-plugin :: Plugin
-plugin = defaultPlugin
-  { installCoreToDos = install
-  , pluginRecompile = purePlugin
-  }
-
-install :: MonadCore m => [CommandLineOption] -> Pass m [CoreToDo]
-install _ todo = pure $ mconcat
-  [ symComparePasses
-  , checkSpecPasses
-  , todo
-  ]
-  where
-    symComparePasses =
-      [ printAndLintPass @(SymCompare TH.Name)
-      , symComparePass
-      ]
-
-    -- TODO: I don't really need to create new binds to do this pass, since I'm
-    -- not modifying the binds anyway. Same for the other symbolic check
-    -- actually!
-    checkSpecPasses =
-      [ printAndLintPass @(Spec TH.Name)
-      , checkSpecPass
-      ]
-
+-- TODO: These passes do not modify the code. Should we make this less general
+-- on the modification side?
+--
 -- | Run the given pass on all binders that have the given annotation.
 annBindsPass
   :: forall m a
@@ -97,6 +74,8 @@ symComparePass = CoreDoPluginPass name pass
 -- TODO: Instead of just running a pass per binder, I want to accumulate the
 -- results for all checks. In fact, this isn't even a pass as we do not modify
 -- the CoreExpr.
+-- TODO: I think the name on this function should be different. It is not really
+-- indicative what it checks now.
 checkSpecPass :: CoreToDo
 checkSpecPass = CoreDoPluginPass name pass
   where

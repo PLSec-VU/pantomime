@@ -71,7 +71,7 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
-    - -fplugin UC
+    - -fplugin Pantomime
     - -fexpose-all-unfoldings
     dependencies:
     - uc-plugin
