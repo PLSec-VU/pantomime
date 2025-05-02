@@ -19,7 +19,7 @@ import Control.Monad (forM)
 import qualified Language.Haskell.TH.Syntax as TH
 
 import qualified Pantomime.Combinator as Combinator
-import Util
+import Pantomime.Util
 import Pantomime.Unification
 import Pantomime.Solve
 import Pantomime.Annotation

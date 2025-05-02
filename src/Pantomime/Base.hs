@@ -18,14 +18,13 @@ import Control.Monad.Except (MonadError(..))
 
 import Grisette
 
-import Util
-
 import Pantomime.Value
 import Pantomime.MonadEval
 import Pantomime.WordSize
 import Pantomime.Runtime
 import Pantomime.Clash.Util
 import Pantomime.Monad.GHC
+import Pantomime.Util
 
 baseValues
   :: forall m ws

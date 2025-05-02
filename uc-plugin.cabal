@@ -50,7 +50,6 @@ library
       Pantomime.Util
       Pantomime.Value
       Pantomime.WordSize
-      Util
   other-modules:
       Paths_uc_plugin
   autogen-modules:

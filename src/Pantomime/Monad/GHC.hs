@@ -19,11 +19,10 @@ import GHC.Unit.External (eps_inst_env)
 
 import GHC.Data.Maybe (mapMaybe, listToMaybe)
 
-import Control.Applicative
-import Control.Monad ((>=>))
-
 import qualified Language.Haskell.TH as TH
 
+import Control.Applicative
+import Control.Monad ((>=>))
 import Control.Monad.Trans.Class (MonadTrans (..))
 import Control.Monad.Reader (MonadReader (reader), ReaderT)
 import Control.Monad.Except (ExceptT)
@@ -31,7 +30,7 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Control.Monad.Trans.Maybe (MaybeT)
 
-import Util
+import Pantomime.Util
 
 class Monad m => MonadCore m where
   liftCore :: CoreM a -> m a

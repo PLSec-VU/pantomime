@@ -24,7 +24,7 @@ import Control.Monad (guard)
 import Lens.Micro
 import Lens.Micro.Extras (view)
 
-import Util
+import Pantomime.Util
 
 -- | Mapping used to track information for unification.
 data Unification = Unification

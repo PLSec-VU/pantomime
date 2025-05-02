@@ -30,7 +30,7 @@ import Pantomime.WordSize
 import Pantomime.Runtime
 import Pantomime.Sized.BitVector
 import Pantomime.Monad.GHC
-import Util
+import Pantomime.Util
 
 lookupThId
   :: MonadCore m
