@@ -5,36 +5,13 @@ module Util
 
   , accumL
   , (%~~)
-  , freshId
-  , freshIds
-
-  , resolveTH
-  , resolveTH'
-  , lookupLocal
-  , thNameToGhcName'
-  , getInstEnvs'
-  , getFamInstEnvs'
   ) where
 
 import Control.Applicative
 import Control.Monad.Trans.Maybe
-import Control.Monad ((>=>))
 import Control.Monad.State (state, runState)
 
-import GHC.Plugins hiding (empty, (<>))
-import GHC.Types.TyThing (lookupId)
-import GHC.Core.InstEnv (InstEnvs (..))
-import GHC.Core.TyCo.Rep (Scaled (..))
-import GHC.Core.FamInstEnv (FamInstEnvs)
-import GHC.Unit.External (eps_inst_env)
-
-import qualified Language.Haskell.TH.Syntax as TH
-
-import Data.Maybe (mapMaybe, listToMaybe)
-
 import Lens.Micro (Lens)
-
-import Pantomime.Monad.GHC
 
 -- | Convert the given maybe into an alternative.
 maybeM :: Alternative m => Maybe a -> m a
@@ -75,108 +52,3 @@ infixr 4 %~~
 -- ```
 (%~~) :: Lens s t a b -> (a -> (c, b)) -> s -> (c, t)
 (%~~) = ($)
-
--- | Create a fresh variable.
---
--- Fetches a locally fresh unique from the in-scope set of the substitution.
--- Created the new identifier as per the arguments and adds it to the in-scope
--- set of the given substitution. In this way, one can create a new fresh id
--- with this updated substitution.
-freshId
-  :: String
-  -> Scaled Type
-  -> InScopeSet
-  -> (Id, InScopeSet)
-freshId name (Scaled mult ty) scope = do
-  -- Get a new unique value.
-  let unique = unsafeGetFreshLocalUnique scope
-
-  -- Create the fresh identifier.
-  let name' = mkSystemName unique $ mkVarOcc name
-  let identifier = mkLocalId name' mult ty
-
-  -- Extend the scope and return it, together with the fresh identifier.
-  let scope' = extendInScopeSet scope identifier
-  (identifier, scope')
-
--- | Get multiple fresh identifiers via `freshId`.
-freshIds
-  :: Traversable f
-  => f (String, Scaled Type)
-  -> InScopeSet
-  -> (f Id, InScopeSet)
-freshIds = accumL $ uncurry freshId
-
--- | Resolves a template haskell name to a non-recursive variable.
-resolveTH
-  :: Alternative m
-  => MonadCore m
-  => HasModGuts' m
-  => TH.Name
-  -> m Var
-resolveTH thName = do
-  name <- thNameToGhcName' thName
-  asum [lookupLocal name, liftCore $ lookupId name]
-
--- | Same as `lookupTH`, but emits an error on failure.
-resolveTH'
-  :: MonadFail m
-  => MonadCore m
-  => HasModGuts' m
-  => TH.Name
-  -> m Var
-resolveTH' name = resolveTH name
-  ??= "Could not resolve expression: " <> TH.nameBase name
-
--- | Lookup a local non-recursive variable.
-lookupLocal
-  :: Alternative m
-  => HasModGuts' m
-  => Name
-  -> m Var
-lookupLocal name = do
-  prog <- mg_binds <$> modGuts'
-  let firstJust f = maybeM . listToMaybe . mapMaybe f
-  let cmp' = \case
-        NonRec x _ | name == varName x -> Just x
-        _ -> Nothing
-  firstJust cmp' prog
-
--- | Attempts to convert a template haskell name into a Core name. Wrapper of
--- `thNameToGhcName`, but made polymorphic on the monad.
-thNameToGhcName' :: Alternative m => MonadCore m => TH.Name -> m Name
-thNameToGhcName' = liftCore . thNameToGhcName >=> maybeM
-
--- | Fetch the instance environments.
---
--- Get the instance environments from a CoreM pass instead of the typechecker
--- pass.
-getInstEnvs'
-  :: MonadCore m
-  => HasModGuts' m
-  => m InstEnvs
-getInstEnvs' = do
-  -- Get the global definitions
-  hscEnv <- liftCore getHscEnv
-  eps <- liftCore . liftIO $ hscEPS hscEnv
-  let global = eps_inst_env eps
-
-  -- Get the local definitions
-  local <- mg_inst_env <$> modGuts'
-
-  -- Return the instance environments
-  return $ InstEnvs
-    { ie_global = global
-    , ie_local = local
-    -- TODO: Get actual visible orphan modules
-    , ie_visible = mkModuleSet []
-    }
-
-getFamInstEnvs'
-  :: MonadCore m
-  => HasModGuts' m
-  => m FamInstEnvs
-getFamInstEnvs' = do
-  local <- mg_fam_inst_env <$> modGuts'
-  global <- liftCore getPackageFamInstEnv
-  pure (local, global)
