@@ -28,7 +28,6 @@ import Control.Monad ((>=>))
 import Control.Monad.State (state, runState)
 
 import GHC.Plugins hiding (empty, (<>))
-import GHC.MonadCore
 import GHC.Types.TyThing (lookupId)
 import GHC.Core.InstEnv (InstEnvs (..))
 import GHC.Core.TyCo.Rep (Scaled (..))

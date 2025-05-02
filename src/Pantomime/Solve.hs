@@ -26,7 +26,6 @@ import GHC.Plugins
 import GHC.Platform (PlatformWordSize (..), Platform (..))
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Tc.Utils.TcType (eqType, tcSplitSigmaTy)
-import GHC.MonadCore
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette

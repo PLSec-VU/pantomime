@@ -16,7 +16,6 @@ import GHC.Types.TyThing (MonadThings (..))
 import GHC.TypeNats
 import GHC.Data.Maybe (rightToMaybe)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.MonadCore
 
 import qualified Language.Haskell.TH as TH
 
@@ -32,6 +31,7 @@ import Pantomime.Value
 import Pantomime.WordSize
 import Pantomime.Runtime
 import Pantomime.Sized.BitVector
+import Pantomime.Monad.GHC
 
 lookupThId
   :: MonadCore m

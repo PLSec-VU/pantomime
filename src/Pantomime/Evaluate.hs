@@ -21,7 +21,6 @@ import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
-import GHC.MonadCore
 
 import GHC.Data.Maybe (rightToMaybe, catMaybes)
 
@@ -41,6 +40,7 @@ import Pantomime.Runtime
 import Pantomime.Value
 import Pantomime.Environment
 import Pantomime.MonadEval
+import Pantomime.Monad.GHC
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate

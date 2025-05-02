@@ -17,7 +17,6 @@ module Pantomime.MonadEval
   ) where
 
 import GHC.Plugins
-import GHC.MonadCore
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette 
@@ -35,7 +34,7 @@ import Control.Monad.State (MonadState (..))
 
 import Data.Composition ((.:.))
 
-import Pantomime.Monad.GHC (HasModGuts')
+import Pantomime.Monad.GHC
 import Pantomime.Runtime
 
 -- TODO: Remove MonadCore from the requirements.

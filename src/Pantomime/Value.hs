@@ -48,7 +48,6 @@ import GHC.Tc.Utils.TcType (hasTyVarHead, isTyFamFree)
 import GHC.Types.TyThing (MonadThings(..))
 import GHC.TypeLits (SomeNat (..), someNatVal)
 import GHC.Platform (PlatformWordSize)
-import GHC.MonadCore
 
 import Grisette.SymPrim
 import Grisette.Unified (EvalModeTag (..), GetIntN, GetWordN)
@@ -82,6 +81,7 @@ import Pantomime.Runtime
 import Pantomime.MonadEval
 import Pantomime.Dict
 import Pantomime.Sized.BitVector
+import Pantomime.Monad.GHC
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where

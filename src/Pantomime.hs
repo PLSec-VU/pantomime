@@ -6,13 +6,13 @@ module Pantomime
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
-import GHC.MonadCore
 
 import qualified Language.Haskell.TH.Syntax as TH
 
 import qualified Projection
 import Pantomime.Annotation
 import Pantomime.Passes
+import Pantomime.Monad.GHC
 
 plugin :: Plugin
 plugin = defaultPlugin

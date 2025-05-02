@@ -10,7 +10,6 @@ import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Lint
 import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
 import GHC.Driver.Config.Core.Lint (initLintConfig)
-import GHC.MonadCore
 
 import Data.Data
 

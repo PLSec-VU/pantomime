@@ -8,7 +8,6 @@ module Pantomime.Base
 
 import GHC.Plugins
 import GHC.Types.TyThing (lookupId)
-import GHC.MonadCore
 import GHC.Base (noinline)
 
 import GHC.Real (overflowError, divZeroError)
@@ -26,6 +25,7 @@ import Pantomime.MonadEval
 import Pantomime.WordSize
 import Pantomime.Runtime
 import Pantomime.Clash.Util
+import Pantomime.Monad.GHC
 
 baseValues
   :: forall m ws
