@@ -27,6 +27,7 @@ library
   exposed-modules:
       GHC.MonadCore
       Pantomime
+      Pantomime.Annotation
       Pantomime.Base
       Pantomime.Clash
       Pantomime.Clash.Bit

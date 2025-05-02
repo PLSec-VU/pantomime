@@ -24,6 +24,7 @@ import Types
 import Util
 import Unification
 import Pantomime.Solve
+import Pantomime.Annotation
 
 -- TODO: These passes do not modify the code. Should we make this less general
 -- on the modification side?
@@ -119,7 +120,7 @@ composeImpl
   :: MonadFail m
   => MonadCore m
   => HasModGuts' m
-  => Spec TH.Name
+  => Pantomime TH.Name
   -> Pass m CoreExpr
 composeImpl spec expr = do
   let resolve name = Var <$> resolveTH' name
@@ -142,7 +143,7 @@ composeSim
   :: MonadFail m
   => MonadCore m
   => HasModGuts' m
-  => Spec TH.Name
+  => Pantomime TH.Name
   -> m CoreExpr
 composeSim uc = do
   let resolve name = Var <$> resolveTH' name
@@ -167,7 +168,7 @@ checkSpec
   => MonadCore m
   => HasModGuts' m
   => HasDynFlags m
-  => Spec TH.Name
+  => Pantomime TH.Name
   -> Pass m CoreBind'
 checkSpec spec (Bind' var expr) = do
   guts <- modGuts'

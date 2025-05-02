@@ -1,8 +1,7 @@
-module Types
-  ( SymCompare (..)
-  , Spec (..)
+{-# LANGUAGE OverloadedStrings #-}
 
-  , Pass
+module Types
+  ( Pass
   , Bind' (..)
   , CoreBind'
   , nonRec
@@ -14,47 +13,11 @@ module Types
 
 import GHC.Plugins
 
-import Data.Data
-
 import Control.Monad.Trans.Class (MonadTrans (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT)
 import Control.Monad.Except (ExceptT)
 import Control.Monad.State (StateT)
 import Control.Monad.Trans.Maybe (MaybeT)
-
--- | Leakage specification of a circuit.
---
--- Annotation should be on a circuit of type: Circuit si i o
--- TODO: At some point this type should replace the original UC annotation and
--- we should remove the prime on the field names.
--- TODO: Rebrand this to a Pantomime annotation.
-data Spec a = Spec
-  { observation :: a
-  -- ^ Observation: Circuit so o o'
-  , leakage :: a
-  -- ^ Leakage: Circuit sl i a
-  , simulator :: a
-  -- ^ Simulator: Circuit ss a o'
-  , projection :: a
-  -- ^ State Projection: (si, so) -> (sl, ss)
-  }
-  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
-
-instance Outputable a => Outputable (Spec a) where
-  ppr spec = text "UC" $+$ nest 2 fields
-    where
-      fields = vcat
-        [ text "{" <+> ppr (observation spec)
-        , text "," <+> ppr (leakage spec)
-        , text "," <+> ppr (simulator spec)
-        , text "," <+> ppr (projection spec)
-        , text "}"
-        ]
-
--- TODO: Maybe remove the Sym part. We should also rebrand this to a Pantomime
--- named operation perhaps?
-newtype SymCompare a = SymCompare a
-  deriving (Show, Data, Typeable, Functor, Traversable, Foldable)
 
 -- | An always non-recursive binder.
 data Bind' a = Bind' a (Expr a)
@@ -80,7 +43,8 @@ instance HasModGuts ModGuts where
   modGuts = id
 
 -- TODO: We should just have this as only version. Also, we should probably
--- get rid of this file or clean it up!
+-- get rid of this file or clean it up! I think these should go into
+-- Pantomime.Monad
 -- | Anything Monad that has module guts.
 class Monad m => HasModGuts' m where
   modGuts' :: m ModGuts

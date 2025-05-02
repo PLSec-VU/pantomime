@@ -1,7 +1,7 @@
 module Pantomime
   ( plugin
+  , Pantomime (..)
   , SymCompare (..)
-  , Spec (..)
   , Projection.Circuit
   ) where
 
@@ -11,7 +11,7 @@ import GHC.MonadCore
 import qualified Language.Haskell.TH.Syntax as TH
 
 import qualified Projection
-import Types
+import Pantomime.Annotation
 import Pantomime.Passes
 
 plugin :: Plugin
@@ -20,7 +20,7 @@ plugin = defaultPlugin
   , pluginRecompile = purePlugin
   }
 
-install :: MonadCore m => [CommandLineOption] -> Pass m [CoreToDo]
+install :: MonadCore m => [CommandLineOption] -> [CoreToDo] -> m [CoreToDo]
 install _ todo = pure $ mconcat
   [ symComparePasses
   , checkSpecPasses
@@ -33,6 +33,6 @@ install _ todo = pure $ mconcat
       ]
 
     checkSpecPasses =
-      [ printAndLintPass @(Spec TH.Name)
+      [ printAndLintPass @(Pantomime TH.Name)
       , checkSpecPass
       ]
