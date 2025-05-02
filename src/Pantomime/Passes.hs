@@ -19,7 +19,6 @@ import Control.Monad (forM)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
-import qualified Lint
 import qualified Projection
 import Types
 import Util
@@ -55,6 +54,26 @@ annBindsPassWithGuts
 annBindsPassWithGuts f mods = annBindsPass f' mods
   where
     f' a = flip runReaderT mods . f a
+
+-- | Lint an expression and panic on failure.
+lintPanic
+  :: HasDynFlags m
+  => Monad m
+  => InScopeSet
+  -> CoreExpr
+  -> m ()
+lintPanic (InScope vars) expr = do
+  dflags <- getDynFlags
+  let vars' = nonDetEltsUniqSet vars
+  let cfg = initLintConfig dflags vars'
+  let result = lintExpr cfg expr
+  case result of
+    Nothing -> pure ()
+    Just err -> pprPanic "Panic on linter warnings/errors" $ vcat
+      [ ppr expr
+      , ppr vars
+      , ppr err
+      ]
 
 printAndLintPass
   :: forall a
@@ -156,10 +175,10 @@ checkSpec spec (Bind' var expr) = do
   let scope = extendInScopeSetBndrs emptyInScopeSet program
 
   imp <- composeImpl spec expr
-  Lint.panic Lint.base scope imp
+  lintPanic scope imp
 
   sim <- composeSim spec
-  Lint.panic Lint.base scope sim
+  lintPanic scope sim
 
   (imp', sim') <- unifyExprs imp sim
     ??= "Unable to unify implementation projection with simulator"
@@ -168,8 +187,8 @@ checkSpec spec (Bind' var expr) = do
   let imp'' = resolveInstances instEnvs imp'
   let sim'' = resolveInstances instEnvs sim'
 
-  Lint.panic Lint.base scope imp''
-  Lint.panic Lint.base scope sim''
+  lintPanic scope imp''
+  lintPanic scope sim''
 
   result <- exprSymEq imp'' sim''
 

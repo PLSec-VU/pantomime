@@ -26,7 +26,6 @@ source-repository head
 library
   exposed-modules:
       GHC.MonadCore
-      Lint
       Pantomime
       Pantomime.Base
       Pantomime.Clash
@@ -50,7 +49,6 @@ library
       Pantomime.WordSize
       Projection
       Types
-      UC
       Unification
       Util
   other-modules:
