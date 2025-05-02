@@ -25,13 +25,12 @@ import Grisette.Unified (EvalModeTag (..))
 import Control.Monad (guard)
 import Control.Applicative (Alternative (empty))
 
-import Util
-
 import Pantomime.Value
 import Pantomime.WordSize
 import Pantomime.Runtime
 import Pantomime.Sized.BitVector
 import Pantomime.Monad.GHC
+import Util
 
 lookupThId
   :: MonadCore m

@@ -4,8 +4,7 @@ module Pantomime.Monad.GHC
   , HasModGuts' (..)
   , dbg
   , dbg'
-  , freshId
-  , freshIds
+  , thNameToGhcName'
   , resolveTH
   , resolveTH'
   , getInstEnvs'
@@ -13,7 +12,6 @@ module Pantomime.Monad.GHC
   ) where
 
 import GHC.Plugins
-import GHC.Core.Multiplicity (Scaled(..))
 import GHC.Core.InstEnv (InstEnvs (..))
 import GHC.Core.FamInstEnv (FamInstEnvs)
 import GHC.Types.TyThing (MonadThings(..))
@@ -93,36 +91,6 @@ dbg = liftCore . debugTraceMsg . ppr
 -- | Debug print a string in a CoreM monad stack.
 dbg' :: MonadCore m => String -> m ()
 dbg' = liftCore . debugTraceMsg . text
-
--- | Create a fresh variable.
---
--- Fetches a locally fresh unique from the in-scope set of the substitution.
--- Creates a new identifier and adds it to the in-scope set of the given
--- substitution.
-freshId
-  :: String
-  -> Scaled Type
-  -> InScopeSet
-  -> (Id, InScopeSet)
-freshId name (Scaled mult ty) scope = do
-  -- Get a new unique value.
-  let unique = unsafeGetFreshLocalUnique scope
-
-  -- Create the fresh identifier.
-  let name' = mkSystemName unique $ mkVarOcc name
-  let identifier = mkLocalId name' mult ty
-
-  -- Extend the scope and return it, together with the fresh identifier.
-  let scope' = extendInScopeSet scope identifier
-  (identifier, scope')
-
--- | Get multiple fresh identifiers via `freshId`.
-freshIds
-  :: Traversable f
-  => f (String, Scaled Type)
-  -> InScopeSet
-  -> (f Id, InScopeSet)
-freshIds = accumL $ uncurry freshId
 
 -- | Resolves a template haskell name to a non-recursive variable.
 resolveTH

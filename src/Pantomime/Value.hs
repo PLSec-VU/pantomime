@@ -73,8 +73,6 @@ import Control.Monad.Except (MonadError (..))
 
 import Clash.Prelude (BitVector, Unsigned, Signed, Bit)
 
-import Util (getFamInstEnvs')
-
 import Pantomime.Util
 import Pantomime.WordSize
 import Pantomime.Runtime

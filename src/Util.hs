@@ -5,7 +5,13 @@ module Util
 
   , accumL
   , (%~~)
+
+  , freshId
+  , freshIds
   ) where
+
+import GHC.Plugins hiding (empty)
+import GHC.Core.Multiplicity (Scaled(..))
 
 import Control.Applicative
 import Control.Monad.Trans.Maybe
@@ -52,3 +58,34 @@ infixr 4 %~~
 -- ```
 (%~~) :: Lens s t a b -> (a -> (c, b)) -> s -> (c, t)
 (%~~) = ($)
+
+-- | Create a fresh variable.
+--
+-- Fetches a locally fresh unique from the in-scope set of the substitution.
+-- Creates a new identifier and adds it to the in-scope set of the given
+-- substitution.
+freshId
+  :: String
+  -> Scaled Type
+  -> InScopeSet
+  -> (Id, InScopeSet)
+freshId name (Scaled mult ty) scope = do
+  -- Get a new unique value.
+  let unique = unsafeGetFreshLocalUnique scope
+
+  -- Create the fresh identifier.
+  let name' = mkSystemName unique $ mkVarOcc name
+  let identifier = mkLocalId name' mult ty
+
+  -- Extend the scope and return it, together with the fresh identifier.
+  let scope' = extendInScopeSet scope identifier
+  (identifier, scope')
+
+-- | Get multiple fresh identifiers via `freshId`.
+freshIds
+  :: Traversable f
+  => f (String, Scaled Type)
+  -> InScopeSet
+  -> (f Id, InScopeSet)
+freshIds = accumL $ uncurry freshId
+
