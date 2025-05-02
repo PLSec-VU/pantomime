@@ -9,8 +9,8 @@ import GHC.Plugins hiding (empty, (<>))
 
 import qualified Language.Haskell.TH.Syntax as TH
 
-import Pantomime.Combinator
 import Pantomime.Annotation
+import Pantomime.Combinator
 import Pantomime.Passes
 import Pantomime.Monad.GHC
 
@@ -21,18 +21,19 @@ plugin = defaultPlugin
   }
 
 install :: MonadCore m => [CommandLineOption] -> [CoreToDo] -> m [CoreToDo]
-install _ todo = pure $ mconcat
-  [ symComparePasses
-  , checkSpecPasses
-  , todo
-  ]
-  where
-    symComparePasses =
-      [ printAndLintPass @(SymCompare TH.Name)
-      , symComparePass
-      ]
+install _ todo = do
+  let symComparePasses =
+        [ printAndLintPass @(SymCompare TH.Name)
+        , symComparePass
+        ]
 
-    checkSpecPasses =
-      [ printAndLintPass @(Pantomime TH.Name)
-      , checkSpecPass
-      ]
+  let checkSpecPasses =
+        [ printAndLintPass @(Pantomime TH.Name)
+        , checkSpecPass
+        ]
+
+  pure $ mconcat
+    [ symComparePasses
+    , checkSpecPasses
+    , todo
+    ]

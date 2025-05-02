@@ -95,27 +95,27 @@ printAndLintPass
   :: forall a
    . Data a
   => CoreToDo
-printAndLintPass = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'printAndLintPass
-    pass = annBindsPassWithGuts $ \(_ :: a) -> printAndLint
+printAndLintPass = do
+  let name = TH.nameBase 'printAndLintPass
+  let pass = annBindsPassWithGuts $ \(_ :: a) -> printAndLint
+  CoreDoPluginPass name pass
 
 symComparePass :: CoreToDo
-symComparePass = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'symComparePass
-    pass = annBindsPassWithGuts symCompare
+symComparePass = do
+  let name = TH.nameBase 'symComparePass
+  let pass = annBindsPassWithGuts symCompare
+  CoreDoPluginPass name pass
 
 -- TODO: Instead of just running a pass per binder, I want to accumulate the
 -- results for all checks. In fact, this isn't even a pass as we do not modify
--- the CoreExpr.
+-- the CoreExpr. This is also true for the other 'passes' in this module.
 -- TODO: I think the name on this function should be different. It is not really
 -- indicative what it checks now.
 checkSpecPass :: CoreToDo
-checkSpecPass = CoreDoPluginPass name pass
-  where
-    name = TH.nameBase 'checkSpecPass
-    pass = annBindsPassWithGuts checkSpec
+checkSpecPass = do
+  let name = TH.nameBase 'checkSpecPass
+  let pass = annBindsPassWithGuts checkSpec
+  CoreDoPluginPass name pass
 
 printAndLint
   :: MonadCore m
