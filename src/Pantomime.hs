@@ -2,14 +2,14 @@ module Pantomime
   ( plugin
   , Pantomime (..)
   , SymCompare (..)
-  , Projection.Circuit
+  , module Pantomime.Combinator
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
 
 import qualified Language.Haskell.TH.Syntax as TH
 
-import qualified Projection
+import Pantomime.Combinator
 import Pantomime.Annotation
 import Pantomime.Passes
 import Pantomime.Monad.GHC

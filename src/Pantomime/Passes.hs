@@ -18,7 +18,7 @@ import Control.Monad (forM)
 
 import qualified Language.Haskell.TH.Syntax as TH
 
-import qualified Projection
+import qualified Pantomime.Combinator as Combinator
 import Util
 import Pantomime.Unification
 import Pantomime.Solve
@@ -139,13 +139,13 @@ composeImpl
 composeImpl spec expr = do
   let resolve name = Var <$> resolveTH' name
 
-  compose <- resolve 'Projection.compose
+  compose <- resolve 'Combinator.compose
   obs <- resolve $ observation spec
 
   expr' <- unifyApps compose [expr, obs]
     ??= "Incompatible types on observation/implementation pair"
 
-  sproj <- resolve 'Projection.sproj
+  sproj <- resolve 'Combinator.sproj
   proj <- resolve $ projection spec
 
   expr'' <- unifyApps sproj [proj, expr']
@@ -162,8 +162,8 @@ composeSim
 composeSim uc = do
   let resolve name = Var <$> resolveTH' name
 
-  compose <- resolve 'Projection.compose
-  sproj' <- resolve 'Projection.sproj'
+  compose <- resolve 'Combinator.compose
+  sproj' <- resolve 'Combinator.sproj'
 
   sim <- resolve $ simulator uc
   leak <- resolve $ leakage uc

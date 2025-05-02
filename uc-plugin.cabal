@@ -34,6 +34,7 @@ library
       Pantomime.Clash.Signed
       Pantomime.Clash.Unsigned
       Pantomime.Clash.Util
+      Pantomime.Combinator
       Pantomime.Concrete
       Pantomime.Dict
       Pantomime.Environment
@@ -49,7 +50,6 @@ library
       Pantomime.Util
       Pantomime.Value
       Pantomime.WordSize
-      Projection
       Util
   other-modules:
       Paths_uc_plugin

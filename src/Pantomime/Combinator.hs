@@ -1,4 +1,4 @@
-module Projection
+module Pantomime.Combinator
   ( Circuit
   , oproj
   , sproj
@@ -27,6 +27,7 @@ sproj' proj circuit s = circuit (proj s)
 iproj :: Circuit s0 i i' -> Circuit s1 i' o -> Circuit (s0, s1) i o
 iproj = compose
 
+-- | Sequential composition of two circuits.
 compose
   :: Circuit s0 i a
   -> Circuit s1 a o
@@ -36,25 +37,18 @@ compose c0 c1 (s0, s1) i = do
   let (s1', o) = c1 s1 x
   ((s0', s1'), o)
 
--- TODO: I guess we don't really want the observation function to be a circuit
--- as well. We should change the projections in this file accordingly.
+-- | Construct the implementation part of the proof.
 composeI
-  :: Circuit s i o
-  -> (o -> o')
-  -> (s -> s')
-  -> (s -> i -> (s', o'))
-composeI impl obs proj = sproj proj $ oproj obs impl
+  :: Circuit si i o
+  -> Circuit so o o'
+  -> ((si, so) -> s)
+  -> ((si, so) -> i -> (s, o'))
+composeI impl obs proj = sproj proj $ compose impl obs
 
--- composeI'
---   :: Circuit si i x
---   -> Circuit so x o
---   -> ((si, so) -> s')
---   -> ((si, so) -> i -> (s', o))
--- composeI' impl obs proj = sproj' proj $ iproj impl obs
-
+-- | Construct the simulator part of the proof.
 composeS
   :: Circuit sl i x
   -> Circuit ss x o
   -> (s -> (sl, ss))
   -> (s -> i -> ((sl, ss), o))
-composeS leak sim proj = sproj' proj $ iproj leak sim
+composeS leak sim proj = sproj' proj $ compose leak sim
