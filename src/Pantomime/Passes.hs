@@ -139,19 +139,15 @@ composeImpl
 composeImpl spec expr = do
   let resolve name = Var <$> resolveTH' name
 
-  compose <- resolve 'Combinator.compose
+  compose <- resolve 'Combinator.composeI
+
   obs <- resolve $ observation spec
-
-  expr' <- unifyApps compose [expr, obs]
-    ??= "Incompatible types on observation/implementation pair"
-
-  sproj <- resolve 'Combinator.sproj
   proj <- resolve $ projection spec
 
-  expr'' <- unifyApps sproj [proj, expr']
-    ??= "Incompatible types on (implementation/observation)/projection pair"
+  expr' <- unifyApps compose [expr, obs, proj]
+    ??= "Incompatible types on implementation/observation/projection composition"
 
-  pure $ occurAnalyseExpr expr''
+  pure $ occurAnalyseExpr expr'
 
 composeSim
   :: MonadFail m
@@ -162,20 +158,16 @@ composeSim
 composeSim uc = do
   let resolve name = Var <$> resolveTH' name
 
-  compose <- resolve 'Combinator.compose
-  sproj' <- resolve 'Combinator.sproj'
+  compose <- resolve 'Combinator.composeS
 
   sim <- resolve $ simulator uc
   leak <- resolve $ leakage uc
   proj <- resolve $ projection uc
 
-  expr' <- unifyApps compose [leak, sim]
-    ??= "Incompatible types on leakage/simulator pair"
+  expr' <- unifyApps compose [leak, sim, proj]
+    ??= "Incompatible types on leakage/simulator/projection composition"
 
-  expr'' <- unifyApps sproj' [proj, expr']
-    ??= "Incompatible types on projection/(leakage/simulator) pair"
-
-  pure $ occurAnalyseExpr expr''
+  pure $ occurAnalyseExpr expr'
 
 checkSpec
   :: MonadFail m
