@@ -216,21 +216,15 @@ instance KnownNat n => SymFromIntegral (IntN' S n) SymInteger where
     IntZ -> 0
     IntP value -> symFromIntegral value
 
-instance KnownNat n => ToCon (IntN' S n) (IntN' C n) where
+instance (Unified.DecideEvalMode mode, KnownNat n) => ToCon (IntN' mode n) (IntN' C n) where
   toCon = \case
     IntZ -> pure IntZ
-    IntP value -> IntP <$> toCon value
+    IntP value -> IntP <$> Unified.withMode @mode toCon toCon value
 
-instance ToCon (IntN' mode n) (IntN' mode n) where
-  toCon = pure
-
-instance KnownNat n => ToSym (IntN' C n) (IntN' S n) where
+instance (Unified.DecideEvalMode mode, KnownNat n) => ToSym (IntN' mode n) (IntN' S n) where
   toSym = \case
     IntZ -> IntZ
-    IntP value -> IntP $ toSym value
-
-instance ToSym (IntN' mode n) (IntN' mode n) where
-  toSym = id
+    IntP value -> IntP $ Unified.withMode @mode toSym toSym value
 
 instance ConRep (IntN' S n) where
   type ConType (IntN' S n) = IntN' C n
@@ -510,21 +504,15 @@ instance KnownNat n => SymFromIntegral (WordN' S n) SymInteger where
     WordZ -> 0
     WordP value -> symFromIntegral value
 
-instance KnownNat n => ToCon (WordN' S n) (WordN' C n) where
+instance (Unified.DecideEvalMode mode, KnownNat n) => ToCon (WordN' mode n) (WordN' C n) where
   toCon = \case
     WordZ -> pure WordZ
-    WordP value -> WordP <$> toCon value
+    WordP value -> WordP <$> Unified.withMode @mode toCon toCon value
 
-instance ToCon (WordN' mode n) (WordN' mode n) where
-  toCon = pure
-
-instance KnownNat n => ToSym (WordN' C n) (WordN' S n) where
+instance (Unified.DecideEvalMode mode, KnownNat n) => ToSym (WordN' mode n) (WordN' S n) where
   toSym = \case
     WordZ -> WordZ
-    WordP value -> WordP $ toSym value
-
-instance ToSym (WordN' mode n) (WordN' mode n) where
-  toSym = id
+    WordP value -> WordP $ Unified.withMode @mode toSym toSym value
 
 instance ConRep (WordN' S n) where
   type ConType (WordN' S n) = WordN' C n
