@@ -116,7 +116,7 @@ exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
     clash <- clashInterp
     env <- extendManyEnv emptyEnv $ base ++ clash
 
-    prog <- mg_binds <$> modGuts'
+    prog <- mg_binds <$> modGuts
     let env' = extendLocalEnv env prog
 
     let saturate expr = do

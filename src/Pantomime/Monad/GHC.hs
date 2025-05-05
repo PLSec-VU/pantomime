@@ -61,27 +61,27 @@ instance MonadFail CoreM where
 -- TODO: Remove prime on name of typeclass and function.
 -- | Anything Monad that has module guts.
 class Monad m => HasModGuts m where
-  modGuts' :: m ModGuts
+  modGuts :: m ModGuts
 
 -- instance HasModGuts m => HasModGuts (ReaderT r m) where
---   modGuts' = lift modGuts'
+--   modGuts = lift modGuts
 
 -- TODO: I think this instance is ugly. We should create a monad that contains
 -- whatever we need instead.
 instance Monad m => HasModGuts (ReaderT ModGuts m) where
-  modGuts' = reader id
+  modGuts = reader id
 
 instance (Monoid w, HasModGuts m) => HasModGuts (WriterT w m) where
-  modGuts' = lift modGuts'
+  modGuts = lift modGuts
 
 instance HasModGuts m => HasModGuts (StateT s m) where
-  modGuts' = lift modGuts'
+  modGuts = lift modGuts
 
 instance HasModGuts m => HasModGuts (MaybeT m) where
-  modGuts' = lift modGuts'
+  modGuts = lift modGuts
 
 instance HasModGuts m => HasModGuts (ExceptT e m) where
-  modGuts' = lift modGuts'
+  modGuts = lift modGuts
 
 -- | Debug print GHC structures in a CoreM monad stack.
 dbg :: (MonadCore m, Outputable o) => o -> m ()
@@ -119,7 +119,7 @@ lookupLocal
   => Name
   -> m Var
 lookupLocal name = do
-  prog <- mg_binds <$> modGuts'
+  prog <- mg_binds <$> modGuts
   let firstJust f = maybeM . listToMaybe . mapMaybe f
   let cmp' = \case
         NonRec x _ | name == varName x -> Just x
@@ -146,7 +146,7 @@ getInstEnvs' = do
   let global = eps_inst_env eps
 
   -- Get the local definitions
-  local <- mg_inst_env <$> modGuts'
+  local <- mg_inst_env <$> modGuts
 
   -- Return the instance environments
   return $ InstEnvs
@@ -165,6 +165,6 @@ getFamInstEnvs'
   => HasModGuts m
   => m FamInstEnvs
 getFamInstEnvs' = do
-  local <- mg_fam_inst_env <$> modGuts'
+  local <- mg_fam_inst_env <$> modGuts
   global <- liftCore getPackageFamInstEnv
   pure (local, global)

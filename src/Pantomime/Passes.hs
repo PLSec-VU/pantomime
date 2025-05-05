@@ -124,7 +124,7 @@ printAndLint
 printAndLint bind = do
   dflags <- liftCore getDynFlags
   let cfg = initLintConfig dflags []
-  prog <- mg_binds <$> modGuts'
+  prog <- mg_binds <$> modGuts
   let res = lintCoreBindings' cfg prog
   dbg bind
   dbg res
@@ -177,7 +177,7 @@ checkSpec
   => Pantomime TH.Name
   -> Pass m CoreBind'
 checkSpec spec (Bind' var expr) = do
-  guts <- modGuts'
+  guts <- modGuts
   let program = mg_binds guts
   let scope = extendInScopeSetBndrs emptyInScopeSet program
 
