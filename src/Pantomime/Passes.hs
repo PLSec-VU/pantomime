@@ -119,7 +119,7 @@ checkSpecPass = do
 
 printAndLint
   :: MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => Pass m CoreBind'
 printAndLint bind = do
   dflags <- liftCore getDynFlags
@@ -133,7 +133,7 @@ printAndLint bind = do
 composeImpl
   :: MonadFail m
   => MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => Pantomime TH.Name
   -> Pass m CoreExpr
 composeImpl spec expr = do
@@ -152,7 +152,7 @@ composeImpl spec expr = do
 composeSim
   :: MonadFail m
   => MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => Pantomime TH.Name
   -> m CoreExpr
 composeSim uc = do
@@ -172,7 +172,7 @@ composeSim uc = do
 checkSpec
   :: MonadFail m
   => MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => HasDynFlags m
   => Pantomime TH.Name
   -> Pass m CoreBind'
@@ -211,7 +211,7 @@ checkSpec spec (Bind' var expr) = do
 symCompare
   :: MonadFail m
   => MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => HasDynFlags m
   => SymCompare TH.Name
   -> Pass m CoreBind'

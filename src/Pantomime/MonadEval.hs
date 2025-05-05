@@ -42,7 +42,7 @@ type MonadEval m =
   ( MonadError EvalError m
   , MonadState SymbolicState m
   , MonadCore m
-  , HasModGuts' m
+  , HasModGuts m
   )
 
 -- TODO: These errors give very little information on what went actually wrong.

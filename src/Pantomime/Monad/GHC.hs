@@ -1,7 +1,7 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Pantomime.Monad.GHC
   ( MonadCore (..)
-  , HasModGuts' (..)
+  , HasModGuts (..)
   , dbg
   , dbg'
   , thNameToGhcName'
@@ -60,27 +60,27 @@ instance MonadFail CoreM where
 
 -- TODO: Remove prime on name of typeclass and function.
 -- | Anything Monad that has module guts.
-class Monad m => HasModGuts' m where
+class Monad m => HasModGuts m where
   modGuts' :: m ModGuts
 
--- instance HasModGuts' m => HasModGuts' (ReaderT r m) where
+-- instance HasModGuts m => HasModGuts (ReaderT r m) where
 --   modGuts' = lift modGuts'
 
 -- TODO: I think this instance is ugly. We should create a monad that contains
 -- whatever we need instead.
-instance Monad m => HasModGuts' (ReaderT ModGuts m) where
+instance Monad m => HasModGuts (ReaderT ModGuts m) where
   modGuts' = reader id
 
-instance (Monoid w, HasModGuts' m) => HasModGuts' (WriterT w m) where
+instance (Monoid w, HasModGuts m) => HasModGuts (WriterT w m) where
   modGuts' = lift modGuts'
 
-instance HasModGuts' m => HasModGuts' (StateT s m) where
+instance HasModGuts m => HasModGuts (StateT s m) where
   modGuts' = lift modGuts'
 
-instance HasModGuts' m => HasModGuts' (MaybeT m) where
+instance HasModGuts m => HasModGuts (MaybeT m) where
   modGuts' = lift modGuts'
 
-instance HasModGuts' m => HasModGuts' (ExceptT e m) where
+instance HasModGuts m => HasModGuts (ExceptT e m) where
   modGuts' = lift modGuts'
 
 -- | Debug print GHC structures in a CoreM monad stack.
@@ -95,7 +95,7 @@ dbg' = liftCore . debugTraceMsg . text
 resolveTH
   :: Alternative m
   => MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => TH.Name
   -> m Var
 resolveTH thName = do
@@ -106,7 +106,7 @@ resolveTH thName = do
 resolveTH'
   :: MonadFail m
   => MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => TH.Name
   -> m Var
 resolveTH' name = resolveTH name
@@ -115,7 +115,7 @@ resolveTH' name = resolveTH name
 -- | Lookup a local non-recursive variable.
 lookupLocal
   :: Alternative m
-  => HasModGuts' m
+  => HasModGuts m
   => Name
   -> m Var
 lookupLocal name = do
@@ -137,7 +137,7 @@ thNameToGhcName' = liftCore . thNameToGhcName >=> maybeM
 -- typechecker pass.
 getInstEnvs'
   :: MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => m InstEnvs
 getInstEnvs' = do
   -- Get the global definitions
@@ -162,7 +162,7 @@ getInstEnvs' = do
 -- typechecker pass.
 getFamInstEnvs'
   :: MonadCore m
-  => HasModGuts' m
+  => HasModGuts m
   => m FamInstEnvs
 getFamInstEnvs' = do
   local <- mg_fam_inst_env <$> modGuts'

@@ -81,7 +81,7 @@ exprSymEq
   :: forall m
    . MonadCore m
   => MonadFail m
-  => HasModGuts' m
+  => HasModGuts m
   => HasDynFlags m
   => CoreExpr
   -> CoreExpr
@@ -100,7 +100,7 @@ exprSymEq'
   :: forall m ws
    . MonadCore m
   => MonadFail m
-  => HasModGuts' m
+  => HasModGuts m
   => KnownWordSize ws
   => CoreExpr
   -> CoreExpr
