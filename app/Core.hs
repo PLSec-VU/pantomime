@@ -27,19 +27,18 @@ fe state ( rawInstr , jmp ) =
             Just newPC -> ( state { exInstr = Add 0 , exPC = curPC , pc = newPC }, ())
             Nothing -> ( state { exInstr = instr , exPC = curPC , pc = curPC + 1}, ())
 
-
 ex :: State -> () -> (State , Maybe Word8)
 ex state _ = 
     let curReg = reg state in
     case exInstr state of
         Add imm -> let newReg = curReg + word8ToWord32 imm in
-            (state { wbOut = ( Just newReg , Nothing ) } , Nothing)
-        Clr -> (state { wbOut = ( Just 0 , Nothing ) } , Nothing)
+            (state { wbOut = ( Just newReg , Nothing ) }, Nothing)
+        Clr -> (state { wbOut = ( Just 0 , Nothing ) }, Nothing)
         Out -> (state { wbOut = ( Nothing , Just curReg) } , Nothing)
         Jmp addr -> ( state { wbOut = (Nothing , Nothing)}, Just addr)
         Beq off ->
             if curReg == 0 
-            then let newPC = (exPC state ) + off in
+            then let newPC = (exPC state) + off in
                 ( state { wbOut = (Nothing , Nothing)}, Just newPC)
             else ( state { wbOut = (Nothing , Nothing)}, Nothing)
 
@@ -67,40 +66,51 @@ data LInstr = LJmp Word8 | LBeq Word8 | LOther
 
 data LState = LState {lreg :: Word32, lexInstr :: Instr}
 
-leak_ex :: LState -> (LState , (LInstr, Maybe Word8))
+leak_ex :: LState -> (LState , (LInstr, Bool))
 leak_ex state =
     let curReg = lreg state in
     case lexInstr state of
         Add imm -> let newReg = curReg + word8ToWord32 imm in 
-            (state {lreg = newReg}, (LOther, Nothing))
+            (state {lreg = newReg}, (LOther, False))
         Clr -> 
-            (state {lreg = 0}, (LOther, Nothing))
+            (state {lreg = 0}, (LOther, False))
         Out -> 
-            (state, (LOther, Nothing))
+            (state, (LOther, False))
         Jmp addr ->
-            (state,  (LJmp addr, Just addr))
+            (state,  (LJmp addr, True))
         Beq off ->
             if curReg == 0
-            then ( state, (LBeq off, Just off))
-            else ( state, (LOther, Nothing))   
+            then ( state, (LBeq off, True))
+            else ( state, (LOther, False))   
 
-leak_fe :: LState -> (Word16, Maybe Word8) ->  (LState , ())
+sim_ex :: () -> LInstr -> ((), (Instr, Bool))
+sim_ex _ lInst = 
+    case lInst of
+        LJmp addr ->
+            ((), (Jmp addr, True))
+        LBeq off ->
+            ((), (Beq off, True))
+        LOther ->
+            ((), (Add 0, False))
+
+leak_fe :: LState -> (Word16, Bool) ->  (LState , ())
 leak_fe state (rawInstr, jmp) =
     let instr = decode rawInstr in
-    case jmp of
-        Nothing ->
-            (state {lexInstr = instr}, ())
-        Just _ ->
-            (state { lexInstr = Add 0},  ())
+    if jmp 
+    then  (state {lexInstr = instr}, ())
+    else  (state {lexInstr = Add 0}, ())
 
-sim_fe :: SState -> LInstr -> (SState, Word8)
-sim_fe state leakInstr =
+sim_fe :: SState -> (Instr, Bool) -> (SState, Word8)
+sim_fe state (instr, jmp) =
     let curPC = spc state in
-    case leakInstr of
-        LOther -> (state { sexPC = curPC , spc = curPC + 1}, curPC + 1)
-        LJmp addr -> (state { sexPC = curPC , spc = addr }, addr)
-        LBeq off -> let newPC = ( sexPC state ) + off in
-                    (state {sexPC = curPC , spc = newPC } , newPC)
+    case instr of
+        Jmp addr -> (state { sexPC = curPC , spc = addr }, addr)
+        Beq off -> 
+            if jmp
+            then let newPC = (sexPC state) + off in
+                 (state {sexPC = curPC , spc = newPC }, newPC)
+            else (state { sexPC = curPC , spc = curPC + 1}, curPC + 1)
+        _ -> (state { sexPC = curPC , spc = curPC + 1}, curPC + 1)
 
 -----------------------------
 -- | Monolithic Leakage
