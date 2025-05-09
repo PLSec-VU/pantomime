@@ -51,7 +51,7 @@ import Pantomime.Runtime
 import Pantomime.Util
 import Pantomime.WordSize
 import Pantomime.Clash.Util
-import Pantomime.Sized.BitVector
+import qualified Pantomime.Sized.BitVector as Pantomime
 import Pantomime.Dict (normNumLitTy)
 
 clashInterp
@@ -91,7 +91,7 @@ unBinary
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> WordN' S n)
+  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n -> Pantomime.WordN S n)
   -> TyCon
   -> Value m ws
 -- TODO: It is insanely ugly and error prone to define interpretations like
@@ -104,8 +104,8 @@ unBinary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
           size <- whyFail IllTyped $ concreteNat nat
           SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
-          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
+          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) rhs
 
           let result = mrgLiftA2 op lhs' rhs'
           pure $ Opaque' lty result
@@ -123,7 +123,7 @@ unUnary
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownNat n => WordN' S n -> WordN' S n)
+  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n)
   -> TyCon
   -> Value m ws
 unUnary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
@@ -133,7 +133,7 @@ unUnary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
         size <- whyFail IllTyped $ concreteNat nat
         SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
 
         let result = op <$> value'
         pure $ Opaque' ty result
@@ -146,7 +146,7 @@ unEquality
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> SymBool)
+  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n -> SymBool)
   -> TyCon
   -> Value m ws
 unEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
@@ -157,8 +157,8 @@ unEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
           size' <- normNumLitTy size
           someNatVal size'
 
-        lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
-        rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
+        lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
+        rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) rhs
 
         let conditional = mrgLiftA2 cmp lhs' rhs'
         let tr = dataConToTag trueDataCon
@@ -178,7 +178,7 @@ unShift
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownNat n => WordN' S n -> SymInt ws -> WordN' S n)
+  => (forall n. KnownNat n => Pantomime.WordN S n -> SymInt ws -> Pantomime.WordN S n)
   -> TyCon
   -> Value m ws
 unShift op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
@@ -189,7 +189,7 @@ unShift op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
           size <- whyFail IllTyped $ concreteNat nat
           SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
           fields <- whyFail IllTyped $ adtDataConFields adt intDataCon
           rhs <- case fields of
             [Primitive (Int rhs)] -> pure $ SymInt <$> rhs
@@ -442,7 +442,7 @@ fromIntegerValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \
               , (condIN, valueIN)
               ]
 
-        let invalid :: RuntimeValue S (WordN' S n)
+        let invalid :: RuntimeValue S (Pantomime.WordN S n)
             invalid = throwError Invalid
 
         let foldl'' acc xs f = foldl' f acc xs

@@ -56,7 +56,7 @@ import Pantomime.Util
 import Pantomime.WordSize
 import Pantomime.Dict
 import Pantomime.Clash.Util
-import Pantomime.Sized.BitVector
+import qualified Pantomime.Sized.BitVector as Pantomime
 import Pantomime.Sized.Class
 
 clashInterp
@@ -98,7 +98,7 @@ bvBinary
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> WordN' S n)
+  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n -> Pantomime.WordN S n)
   -> TyCon
   -> Value m ws
 -- TODO: It is insanely ugly and error prone to define interpretations like
@@ -111,8 +111,8 @@ bvBinary op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
           size <- whyFail IllTyped $ concreteNat nat
           SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
-          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
+          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) rhs
 
           let result = mrgLiftA2 op lhs' rhs'
           pure $ Opaque' lty result
@@ -130,7 +130,7 @@ bvUnary
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownNat n => WordN' S n -> WordN' S n)
+  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n)
   -> TyCon
   -> Value m ws
 bvUnary op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
@@ -140,7 +140,7 @@ bvUnary op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
         size <- whyFail IllTyped $ concreteNat nat
         SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
 
         let result = op <$> value'
         pure $ Opaque' ty result
@@ -153,7 +153,7 @@ bvEquality
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownNat n => WordN' S n -> WordN' S n -> SymBool)
+  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n -> SymBool)
   -> TyCon
   -> Value m ws
 bvEquality cmp bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
@@ -164,8 +164,8 @@ bvEquality cmp bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
           size <- whyFail IllTyped $ concreteNat nat
           SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
-          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) rhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
+          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) rhs
 
           let conditional = mrgLiftA2 cmp lhs' rhs'
           let tr = dataConToTag trueDataCon
@@ -187,7 +187,7 @@ bvShift
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownNat n => WordN' S n -> SymInt ws -> WordN' S n)
+  => (forall n. KnownNat n => Pantomime.WordN S n -> SymInt ws -> Pantomime.WordN S n)
   -> TyCon
   -> Value m ws
 bvShift op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
@@ -198,7 +198,7 @@ bvShift op bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
           size <- whyFail IllTyped $ concreteNat nat
           SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) lhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
           fields <- whyFail IllTyped $ adtDataConFields adt intDataCon
           rhs <- case fields of
             [Primitive (Int rhs)] -> pure $ SymInt <$> rhs
@@ -441,7 +441,7 @@ toIntegerValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
         size <- whyFail IllTyped $ concreteNat nat
         SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
 
 
         let wordSize = natVal $ Proxy @(WordBits ws)
@@ -524,7 +524,7 @@ fromIntegerValue bvTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
                 , (condIN, valueIN)
                 ]
 
-          let invalid :: RuntimeValue S (WordN' S n)
+          let invalid :: RuntimeValue S (Pantomime.WordN S n)
               invalid = throwError Invalid
 
           let foldl'' acc xs f = foldl' f acc xs
@@ -597,7 +597,7 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
                 Dict <- whyFail IllTyped $ leqNat @req @n
                 Dict <- pure $ unsafeDict @(idx + w <= n)
 
-                value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
+                value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
                 let sliced = sizedBVSelect' @_ @idx @w @n <$> value'
 
                 let size' = mkTyConApp subTyFam [upperInc, lower]
@@ -638,11 +638,11 @@ concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
         Opaque' _lty lhs -> pure . Fun (mkTyConApp bvTyCon [rsizeTy]) $ \case
           Opaque' _rty rhs -> do
             SomeNat @l _ <- whyFail UnsupportedExpr $ someTyNat lsize
-            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S l)) lhs
+            lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S l)) lhs
 
             rsize <- whyFail UnsupportedExpr $ concreteNat nat
             SomeNat @r _ <- pure $ TypeNats.someNatVal rsize
-            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S r)) rhs
+            rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S r)) rhs
 
             -- We do this as we need to get the KnownNat constraint on the
             -- output.
@@ -651,10 +651,10 @@ concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
               someNatVal $ lsize' + toInteger rsize
             Dict <- pure $ unsafeDict @(l + r ~ n)
 
-            let concatted :: RuntimeValue S (WordN' S (l + r))
+            let concatted :: RuntimeValue S (Pantomime.WordN S (l + r))
                 concatted = liftA2 sizedBVConcat' lhs' rhs'
 
-            let concatted' :: RuntimeValue S (WordN' S n)
+            let concatted' :: RuntimeValue S (Pantomime.WordN S n)
                 concatted' = coerce concatted
 
             let size = mkTyConApp addTyFam [lsize, rsizeTy]

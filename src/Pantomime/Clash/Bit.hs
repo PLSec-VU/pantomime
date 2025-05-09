@@ -35,7 +35,7 @@ import Pantomime.Runtime
 import Pantomime.Util
 import Pantomime.Clash.Util
 import Pantomime.Dict
-import Pantomime.Sized.BitVector
+import qualified Pantomime.Sized.BitVector as Pantomime
 import Pantomime.Sized.Class
 
 clashInterp
@@ -56,14 +56,14 @@ bitEquality
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (WordN' S 1 -> WordN' S 1 -> SymBool)
+  => (Pantomime.WordN S 1 -> Pantomime.WordN S 1 -> SymBool)
   -> Type
   -> Value m ws
 bitEquality cmp bitTy = Fun bitTy $ \case
   Opaque' _ lhs -> pure . Fun bitTy $ \case
     Opaque' _ rhs -> do
-      lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S 1)) lhs
-      rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S 1)) rhs
+      lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) lhs
+      rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) rhs
 
       let conditional = mrgLiftA2 cmp lhs' rhs'
       let tr = dataConToTag trueDataCon
@@ -122,7 +122,7 @@ highValue
    . Type
   -> Value m ws
 highValue bitTy = do
-  let value :: WordN' S 1
+  let value :: Pantomime.WordN S 1
       value = 1
   Opaque' bitTy $ pure value
 
@@ -143,7 +143,7 @@ lowValue
    . Type
   -> Value m ws
 lowValue bitTy = do
-  let value :: WordN' S 1
+  let value :: Pantomime.WordN S 1
       value = 0
   Opaque' bitTy $ pure value
 
@@ -175,11 +175,11 @@ msbValue bvTyCon bitTy = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
         size <- whyFail UnsupportedExpr $ concreteNat adt
         SomeNat @n _ <- pure $ someNatVal size
 
-        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN' S n)) value
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
 
         SomeNat @idx _ <- pure . someNatVal $ size - 1
         Dict <- pure $ unsafeDict @(idx + 1 <= n)
-        let sliced :: RuntimeValue S (WordN' S 1)
+        let sliced :: RuntimeValue S (Pantomime.WordN S 1)
             sliced = sizedBVSelect' @_ @idx @1 @n <$> value'
 
         pure $ Opaque' bitTy sliced

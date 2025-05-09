@@ -28,7 +28,7 @@ import Control.Applicative (Alternative (empty))
 import Pantomime.Value
 import Pantomime.WordSize
 import Pantomime.Runtime
-import Pantomime.Sized.BitVector
+import qualified Pantomime.Sized.BitVector as Pantomime
 import Pantomime.Monad.GHC
 import Pantomime.Util
 
@@ -95,15 +95,15 @@ symShiftRL'
   :: forall bv ws n
    . KnownNat n
   => KnownWordSize ws
-  => SymFromIntegral (WordN' S n) (bv n)
-  => SymFromIntegral (bv n) (WordN' S n)
+  => SymFromIntegral (Pantomime.WordN S n) (bv n)
+  => SymFromIntegral (bv n) (Pantomime.WordN S n)
   => bv n
   -> SymInt ws
   -> bv n
 symShiftRL' value (SymInt idx) = do
   let idx' = symFromIntegral idx
 
-  let value' = symFromIntegral value :: WordN' S n
+  let value' = symFromIntegral value :: Pantomime.WordN S n
   -- TODO: Same thing as with 'symShiftL' (i.e. non-total function)
   let result = symShiftNegated value' idx'
   symFromIntegral result
@@ -112,15 +112,15 @@ symShiftRA'
   :: forall bv ws n
    . KnownNat n
   => KnownWordSize ws
-  => SymFromIntegral (IntN' S n) (bv n)
-  => SymFromIntegral (bv n) (IntN' S n)
+  => SymFromIntegral (Pantomime.IntN S n) (bv n)
+  => SymFromIntegral (bv n) (Pantomime.IntN S n)
   => bv n
   -> SymInt ws
   -> bv n
 symShiftRA' value (SymInt idx) = do
   let idx' = symFromIntegral idx
 
-  let value' = symFromIntegral value :: IntN' S n
+  let value' = symFromIntegral value :: Pantomime.IntN S n
   -- TODO: Same thing as with 'symShiftL' (i.e. non-total function)
   let result = symShiftNegated value' idx'
   symFromIntegral result

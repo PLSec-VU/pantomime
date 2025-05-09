@@ -42,7 +42,7 @@ import Pantomime.Util
 import Pantomime.Evaluate
 import Pantomime.MonadEval
 import Pantomime.Dict
-import Pantomime.Sized.BitVector
+import qualified Pantomime.Sized.BitVector as Pantomime
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.
@@ -182,7 +182,7 @@ concretise model = \case
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
     , Just (SomeNat @n _) <- normNumLitTy size >>= someNatVal
     , Just Dict <- posNat @n
-    , Just bv <- cast @_ @(RuntimeValue S (WordN' S n)) value
+    , Just bv <- cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
     -> pure $ primCon model bv
 
   Opaque' ty value
@@ -190,13 +190,13 @@ concretise model = \case
     | Just (_tyCon, [size]) <- tcSplitTyConApp_maybe ty
     , Just (SomeNat @n _) <- normNumLitTy size >>= someNatVal
     , Just Dict <- posNat @n
-    , Just bv <- cast @_ @(RuntimeValue S (IntN' S n)) value
+    , Just bv <- cast @_ @(RuntimeValue S (Pantomime.IntN S n)) value
     -> pure $ primCon model bv
 
   Opaque' ty value
     -- TODO Actually check the TyCon!
     | Just (_tyCon, []) <- tcSplitTyConApp_maybe ty
-    , Just bv <- cast @_ @(RuntimeValue S (WordN' S 1)) value
+    , Just bv <- cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) value
     -> pure $ primCon model bv
 
   Opaque' _ty _value -> pure $ Unknown

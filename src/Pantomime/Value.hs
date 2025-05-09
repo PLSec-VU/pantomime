@@ -78,7 +78,7 @@ import Pantomime.WordSize
 import Pantomime.Runtime
 import Pantomime.MonadEval
 import Pantomime.Dict
-import Pantomime.Sized.BitVector
+import qualified Pantomime.Sized.BitVector as Pantomime
 import Pantomime.Monad.GHC
 
 -- TODO: Add comment to what this data type is!
@@ -501,8 +501,8 @@ typedBitVector value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  let bv :: RuntimeValue S (WordN' S n)
-      bv = withSize @n (pure $ WordZ) (WordP <$> value)
+  let bv :: RuntimeValue S (Pantomime.WordN S n)
+      bv = withSize @n (pure Pantomime.WordZ) (Pantomime.WordP <$> value)
   pure $ Opaque' ty bv
 
 -- TODO: This is a lot of code duplication. Can't we squash this one with
@@ -532,8 +532,8 @@ typedUnsigned value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  let bv :: RuntimeValue S (WordN' S n)
-      bv = withSize @n (pure $ WordZ) (WordP <$> value)
+  let bv :: RuntimeValue S (Pantomime.WordN S n)
+      bv = withSize @n (pure Pantomime.WordZ) (Pantomime.WordP <$> value)
   pure $ Opaque' ty bv
 
 typedSigned
@@ -561,8 +561,8 @@ typedSigned value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  let bv :: RuntimeValue S (IntN' S n)
-      bv = withSize @n (pure $ IntZ) (IntP <$> value)
+  let bv :: RuntimeValue S (Pantomime.IntN S n)
+      bv = withSize @n (pure Pantomime.IntZ) (Pantomime.IntP <$> value)
   pure $ Opaque' ty bv
 
 typedBit
@@ -587,8 +587,8 @@ typedBit value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bitTyCon) $ throwError UnsupportedExpr
 
-  let bv :: RuntimeValue S (WordN' S 1)
-      bv = withSize @1 (pure $ WordZ) (WordP <$> value)
+  let bv :: RuntimeValue S (Pantomime.WordN S 1)
+      bv = withSize @1 (pure Pantomime.WordZ) (Pantomime.WordP <$> value)
   pure $ Opaque' ty bv
 
 typedTyFamInst
