@@ -212,7 +212,7 @@ concretePrimitive
   :: forall ws
    . KnownWordSize ws
   => Model
-  -> Primitive ws
+  -> Primitive S ws
   -> Concrete
 concretePrimitive model = \case
   Int value -> prim' value

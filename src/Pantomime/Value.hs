@@ -50,7 +50,7 @@ import GHC.TypeLits (SomeNat (..), someNatVal)
 import GHC.Platform (PlatformWordSize)
 
 import Grisette.SymPrim
-import Grisette.Unified (EvalModeTag (..), GetIntN, GetWordN)
+import Grisette.Unified (DecideEvalMode (..), EvalModeTag (..), GetIntN, GetWordN)
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 import Grisette
   ( Solvable (..)
@@ -83,7 +83,7 @@ import Pantomime.Monad.GHC
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where
-  Primitive :: Primitive ws -> Value m ws
+  Primitive :: Primitive S ws -> Value m ws
   Poly :: Type -> RuntimeValue S (Ident S) -> Value m ws
   Data :: ADT m ws -> Value m ws
   -- TODO: I don't really like the prime on the name of Cast here. Maybe we
@@ -127,8 +127,9 @@ dumpValue = \case
   Opaque' ty value -> "opaque" <+> ppr ty <+> ":" <+> text (show value)
 
 dumpPrimitive
-  :: KnownWordSize ws
-  => Primitive ws
+  :: DecideEvalMode mode
+  => KnownWordSize ws
+  => Primitive mode ws
   -> SDoc
 dumpPrimitive = \case
   Int value -> "int:" <+> text' value
@@ -173,7 +174,7 @@ instance (KnownWordSize ws, Functor m) => EvalSym (Value m ws) where
       evalSym' :: EvalSym a => a -> a
       evalSym' = evalSym fill model
 
-instance Functor m => Forceable (Value m ws) where
+instance Functor m => Forceable S (Value m ws) where
   force constraints = \case
     Primitive prim -> Primitive $ force' prim
     Poly ty value -> Poly ty $ force' value
@@ -186,10 +187,10 @@ instance Functor m => Forceable (Value m ws) where
     Ty _ty -> error "We fail for now"
     Co _co -> error "We fail for now"
     where
-      force' :: Forceable a => a -> a
+      force' :: Forceable S a => a -> a
       force' = force constraints
 
-instance Spineable (Value m ws) where
+instance Spineable S (Value m ws) where
   spine = \case
     Primitive prim -> spine prim
     Poly _ value -> spine value
@@ -1081,12 +1082,12 @@ instance (MonadEval m, KnownWordSize ws) => EvalIte m (ADT m ws) where
       , adtFields = fields'
       }
 
-instance Forceable (ADT m ws) where
+instance Forceable S (ADT m ws) where
   force constraints adt = adt
     { adtTag = force constraints $ adtTag adt
     }
 
-instance Spineable (ADT m ws) where
+instance Spineable S (ADT m ws) where
   spine = spine . adtTag
 
 instance (MonadEval m, KnownWordSize ws) => WeakEq m (ADT m ws) where
@@ -1239,7 +1240,7 @@ tagInRange tag tyCon = do
   mrgIte cond (pure tag') $ mrgThrowError Invalid
 
 -- | Primitive values supported by the symbolic solver.
-data Primitive (ws :: PlatformWordSize) where
+data Primitive (mode :: EvalModeTag) (ws :: PlatformWordSize) where
   -- TODO: Use our new sized word primitive, which supports zero sized values.
   -- This way, we don't have to carry the extra word size constraint around.
   -- TODO: Add support for Char
@@ -1251,27 +1252,27 @@ data Primitive (ws :: PlatformWordSize) where
   -- wraps Either, which is non-solvable. I really think it would be best to use
   -- the newtype wrapper here, it is a lot more clear! The same goes for Word
   -- and for the size field of a ByteArray btw.
-  Int :: RuntimeValue S (SymIntN (WordBits ws)) -> Primitive ws
-  Int8 :: RuntimeValue S SymIntN8 -> Primitive ws
-  Int16 :: RuntimeValue S SymIntN16 -> Primitive ws
-  Int32 :: RuntimeValue S SymIntN32 -> Primitive ws
-  Int64 :: RuntimeValue S SymIntN64 -> Primitive ws
-  Word :: RuntimeValue S (SymWordN (WordBits ws)) -> Primitive ws
-  Word8 :: RuntimeValue S SymWordN8 -> Primitive ws
-  Word16 :: RuntimeValue S SymWordN16 -> Primitive ws
-  Word32 :: RuntimeValue S SymWordN32 -> Primitive ws
-  Word64 :: RuntimeValue S SymWordN64 -> Primitive ws
-  Float :: RuntimeValue S SymFP32 -> Primitive ws
-  Double :: RuntimeValue S SymFP64 -> Primitive ws
+  Int :: RuntimeValue mode (SymIntN (WordBits ws)) -> Primitive mode ws
+  Int8 :: RuntimeValue mode SymIntN8 -> Primitive mode ws
+  Int16 :: RuntimeValue mode SymIntN16 -> Primitive mode ws
+  Int32 :: RuntimeValue mode SymIntN32 -> Primitive mode ws
+  Int64 :: RuntimeValue mode SymIntN64 -> Primitive mode ws
+  Word :: RuntimeValue mode (SymWordN (WordBits ws)) -> Primitive mode ws
+  Word8 :: RuntimeValue mode SymWordN8 -> Primitive mode ws
+  Word16 :: RuntimeValue mode SymWordN16 -> Primitive mode ws
+  Word32 :: RuntimeValue mode SymWordN32 -> Primitive mode ws
+  Word64 :: RuntimeValue mode SymWordN64 -> Primitive mode ws
+  Float :: RuntimeValue mode SymFP32 -> Primitive mode ws
+  Double :: RuntimeValue mode SymFP64 -> Primitive mode ws
   -- ByteArray'
   --   :: RuntimeValue S (ByteArray ws)
   --   -> Primitive ws
   -- TODO: This is a really poor implementation of ByteArrays. We should change
   -- it!
   ByteArray
-    :: RuntimeValue S (SymIntN (WordBits ws))
-    -> RuntimeValue S SymInteger
-    -> Primitive ws
+    :: RuntimeValue mode (SymIntN (WordBits ws))
+    -> RuntimeValue mode SymInteger
+    -> Primitive mode ws
 
 -- data ByteArray ws = ByteArray2
 --   { baSize :: SymIntN (WordBits ws)
@@ -1282,7 +1283,7 @@ data Primitive (ws :: PlatformWordSize) where
 -- deriving via Default (ByteArray ws)
 --   instance KnownWordSize ws => Mergeable (ByteArray ws)
 
-instance KnownWordSize ws => Outputable (Primitive ws) where
+instance KnownWordSize ws => Outputable (Primitive mode ws) where
   ppr = \case
     Int _ -> "Int#"
     Int8 _ -> "Int8#"
@@ -1298,7 +1299,7 @@ instance KnownWordSize ws => Outputable (Primitive ws) where
     Double _ -> "Double#"
     ByteArray _ _ -> "ByteArray#"
 
-instance KnownWordSize ws => EvalSym (Primitive ws) where
+instance (DecideEvalMode mode, KnownWordSize ws) => EvalSym (Primitive mode ws) where
   evalSym fill model = \case
     Int value -> Int $ evalSym' value
     Int8 value -> Int8 $ evalSym' value
@@ -1317,7 +1318,7 @@ instance KnownWordSize ws => EvalSym (Primitive ws) where
       evalSym' :: EvalSym a => a -> a
       evalSym' = evalSym fill model
 
-instance Forceable (Primitive ws) where
+instance DecideEvalMode mode => Forceable mode (Primitive mode ws) where
   force constraints = \case
     Int value -> Int $ force' value
     Int8 value -> Int8 $ force' value
@@ -1334,10 +1335,10 @@ instance Forceable (Primitive ws) where
     -- TODO: Maybe we should force the size. Not sure yet.
     ByteArray size value -> ByteArray size $ force' value
     where
-      force' :: Forceable a => a -> a
+      force' :: Forceable mode a => a -> a
       force' = force constraints
 
-instance Spineable (Primitive ws) where
+instance DecideEvalMode mode => Spineable mode (Primitive mode ws) where
   spine = \case
     Int value -> void value
     Int8 value -> void value
@@ -1353,7 +1354,7 @@ instance Spineable (Primitive ws) where
     Double value -> void value
     ByteArray size value -> size >> void value
 
-instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive ws) where
+instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive S ws) where
   weakEq = curry $ \case
     (Int lhs, Int rhs) -> weakEq lhs rhs
     (Int8 lhs, Int8 rhs) -> weakEq lhs rhs
@@ -1373,7 +1374,7 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive ws) where
       pure $ eqSize .&& eqArr
     _ -> throwError IllTyped
 
-instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive ws) where
+instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive S ws) where
   evalIte cond = curry $ \case
     (Int lhs, Int rhs) -> Int <$> evalIte cond lhs rhs
     (Int8 lhs, Int8 rhs) -> Int8 <$> evalIte cond lhs rhs
@@ -1395,12 +1396,13 @@ instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive ws) where
 
 -- | Construct a primitive, symbolic value with the given type.
 typedPrimitive
-  :: forall m ws
+  :: forall m mode ws
    . MonadEval m
+  => DecideEvalMode mode
   => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
+  => (forall t. Symbolisable t ws => RuntimeValue mode t)
   -> Type
-  -> m (Primitive ws)
+  -> m (Primitive mode ws)
 typedPrimitive value ty
   | ty `eqType` intPrimTy = pure $ Int value
   | ty `eqType` int8PrimTy = pure $ Int8 value

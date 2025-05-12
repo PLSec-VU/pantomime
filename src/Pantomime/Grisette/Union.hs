@@ -16,6 +16,7 @@ import Grisette
   , SimpleMergeable (..)
   , SimpleMergeable1 (..)
   , SymBranching (..)
+  , PlainUnion (..)
   , TryMerge (..)
   , EvalSym (..)
   , EvalSym1 (..)
@@ -28,6 +29,7 @@ import Grisette
   , wrapStrategy
   , rootStrategy1
   , mrgIte1
+  , mrgIf
   , evalSym1
   , symEq1
   , toSym1
@@ -84,21 +86,35 @@ instance DecideEvalMode mode => Mergeable1 (Union mode) where
     let op = withMode @mode liftRootStrategy liftRootStrategy
     wrapStrategy (op strategy) Union unUnion
 
-instance (DecideEvalMode mode, SimpleMergeable a) => SimpleMergeable (Union mode a) where
+instance SimpleMergeable a => SimpleMergeable (Union C a) where
   mrgIte = mrgIte1
 
-instance DecideEvalMode mode => SimpleMergeable1 (Union mode) where
+instance SimpleMergeable1 (Union C) where
   liftMrgIte f cond (Union tr) (Union fl) = do
-    let op = withMode @mode liftMrgIte liftMrgIte
-    Union $ op f cond tr fl
+    Union $ liftMrgIte f cond tr fl
+
+instance Mergeable a => SimpleMergeable (Union S a) where
+  mrgIte = mrgIf
+
+instance SimpleMergeable1 (Union S) where
+  liftMrgIte f cond (Union tr) (Union fl) = do
+    Union $ liftMrgIte f cond tr fl
 
 -- TODO: I'm not sure I understand what the purpose of this is. Identity does
 -- not implement it, so we can only allow symbolic versions.
 instance (forall a. Mergeable a => SimpleMergeable (Union S a))=> SymBranching (Union S) where
   mrgIfWithStrategy strategy cond (Union tr) (Union fl) = do
     Union $ mrgIfWithStrategy strategy cond tr fl
+
   mrgIfPropagatedStrategy cond (Union tr) (Union fl) = do
     Union $ mrgIfPropagatedStrategy cond tr fl
+
+instance PlainUnion (Union S) where
+  singleView = singleView . unUnion
+
+  ifView = do
+    let wrap (cond, tr, fl) = (cond, Union tr, Union fl)
+    fmap wrap . ifView . unUnion
 
 instance (DecideEvalMode mode, EvalSym a) => EvalSym (Union mode a) where
   evalSym = evalSym1

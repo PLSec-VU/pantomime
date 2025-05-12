@@ -29,12 +29,13 @@ import Control.Monad.Identity (runIdentity)
 
 import Data.Functor.Classes (Show1, Eq1)
 
-import Grisette.Unified (EvalModeTag (..), BaseMonad)
+import Grisette.Unified (EvalModeTag (..), DecideEvalMode (..))
 import Grisette
-  ( Mergeable
-  , Mergeable1
-  , SimpleMergeable
-  , TryMerge
+  ( Mergeable (..)
+  , Mergeable1 (..)
+  , SimpleMergeable (..)
+  , SimpleMergeable1 (..)
+  , TryMerge (..)
   , EvalSym
   , EvalSym1
   , SymEq
@@ -44,78 +45,95 @@ import Grisette
   , ToCon (..)
   , Default (..)
   , PPrint
-  , Union
   )
+
+import Pantomime.Grisette.Union
 
 newtype RuntimeValue mode a where
   RuntimeValue ::
-    { unRuntimeValue :: ExceptT RuntimeError (BaseMonad mode) a
+    { unRuntimeValue :: ExceptT RuntimeError (Union mode) a
     } -> RuntimeValue mode a
 
 unRuntimeC :: RuntimeValue C a -> Either RuntimeError a
-unRuntimeC = runIdentity . runExceptT . unRuntimeValue
+unRuntimeC = runIdentity . unUnion . runExceptT . unRuntimeValue
 
-unRuntimeS :: RuntimeValue S a -> Union (Either RuntimeError a)
+unRuntimeS :: RuntimeValue S a -> Union S (Either RuntimeError a)
 unRuntimeS = runExceptT . unRuntimeValue
 
-deriving via ExceptT RuntimeError (BaseMonad mode)
-  instance Monad (BaseMonad mode)
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
   => Functor (RuntimeValue mode)
 
-deriving via ExceptT RuntimeError (BaseMonad mode)
-  instance Monad (BaseMonad mode)
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
   => Applicative (RuntimeValue mode)
 
-deriving via ExceptT RuntimeError (BaseMonad mode)
-  instance Monad (BaseMonad mode)
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
   => Monad (RuntimeValue mode)
 
-deriving via ExceptT RuntimeError (BaseMonad mode)
-  instance TryMerge (BaseMonad mode)
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
   => TryMerge (RuntimeValue mode)
 
-deriving via ExceptT RuntimeError (BaseMonad mode) a
-  instance (Mergeable1 (BaseMonad mode), Mergeable a)
+deriving via ExceptT RuntimeError (Union mode) a
+  instance (DecideEvalMode mode, Mergeable a)
   => Mergeable (RuntimeValue mode a)
 
-deriving via ExceptT RuntimeError (BaseMonad mode)
-  instance (Mergeable1 (BaseMonad mode))
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
   => Mergeable1 (RuntimeValue mode)
 
-deriving via ExceptT RuntimeError (BaseMonad mode) a
-  instance (SymBranching (BaseMonad mode), Mergeable a)
-  => SimpleMergeable (RuntimeValue mode a)
+deriving via ExceptT RuntimeError (Union S) a
+  instance Mergeable a
+  => SimpleMergeable (RuntimeValue S a)
 
-deriving via ExceptT RuntimeError (BaseMonad mode)
-  instance Monad (BaseMonad mode)
+deriving via ExceptT RuntimeError (Union S)
+  instance SimpleMergeable1 (RuntimeValue S)
+
+deriving via ExceptT RuntimeError (Union S)
+  instance SymBranching (RuntimeValue S)
+
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
   => MonadError RuntimeError (RuntimeValue mode)
 
-deriving via ExceptT RuntimeError (BaseMonad mode) a
-  instance (Show1 (BaseMonad mode), Show a)
+deriving via ExceptT RuntimeError (Union mode) a
+  instance (DecideEvalMode mode, Show a)
   => Show (RuntimeValue mode a)
 
-deriving via ExceptT RuntimeError (BaseMonad mode) a
-  instance (Eq1 (BaseMonad mode), Eq a)
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
+  => Show1 (RuntimeValue mode)
+
+deriving via ExceptT RuntimeError (Union mode) a
+  instance (DecideEvalMode mode, Eq a)
   => Eq (RuntimeValue mode a)
 
-deriving via ExceptT RuntimeError (BaseMonad mode) a
-  instance (EvalSym1 (BaseMonad mode), EvalSym a)
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
+  => Eq1 (RuntimeValue mode)
+
+deriving via ExceptT RuntimeError (Union mode) a
+  instance (DecideEvalMode mode, EvalSym a)
   => EvalSym (RuntimeValue mode a)
 
-deriving via ExceptT RuntimeError (BaseMonad mode) a
-  instance (SymEq1 (BaseMonad mode), SymEq a)
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
+  => EvalSym1 (RuntimeValue mode)
+
+deriving via ExceptT RuntimeError (Union mode) a
+  instance (DecideEvalMode mode, SymEq a)
   => SymEq (RuntimeValue mode a)
 
-instance ToSym a b => ToSym (RuntimeValue C a) (RuntimeValue S b) where
+deriving via ExceptT RuntimeError (Union mode)
+  instance DecideEvalMode mode
+  => SymEq1 (RuntimeValue mode)
+
+instance (DecideEvalMode mode, ToSym a b) => ToSym (RuntimeValue mode a) (RuntimeValue S b) where
   toSym = RuntimeValue . toSym . unRuntimeValue
 
-instance ToSym a b => ToSym (RuntimeValue S a) (RuntimeValue S b) where
-  toSym = RuntimeValue . toSym . unRuntimeValue
-
-instance ToCon a b => ToCon (RuntimeValue S a) (RuntimeValue C b) where
-  toCon = fmap RuntimeValue . toCon . unRuntimeValue
-
-instance ToCon a b => ToCon (RuntimeValue C a) (RuntimeValue C b) where
+instance (DecideEvalMode mode, ToCon a b) => ToCon (RuntimeValue S a) (RuntimeValue mode b) where
   toCon = fmap RuntimeValue . toCon . unRuntimeValue
 
 -- TODO: Add support for all primitive runtime errors.

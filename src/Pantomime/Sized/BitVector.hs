@@ -178,6 +178,8 @@ instance (DecideEvalMode mode, KnownNat n) => EvalSym (IntN mode n) where
         op = withMode @mode evalSym evalSym
     unaryI $ op fill model
 
+-- TODO: Does this make sense? I feel like mergeable should use a concrete
+-- boolean when merging concrete values?
 instance (DecideEvalMode mode, KnownNat n) => Mergeable (IntN mode n) where
   rootStrategy = do
     let concrete :: MergingStrategy (IntN C n)

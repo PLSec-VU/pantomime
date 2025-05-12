@@ -131,7 +131,7 @@ evaluate env = \case
     result <- foldM' invalid alts' $ \fl (cond, rhs) -> do
       evalIte cond rhs fl
 
-    pure $ force (spine scrut') result
+    pure $ force @S (spine scrut') result
 
   Cast expr co -> do
     let co' = substCoEnv env co
@@ -219,8 +219,8 @@ onlyPrimEq
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => Primitive ws
-  -> Primitive ws
+  => Primitive S ws
+  -> Primitive S ws
   -> m SymBool
 onlyPrimEq = curry $ \case
   (Int lhs, Int rhs) -> cmp lhs rhs
@@ -307,7 +307,7 @@ evalLiteral
    . MonadError EvalError m
   => KnownWordSize ws
   => Literal
-  -> m (Primitive ws)
+  -> m (Primitive S ws)
 evalLiteral = \case
   LitNumber ty num -> case ty of
     LitNumInt -> pure $ Int num'

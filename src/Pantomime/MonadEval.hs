@@ -18,7 +18,7 @@ module Pantomime.MonadEval
 
 import GHC.Plugins
 
-import Grisette.Unified (EvalModeTag (..))
+import Grisette.Unified (EvalModeTag (..), DecideEvalMode (..))
 import Grisette 
   ( SymBool
   , LogicalOp (..)
@@ -69,24 +69,24 @@ freshIdx = state $ \s -> do
     let s' = s { nextIdx = idx + 1 }
     (idx, s')
 
-type Constraints = RuntimeValue S ()
+type Constraints mode = RuntimeValue mode ()
 
 -- | Forceable values, which can take any constraints produced when a value is
 -- forced.
-class Forceable a where
+class Forceable mode a where
   -- | Force the spine of the given argument, passing any constraints onto
   -- itself.
-  force :: Constraints -> a -> a
+  force :: Constraints mode -> a -> a
 
-instance Forceable (RuntimeValue S a) where
+instance DecideEvalMode mode => Forceable mode (RuntimeValue mode a) where
   force s v = s >> v
 
 -- | Any value with a spine whose error constraints can be extracted.
-class Spineable a where
+class Spineable mode a where
   -- | Gather the error constraints from the spine of the expression.
-  spine :: a -> Constraints
+  spine :: a -> Constraints mode
 
-instance Spineable (RuntimeValue S a) where
+instance DecideEvalMode mode => Spineable mode (RuntimeValue mode a) where
   spine = void
 
 class MonadEval m => EvalIte m a where
