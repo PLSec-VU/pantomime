@@ -28,7 +28,7 @@ import Control.Applicative (Alternative (empty))
 import Pantomime.Value
 import Pantomime.WordSize
 import Pantomime.Runtime
-import qualified Pantomime.Sized.BitVector as Pantomime
+import qualified Pantomime.Grisette.BitVector as Pantomime
 import Pantomime.Monad.GHC
 import Pantomime.Util
 

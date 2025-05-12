@@ -35,8 +35,8 @@ import Pantomime.Runtime
 import Pantomime.Util
 import Pantomime.Clash.Util
 import Pantomime.Dict
-import qualified Pantomime.Sized.BitVector as Pantomime
-import Pantomime.Sized.Class
+import qualified Pantomime.Grisette.BitVector as Pantomime
+import Pantomime.Grisette.SizedBV
 
 clashInterp
   :: forall m ws

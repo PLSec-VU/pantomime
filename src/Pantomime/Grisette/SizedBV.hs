@@ -4,7 +4,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE TypeAbstractions #-}
 
-module Pantomime.Sized.Class
+module Pantomime.Grisette.SizedBV
   ( SizedBV' (..)
   , sizedBVSelect'
   ) where

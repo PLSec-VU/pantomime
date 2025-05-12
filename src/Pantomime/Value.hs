@@ -78,7 +78,7 @@ import Pantomime.WordSize
 import Pantomime.Runtime
 import Pantomime.MonadEval
 import Pantomime.Dict
-import qualified Pantomime.Sized.BitVector as Pantomime
+import qualified Pantomime.Grisette.BitVector as Pantomime
 import Pantomime.Monad.GHC
 
 -- TODO: Add comment to what this data type is!

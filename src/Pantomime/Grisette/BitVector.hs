@@ -8,7 +8,7 @@
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 
-module Pantomime.Sized.BitVector
+module Pantomime.Grisette.BitVector
   ( IntN (..)
   , WordN (..)
   ) where
@@ -28,7 +28,7 @@ import Data.Bits (Bits (..), FiniteBits (..))
 import Data.Data (Proxy(..))
 
 import Pantomime.Dict (withSize, Dict (..), unsafeDict)
-import Pantomime.Sized.Class
+import Pantomime.Grisette.SizedBV
 
 data IntN (mode :: EvalModeTag) (n :: Natural) where
   IntZ :: IntN mode 0

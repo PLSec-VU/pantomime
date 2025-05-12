@@ -42,7 +42,7 @@ import Pantomime.Util
 import Pantomime.Evaluate
 import Pantomime.MonadEval
 import Pantomime.Dict
-import qualified Pantomime.Sized.BitVector as Pantomime
+import qualified Pantomime.Grisette.BitVector as Pantomime
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.

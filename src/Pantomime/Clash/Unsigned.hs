@@ -51,7 +51,7 @@ import Pantomime.Runtime
 import Pantomime.Util
 import Pantomime.WordSize
 import Pantomime.Clash.Util
-import qualified Pantomime.Sized.BitVector as Pantomime
+import qualified Pantomime.Grisette.BitVector as Pantomime
 import Pantomime.Dict (normNumLitTy)
 
 clashInterp

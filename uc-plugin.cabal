@@ -39,13 +39,13 @@ library
       Pantomime.Dict
       Pantomime.Environment
       Pantomime.Evaluate
+      Pantomime.Grisette.BitVector
+      Pantomime.Grisette.SizedBV
       Pantomime.Grisette.Union
       Pantomime.Monad.GHC
       Pantomime.MonadEval
       Pantomime.Passes
       Pantomime.Runtime
-      Pantomime.Sized.BitVector
-      Pantomime.Sized.Class
       Pantomime.Solve
       Pantomime.Unification
       Pantomime.Util
