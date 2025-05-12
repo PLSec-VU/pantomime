@@ -39,6 +39,7 @@ library
       Pantomime.Dict
       Pantomime.Environment
       Pantomime.Evaluate
+      Pantomime.Grisette.Union
       Pantomime.Monad.GHC
       Pantomime.MonadEval
       Pantomime.Passes
