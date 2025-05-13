@@ -148,7 +148,7 @@ siEquality
   :: forall m ws
    . MonadEval m
   => KnownWordSize ws
-  => (forall n. KnownPos n => Pantomime.IntN S n -> Pantomime.IntN S n -> SymBool)
+  => (forall n. KnownNat n => Pantomime.IntN S n -> Pantomime.IntN S n -> SymBool)
   -> TyCon
   -> Value m ws
 siEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
