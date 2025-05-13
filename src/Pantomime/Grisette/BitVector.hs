@@ -15,7 +15,8 @@ module Pantomime.Grisette.BitVector
 
 import GHC.TypeNats (type (<=), type (+), Natural, KnownNat, natVal)
 
-import Grisette hiding (fill, IntN, WordN)
+import qualified Grisette (SizedBV (..))
+import Grisette hiding (fill, IntN, WordN, SizedBV (..))
 import Grisette.Unified
   ( EvalModeTag (..)
   , GetIntN
@@ -240,71 +241,71 @@ instance (DecideEvalMode mode, KnownNat n) => ToSym (IntN mode n) (IntN S n) whe
 instance ConRep (IntN S n) where
   type ConType (IntN S n) = IntN C n
 
-instance DecideEvalMode mode => SizedBV' (IntN mode) where
-  sizedBVConcat'
+instance DecideEvalMode mode => SizedBV (IntN mode) where
+  sizedBVConcat
     :: forall l r
      . KnownNat l
     => KnownNat r
     => IntN mode l
     -> IntN mode r
     -> IntN mode (l + r)
-  sizedBVConcat' = curry $ \case
+  sizedBVConcat = curry $ \case
     (IntZ, IntZ) -> IntZ
     (IntZ, rhs) -> rhs
     (lhs, IntZ) -> lhs
     (IntP lhs, IntP rhs) -> do
       let op :: GetIntN mode l -> GetIntN mode r -> GetIntN mode (l + r)
-          op = withMode @mode sizedBVConcat sizedBVConcat
+          op = withMode @mode Grisette.sizedBVConcat Grisette.sizedBVConcat
       -- SAFETY: Haskell isn't able to infer that the sum of two positives is
       -- also positive, so we just unsafely get the proof for it.
       case unsafeDict @(1 <= l + r) of
         Dict -> IntP $ op lhs rhs
 
-  sizedBVZext'
+  sizedBVZext
     :: forall l r
      . KnownNat l
     => KnownNat r
     => l <= r
     => IntN mode l
     -> IntN mode r
-  sizedBVZext' = \case
+  sizedBVZext = \case
     IntZ -> do
       let op :: 1 <= r => GetIntN mode r
           op = withMode @mode
-            (sizedBVZext @_ @1 Proxy 0)
-            (sizedBVZext @_ @1 Proxy 0)
+            (Grisette.sizedBVZext @_ @1 Proxy 0)
+            (Grisette.sizedBVZext @_ @1 Proxy 0)
       withSizeI op
     IntP value -> do
       let op :: GetIntN mode l -> GetIntN mode r
           op = withMode @mode
-            (sizedBVZext @_ @l @r Proxy)
-            (sizedBVZext @_ @l @r Proxy)
+            (Grisette.sizedBVZext @_ @l @r Proxy)
+            (Grisette.sizedBVZext @_ @l @r Proxy)
       withSizeI $ op value
 
-  sizedBVSext'
+  sizedBVSext
     :: forall l r
      . KnownNat l
     => KnownNat r
     => l <= r
     => IntN mode l
     -> IntN mode r
-  sizedBVSext' = \case
+  sizedBVSext = \case
     IntZ -> do
       let op :: 1 <= r => GetIntN mode r
           op = withMode @mode
-            (sizedBVSext @_ @1 Proxy 0)
-            (sizedBVSext @_ @1 Proxy 0)
+            (Grisette.sizedBVSext @_ @1 Proxy 0)
+            (Grisette.sizedBVSext @_ @1 Proxy 0)
       withSizeI op
     IntP value -> do
       let op :: GetIntN mode l -> GetIntN mode r
           op = withMode @mode
-            (sizedBVSext @_ @l @r Proxy)
-            (sizedBVSext @_ @l @r Proxy)
+            (Grisette.sizedBVSext @_ @l @r Proxy)
+            (Grisette.sizedBVSext @_ @l @r Proxy)
       withSizeI $ op value
 
-  sizedBVExt' = sizedBVSext'
+  sizedBVExt = sizedBVSext
 
-  sizedBVSelect''
+  sizedBVSelect'
     :: forall idx width n
      . KnownNat idx
     => KnownNat width
@@ -314,14 +315,14 @@ instance DecideEvalMode mode => SizedBV' (IntN mode) where
     -> Proxy width
     -> IntN mode n
     -> IntN mode width
-  sizedBVSelect'' _ _ = \case
+  sizedBVSelect' _ _ = \case
     IntZ -> case unsafeDict @(width ~ 0) of
       Dict -> IntZ
     IntP value -> do
       let op :: 1 <= width => GetIntN mode n -> GetIntN mode width
           op = withMode @mode
-            (sizedBVSelect @_ @n @idx @width Proxy Proxy)
-            (sizedBVSelect @_ @n @idx @width Proxy Proxy)
+            (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
+            (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
       withSizeI $ op value
 
 data WordN (mode :: EvalModeTag) (n :: Natural) where
@@ -532,71 +533,71 @@ instance (DecideEvalMode mode, KnownNat n) => ToSym (WordN mode n) (WordN S n) w
 instance ConRep (WordN S n) where
   type ConType (WordN S n) = WordN C n
 
-instance DecideEvalMode mode => SizedBV' (WordN mode) where
-  sizedBVConcat'
+instance DecideEvalMode mode => SizedBV (WordN mode) where
+  sizedBVConcat
     :: forall l r
      . KnownNat l
     => KnownNat r
     => WordN mode l
     -> WordN mode r
     -> WordN mode (l + r)
-  sizedBVConcat' = curry $ \case
+  sizedBVConcat = curry $ \case
     (WordZ, WordZ) -> WordZ
     (WordZ, rhs) -> rhs
     (lhs, WordZ) -> lhs
     (WordP lhs, WordP rhs) -> do
       let op :: GetWordN mode l -> GetWordN mode r -> GetWordN mode (l + r)
-          op = withMode @mode sizedBVConcat sizedBVConcat
+          op = withMode @mode Grisette.sizedBVConcat Grisette.sizedBVConcat
       -- SAFETY: Haskell isn't able to infer that the sum of two positives is
       -- also positive, so we just unsafely get the proof for it.
       case unsafeDict @(1 <= l + r) of
         Dict -> WordP $ op lhs rhs
 
-  sizedBVZext'
+  sizedBVZext
     :: forall l r
      . KnownNat l
     => KnownNat r
     => l <= r
     => WordN mode l
     -> WordN mode r
-  sizedBVZext' = \case
+  sizedBVZext = \case
     WordZ -> do
       let op :: 1 <= r => GetWordN mode r
           op = withMode @mode
-            (sizedBVZext @_ @1 Proxy 0)
-            (sizedBVZext @_ @1 Proxy 0)
+            (Grisette.sizedBVZext @_ @1 Proxy 0)
+            (Grisette.sizedBVZext @_ @1 Proxy 0)
       withSizeW op
     WordP value -> do
       let op :: GetWordN mode l -> GetWordN mode r
           op = withMode @mode
-            (sizedBVZext @_ @l @r Proxy)
-            (sizedBVZext @_ @l @r Proxy)
+            (Grisette.sizedBVZext @_ @l @r Proxy)
+            (Grisette.sizedBVZext @_ @l @r Proxy)
       withSizeW $ op value
 
-  sizedBVSext'
+  sizedBVSext
     :: forall l r
      . KnownNat l
     => KnownNat r
     => l <= r
     => WordN mode l
     -> WordN mode r
-  sizedBVSext' = \case
+  sizedBVSext = \case
     WordZ -> do
       let op :: 1 <= r => GetWordN mode r
           op = withMode @mode
-            (sizedBVSext @_ @1 Proxy 0)
-            (sizedBVSext @_ @1 Proxy 0)
+            (Grisette.sizedBVSext @_ @1 Proxy 0)
+            (Grisette.sizedBVSext @_ @1 Proxy 0)
       withSizeW op
     WordP value -> do
       let op :: GetWordN mode l -> GetWordN mode r
           op = withMode @mode
-            (sizedBVSext @_ @l @r Proxy)
-            (sizedBVSext @_ @l @r Proxy)
+            (Grisette.sizedBVSext @_ @l @r Proxy)
+            (Grisette.sizedBVSext @_ @l @r Proxy)
       withSizeW $ op value
 
-  sizedBVExt' = sizedBVZext'
+  sizedBVExt = sizedBVZext
 
-  sizedBVSelect''
+  sizedBVSelect'
     :: forall idx width n
      . KnownNat idx
     => KnownNat width
@@ -606,14 +607,14 @@ instance DecideEvalMode mode => SizedBV' (WordN mode) where
     -> Proxy width
     -> WordN mode n
     -> WordN mode width
-  sizedBVSelect'' _ _ = \case
+  sizedBVSelect' _ _ = \case
     WordZ -> case unsafeDict @(width ~ 0) of
       Dict -> WordZ
     WordP value -> do
       let op :: 1 <= width => GetWordN mode n -> GetWordN mode width
           op = withMode @mode
-            (sizedBVSelect @_ @n @idx @width Proxy Proxy)
-            (sizedBVSelect @_ @n @idx @width Proxy Proxy)
+            (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
+            (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
       withSizeW $ op value
 
 instance (DecideEvalMode mode, KnownNat n) => SignConversion (WordN mode n) (IntN mode n) where

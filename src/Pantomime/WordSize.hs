@@ -45,8 +45,6 @@ import Data.Bits (Bits)
 import Data.Data (type (:~:) (..), Proxy (..))
 import Data.Type.Ord (Compare)
 
--- import Grisette
-
 -- | Constraint to ensure that the WordBits are non-zero.
 --
 -- Note that technically we shouldn't really need this, as WordBits can never be

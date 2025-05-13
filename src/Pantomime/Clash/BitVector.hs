@@ -47,7 +47,7 @@ import Data.Coerce (coerce)
 import Data.Typeable (cast, Proxy (..))
 
 import Grisette.Unified (EvalModeTag (..))
-import Grisette
+import Grisette hiding (SizedBV (..))
 
 import Pantomime.Value
 import Pantomime.MonadEval
@@ -598,7 +598,7 @@ sliceValue bvTyCon snTyCon addTyFam subTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \
                 Dict <- pure $ unsafeDict @(idx + w <= n)
 
                 value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
-                let sliced = sizedBVSelect' @_ @idx @w @n <$> value'
+                let sliced = sizedBVSelect @_ @idx @w @n <$> value'
 
                 let size' = mkTyConApp subTyFam [upperInc, lower]
                 let resTy = mkTyConApp bvTyCon [size']
@@ -652,7 +652,7 @@ concatValue bvTyCon addTyFam = Fun (mkNatTyVarTy alphaTyVar) $ \case
             Dict <- pure $ unsafeDict @(l + r ~ n)
 
             let concatted :: RuntimeValue S (Pantomime.WordN S (l + r))
-                concatted = liftA2 sizedBVConcat' lhs' rhs'
+                concatted = liftA2 sizedBVConcat lhs' rhs'
 
             let concatted' :: RuntimeValue S (Pantomime.WordN S n)
                 concatted' = coerce concatted

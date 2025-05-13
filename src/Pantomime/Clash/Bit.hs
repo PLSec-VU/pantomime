@@ -22,7 +22,7 @@ import Clash.Sized.Internal.BitVector
   )
 
 import Grisette.Unified (EvalModeTag (..))
-import Grisette
+import Grisette hiding (SizedBV (..))
 
 import Control.Monad.Except (MonadError (..))
 
@@ -180,7 +180,7 @@ msbValue bvTyCon bitTy = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
         SomeNat @idx _ <- pure . someNatVal $ size - 1
         Dict <- pure $ unsafeDict @(idx + 1 <= n)
         let sliced :: RuntimeValue S (Pantomime.WordN S 1)
-            sliced = sizedBVSelect' @_ @idx @1 @n <$> value'
+            sliced = sizedBVSelect @_ @idx @1 @n <$> value'
 
         pure $ Opaque' bitTy sliced
       _ -> throwError IllTyped

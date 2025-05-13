@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE TypeAbstractions #-}
 
 module Pantomime.Dict
   ( Dict (..)
@@ -12,6 +13,8 @@ module Pantomime.Dict
   , cmpNat'
   , normNumLitTy
   , someTyNat
+  , SomeNat' (..)
+  , typeSub
   , withSize
   ) where
 
@@ -23,10 +26,13 @@ import Data.Data (Proxy(..))
 
 import Control.Applicative (Alternative (..))
 import Control.Monad (guard)
+import Control.Monad.Identity (runIdentity)
 
 import Unsafe.Coerce (unsafeCoerce)
 import GHC.Builtin.Types.Literals
 
+-- TODO: This file is a bit all over the place. I think we should just import
+-- the small library that exposes Dict instead of redefining it.
 data Dict c where
   Dict :: c => Dict c
 
@@ -89,6 +95,20 @@ someTyNat ty = do
   guard $ num >= 0
   pure $ someNatVal (fromInteger num)
 
+data SomeNat' eq where
+  SomeNat' :: forall n eq. (KnownNat n, n ~ eq) => SomeNat' eq
+
+-- | Type-level subtraction.
+typeSub :: forall lhs rhs. KnownNat lhs => KnownNat rhs => SomeNat' (lhs - rhs)
+typeSub = runIdentity $ do
+  let lhs' = natVal $ Proxy @lhs
+  let rhs' = natVal $ Proxy @rhs
+  SomeNat @n _ <- pure . someNatVal $ lhs' - rhs'
+  Dict <- pure $ unsafeDict @(lhs - rhs ~ n)
+  pure $ SomeNat' @n @(lhs - rhs)
+
+
+-- TODO: Move this thing to Pantomime.Grisette.BitVector
 withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
 withSize con sym = case natVal $ Proxy @n of
   0 -> case unsafeDict @(n ~ 0) of
