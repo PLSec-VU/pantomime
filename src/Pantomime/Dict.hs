@@ -107,7 +107,6 @@ typeSub = runIdentity $ do
   Dict <- pure $ unsafeDict @(lhs - rhs ~ n)
   pure $ SomeNat' @n @(lhs - rhs)
 
-
 -- TODO: Move this thing to Pantomime.Grisette.BitVector
 withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
 withSize con sym = case natVal $ Proxy @n of

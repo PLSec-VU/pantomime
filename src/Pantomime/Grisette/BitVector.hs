@@ -31,10 +31,16 @@ import Data.Data (Proxy(..))
 import Pantomime.Dict (withSize, Dict (..), unsafeDict)
 import Pantomime.Grisette.SizedBV
 
+-- | Sized integer primitive.
+--
+-- Compared to Grisette 'SymIntN' and 'IntN', this allows for zero-sized
+-- bitvectors. Additionally, it uses the unified interface to both represent
+-- the symbolic and non-symbolic version, as dictated by the 'EvalModeTag'.
 data IntN (mode :: EvalModeTag) (n :: Natural) where
   IntZ :: IntN mode 0
   IntP :: 1 <= n => GetIntN mode n -> IntN mode n
 
+-- | Helper function to wrap a binary function over Grisette sized integers.
 binaryI
   :: forall mode n
    . (1 <= n => GetIntN mode n -> GetIntN mode n -> GetIntN mode n)
@@ -45,6 +51,7 @@ binaryI op = curry $ \case
   (IntZ, IntZ) -> IntZ
   (IntP lhs, IntP rhs) -> IntP $ op lhs rhs
 
+-- | Helper function to wrap a unary function over Grisette sized integers.
 unaryI
   :: forall mode n
    . (1 <= n => GetIntN mode n -> GetIntN mode n)
@@ -54,6 +61,7 @@ unaryI op = \case
   IntZ -> IntZ
   IntP value -> IntP $ op value
 
+-- | Helper function to wrap a Grisette sized integers value.
 withSizeI
   :: forall n mode
    . KnownNat n
@@ -325,10 +333,16 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
             (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
       withSizeI $ op value
 
+-- | Sized word primitive.
+--
+-- Compared to Grisette 'SymWordN' and 'WordN', this allows for zero-sized
+-- bitvectors. Additionally, it uses the unified interface to both represent
+-- the symbolic and non-symbolic version, as dictated by the 'EvalModeTag'.
 data WordN (mode :: EvalModeTag) (n :: Natural) where
   WordZ :: WordN mode 0
   WordP :: 1 <= n => GetWordN mode n -> WordN mode n
 
+-- | Helper function to wrap a binary function over Grisette sized words.
 binaryW
   :: forall mode n
    . (1 <= n => GetWordN mode n -> GetWordN mode n -> GetWordN mode n)
@@ -339,6 +353,7 @@ binaryW op = curry $ \case
   (WordZ, WordZ) -> WordZ
   (WordP lhs, WordP rhs) -> WordP $ op lhs rhs
 
+-- | Helper function to wrap a unary function over Grisette sized words.
 unaryW
   :: forall mode n
    . (1 <= n => GetWordN mode n -> GetWordN mode n)
@@ -348,6 +363,7 @@ unaryW op = \case
   WordZ -> WordZ
   WordP value -> WordP $ op value
 
+-- | Helper function to wrap a Grisette sized word value.
 withSizeW
   :: forall n mode
    . KnownNat n
