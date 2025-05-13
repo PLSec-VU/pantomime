@@ -202,15 +202,23 @@ instance (DecideEvalMode mode, KnownNat n) => Mergeable (IntN mode n) where
 instance KnownNat n => SimpleMergeable (IntN S n) where
   mrgIte cond = binaryI $ mrgIte cond
 
-instance (KnownNat n, KnownNat n') => SymFromIntegral (IntN S n) (IntN S n') where
+instance (DecideEvalMode mode, KnownNat n, KnownNat n')
+  => SymFromIntegral (IntN mode n) (IntN mode n') where
   symFromIntegral = \case
-    IntZ -> withSizeI 0
-    IntP value -> withSizeI $ symFromIntegral value
+    IntZ -> withSizeI $ withMode @mode 0 0
+    IntP value -> do
+      let op :: 1 <= n' => GetIntN mode n -> GetIntN mode n'
+          op = withMode @mode fromIntegral symFromIntegral
+      withSizeI $ op value
 
-instance (KnownNat n, KnownNat n') => SymFromIntegral (WordN S n) (IntN S n') where
+instance (DecideEvalMode mode, KnownNat n, KnownNat n')
+  => SymFromIntegral (WordN mode n) (IntN mode n') where
   symFromIntegral = \case
-    WordZ -> withSizeI 0
-    WordP value -> withSizeI $ symFromIntegral value
+    WordZ -> withSizeI $ withMode @mode 0 0
+    WordP value -> do
+      let op :: 1 <= n' => GetWordN mode n -> GetIntN mode n'
+          op = withMode @mode fromIntegral symFromIntegral
+      withSizeI $ op value
 
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymWordN n) (IntN S n') where
   symFromIntegral value = withSizeI $ symFromIntegral value
@@ -502,15 +510,22 @@ instance (DecideEvalMode mode, KnownNat n) => Mergeable (WordN mode n) where
 instance KnownNat n => SimpleMergeable (WordN S n) where
   mrgIte cond = binaryW $ mrgIte cond
 
-instance (KnownNat n, KnownNat n') => SymFromIntegral (WordN S n) (WordN S n') where
+instance (DecideEvalMode mode, KnownNat n, KnownNat n')
+  => SymFromIntegral (WordN mode n) (WordN mode n') where
   symFromIntegral = \case
-    WordZ -> withSizeW 0
-    WordP value -> withSizeW $ symFromIntegral value
+    WordZ -> withSizeW $ withMode @mode 0 0
+    WordP value -> do
+      let op :: 1 <= n' => GetWordN mode n -> GetWordN mode n'
+          op = withMode @mode fromIntegral symFromIntegral
+      withSizeW $ op value
 
-instance (KnownNat n, KnownNat n') => SymFromIntegral (IntN S n) (WordN S n') where
+instance (DecideEvalMode mode, KnownNat n, KnownNat n') => SymFromIntegral (IntN mode n) (WordN mode n') where
   symFromIntegral = \case
-    IntZ -> withSizeW 0
-    IntP value -> withSizeW $ symFromIntegral value
+    IntZ -> withSizeW $ withMode @mode 0 0
+    IntP value -> do
+      let op :: 1 <= n' => GetIntN mode n -> GetWordN mode n'
+          op = withMode @mode fromIntegral symFromIntegral
+      withSizeW $ op value
 
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymWordN n) (WordN S n') where
   symFromIntegral value = withSizeW $ symFromIntegral value
