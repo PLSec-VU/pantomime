@@ -9,13 +9,15 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
--- {-# LANGUAGE UndecidableInstances #-}
 
 module Pantomime.WordSize
   ( KnownWordSize
   , WordBits
   , KnownPos
   , KnownBitSize (..)
+
+  , IntArch (..)
+  , WordArch (..)
 
   , SymInt (..)
   , SymWord (..)
@@ -45,6 +47,10 @@ import Data.Bits (Bits)
 import Data.Data (type (:~:) (..), Proxy (..))
 import Data.Type.Ord (Compare)
 
+import Grisette.Unified (DecideEvalMode (..))
+
+import Pantomime.Grisette.BitVector
+
 -- | Constraint to ensure that the WordBits are non-zero.
 --
 -- Note that technically we shouldn't really need this, as WordBits can never be
@@ -61,6 +67,121 @@ type family WordBits ws = n | n -> ws where
 
 -- | Constraint required by most bit-operations on grisette bitvectors.
 type KnownPos n = (KnownNat n, 1 <= n)
+
+-- | Wrapper to allow alternative typeclass instances for word-sized ints.
+newtype IntArch mode ws where
+  IntArch :: IntN mode (WordBits ws) -> IntArch mode ws
+
+unIntArch :: IntArch mode ws -> IntN mode (WordBits ws)
+unIntArch (IntArch value) = value
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Num (IntArch mode ws)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Eq (IntArch mode ws)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Bits (IntArch mode ws)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => SymOrd (IntArch mode ws)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => SymEq (IntArch mode ws)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => SymShift (IntArch mode ws)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (IntN mode n) (IntArch mode ws)
+
+deriving via IntN mode n
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (IntArch mode ws) (IntN mode n)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (WordN mode n) (IntArch mode ws)
+
+deriving via IntN mode n
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (WordArch mode ws) (IntN mode n)
+
+deriving via IntN mode (WordBits ws')
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
+  => SymFromIntegral (IntArch mode ws) (IntArch mode ws')
+
+deriving via IntN mode (WordBits ws')
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
+  => SymFromIntegral (WordArch mode ws) (IntArch mode ws')
+
+-- | Wrapper to allow alternative typeclass instances for word-sized words.
+newtype WordArch mode ws where
+  WordArch :: WordN mode (WordBits ws) -> WordArch mode ws
+
+unWordArch :: WordArch mode ws -> WordN mode (WordBits ws)
+unWordArch (WordArch value) = value
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Num (WordArch mode ws)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Eq (WordArch mode ws)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Bits (WordArch mode ws)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => SymOrd (WordArch mode ws)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => SymEq (WordArch mode ws)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => SymShift (WordArch mode ws)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (IntN mode n) (WordArch mode ws)
+
+deriving via WordN mode n
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (IntArch mode ws) (WordN mode n)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (WordN mode n) (WordArch mode ws)
+
+deriving via WordN mode n
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
+  => SymFromIntegral (WordArch mode ws) (WordN mode n)
+
+deriving via WordN mode (WordBits ws')
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
+  => SymFromIntegral (WordArch mode ws) (WordArch mode ws')
+
+deriving via WordN mode (WordBits ws')
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
+  => SymFromIntegral (IntArch mode ws) (WordArch mode ws')
+
+instance (DecideEvalMode mode, KnownWordSize ws)
+  => SignConversion (WordArch mode ws) (IntArch mode ws) where
+  toSigned = IntArch . toSigned . unWordArch
+  toUnsigned = WordArch . toUnsigned . unIntArch
 
 -- | Wrapper to allow alternative typeclass instances for word-sized ints.
 --
@@ -189,6 +310,21 @@ instance KnownWordSize ws => SignConversion (SymWord ws) (SymInt ws) where
 -- This may be used to add constraints on bitvector conversion, without
 -- necessarily requiring the size to be determined by a type natural as
 -- argument.
+class HasBitSize bv where
+  type BitSize' bv :: Nat
+
+instance HasBitSize (IntN mode n) where
+  type BitSize' (IntN mode n) = n
+
+instance HasBitSize (WordN mode n) where
+  type BitSize' (WordN mode n) = n
+
+instance HasBitSize (IntArch mode ws) where
+  type BitSize' (IntArch mode ws) = WordBits ws
+
+instance HasBitSize (WordArch mode ws) where
+  type BitSize' (WordArch mode ws) = WordBits ws
+
 class KnownPos (BitSize bv) => KnownBitSize bv where
   type BitSize bv :: Nat
 
