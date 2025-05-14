@@ -63,6 +63,7 @@ library
       DeriveTraversable
       FlexibleContexts
       FlexibleInstances
+      ImportQualifiedPost
       LambdaCase
       MultiParamTypeClasses
       MultiWayIf
@@ -114,6 +115,7 @@ executable uc-plugin-exe
       DeriveTraversable
       FlexibleContexts
       FlexibleInstances
+      ImportQualifiedPost
       LambdaCase
       MultiParamTypeClasses
       MultiWayIf
@@ -155,6 +157,7 @@ test-suite uc-plugin-test
       DeriveTraversable
       FlexibleContexts
       FlexibleInstances
+      ImportQualifiedPost
       LambdaCase
       MultiParamTypeClasses
       MultiWayIf

@@ -15,8 +15,32 @@ module Pantomime.Grisette.BitVector
 
 import GHC.TypeNats (type (<=), type (+), Natural, KnownNat, natVal)
 
-import qualified Grisette (SizedBV (..))
-import Grisette hiding (fill, IntN, WordN, SizedBV (..))
+import Grisette qualified (SizedBV (..))
+import Grisette
+  ( SymEq (..)
+  , SymOrd (..)
+  , SymFiniteBits (..)
+  , SymShift (..)
+  , SymRotate (..)
+  , SymFromIntegral (..)
+  , SignConversion (..)
+  , ConRep (..)
+  , ToCon (..)
+  , ToSym (..)
+  , EvalSym (..)
+  , Model
+  , Mergeable (..)
+  , SimpleMergeable (..)
+  , MergingStrategy (..)
+  , ITEOp (..)
+  , GenSym (..)
+  , GenSymSimple (..)
+  , SymWordN
+  , SymIntN
+  , SymInteger
+  , true
+  , false
+  )
 import Grisette.Unified
   ( EvalModeTag (..)
   , GetIntN
@@ -341,6 +365,16 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
             (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
       withSizeI $ op value
 
+instance (DecideEvalMode mode, KnownNat n, GenSym spec (GetIntN mode n)) => GenSym spec (IntN mode n) where
+  fresh spec = withSize @n
+    (pure $ pure IntZ)
+    (fmap IntP <$> fresh spec)
+
+instance (KnownNat n, GenSymSimple spec (GetIntN mode n)) => GenSymSimple spec (IntN mode n) where
+  simpleFresh spec = withSize @n
+    (pure IntZ)
+    (IntP <$> simpleFresh spec)
+
 -- | Sized word primitive.
 --
 -- Compared to Grisette 'SymWordN' and 'WordN', this allows for zero-sized
@@ -647,6 +681,16 @@ instance DecideEvalMode mode => SizedBV (WordN mode) where
             (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
             (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
       withSizeW $ op value
+
+instance (DecideEvalMode mode, KnownNat n, GenSym spec (GetWordN mode n)) => GenSym spec (WordN mode n) where
+  fresh spec = withSize @n
+    (pure $ pure WordZ)
+    (fmap WordP <$> fresh spec)
+
+instance (KnownNat n, GenSymSimple spec (GetWordN mode n)) => GenSymSimple spec (WordN mode n) where
+  simpleFresh spec = withSize @n
+    (pure WordZ)
+    (WordP <$> simpleFresh spec)
 
 instance (DecideEvalMode mode, KnownNat n) => SignConversion (WordN mode n) (IntN mode n) where
   toSigned = \case

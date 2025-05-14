@@ -25,6 +25,7 @@ default-extensions:
 - DeriveTraversable
 - FlexibleContexts
 - FlexibleInstances
+- ImportQualifiedPost
 - LambdaCase
 - MultiParamTypeClasses
 - MultiWayIf
