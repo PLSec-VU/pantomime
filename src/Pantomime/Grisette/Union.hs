@@ -166,5 +166,8 @@ instance DecideEvalMode mode => ToCon1 (Union S) (Union mode) where
     let op = withMode @mode liftToCon liftToCon
     Union <$> op f m
 
+instance GenSym spec a => GenSym spec (Union S a) where
+  fresh spec = fmap Union <$> fresh spec
+
 instance GenSym spec a => GenSymSimple spec (Union S a) where
-  simpleFresh spec = Union <$> fresh spec
+  simpleFresh spec = Union <$> simpleFresh spec
