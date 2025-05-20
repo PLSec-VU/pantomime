@@ -139,8 +139,11 @@ instance (DecideEvalMode mode, ToSym a b) => ToSym (RuntimeValue mode a) (Runtim
 instance (DecideEvalMode mode, ToCon a b) => ToCon (RuntimeValue S a) (RuntimeValue mode b) where
   toCon = fmap RuntimeValue . toCon . unRuntimeValue
 
--- TODO: We could do a GenSym implementation of RuntimeValue for all eval modes,
--- whereas GenSymSimple can only be for symbolic eval mode.
+instance (GenSym () RuntimeError, GenSym () a) => GenSym () (RuntimeValue S a)
+
+instance (GenSym espec RuntimeError, GenSym aspec a) => GenSym (Either espec aspec) (RuntimeValue S a)
+
+instance (GenSym espec RuntimeError, GenSym aspec a) => GenSym (espec, aspec) (RuntimeValue S a)
 
 instance (GenSym () RuntimeError, GenSym () a) => GenSymSimple () (RuntimeValue S a) where
   simpleFresh _ = simpleFresh ((), ())
@@ -186,7 +189,6 @@ data RuntimeError where
   deriving PPrint via Default RuntimeError
 
 instance GenSym RuntimeError RuntimeError where
-  fresh = pure . pure
 
 instance GenSym () RuntimeError where
   fresh = derivedNoSpecFresh
