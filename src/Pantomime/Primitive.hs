@@ -23,7 +23,6 @@ import Grisette.Unified (DecideEvalMode (..), EvalModeTag (..))
 import Grisette
   ( LogicalOp (..)
   , EvalSym (..)
-  , GenSym (..)
   , GenSymSimple (..)
   )
 
@@ -189,26 +188,6 @@ instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive S ws) where
       array <- evalIte cond larr rarr
       pure $ ByteArray size array
     _ -> throwError IllTyped
-
-class
-  ( GenSym spec SymInteger
-  , GenSym spec SymFP32
-  , GenSym spec SymFP64
-  , forall n. KnownPos n => GenSym spec (SymIntN n)
-  , forall n. KnownPos n => GenSym spec (SymWordN n)
-  , forall n. KnownNat n => GenSym spec (Pantomime.IntN S n)
-  , forall n. KnownNat n => GenSym spec (Pantomime.WordN S n)
-  ) => PrimitiveGenSym spec
-
-instance
-  ( GenSym spec SymInteger
-  , GenSym spec SymFP32
-  , GenSym spec SymFP64
-  , forall n. KnownPos n => GenSym spec (SymIntN n)
-  , forall n. KnownPos n => GenSym spec (SymWordN n)
-  , forall n. KnownNat n => GenSym spec (Pantomime.IntN S n)
-  , forall n. KnownNat n => GenSym spec (Pantomime.WordN S n)
-  ) => PrimitiveGenSym spec
 
 class
   ( GenSymSimple spec (RuntimeValue S SymInteger)
