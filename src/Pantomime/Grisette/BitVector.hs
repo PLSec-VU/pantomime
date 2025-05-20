@@ -365,12 +365,22 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
             (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
       withSizeI $ op value
 
-instance (DecideEvalMode mode, KnownNat n, GenSym spec (GetIntN mode n)) => GenSym spec (IntN mode n) where
+instance (DecideEvalMode mode, KnownNat n) => GenSym (IntN mode n) (IntN mode n) where
+  fresh = \case
+    IntZ -> pure $ pure IntZ
+    IntP value -> do
+      let op = withMode @mode fresh fresh
+      fmap IntP <$> op value
+
+instance KnownNat n => GenSym () (IntN S n) where
   fresh spec = withSize @n
     (pure $ pure IntZ)
     (fmap IntP <$> fresh spec)
 
-instance (KnownNat n, GenSymSimple spec (GetIntN mode n)) => GenSymSimple spec (IntN mode n) where
+instance GenSymSimple (IntN mode n) (IntN mode n) where
+  simpleFresh = pure
+
+instance KnownNat n => GenSymSimple () (IntN S n) where
   simpleFresh spec = withSize @n
     (pure IntZ)
     (IntP <$> simpleFresh spec)
@@ -682,12 +692,22 @@ instance DecideEvalMode mode => SizedBV (WordN mode) where
             (Grisette.sizedBVSelect @_ @n @idx @width Proxy Proxy)
       withSizeW $ op value
 
-instance (DecideEvalMode mode, KnownNat n, GenSym spec (GetWordN mode n)) => GenSym spec (WordN mode n) where
+instance (DecideEvalMode mode, KnownNat n) => GenSym (WordN mode n) (WordN mode n) where
+  fresh = \case
+    WordZ -> pure $ pure WordZ
+    WordP value -> do
+      let op = withMode @mode fresh fresh
+      fmap WordP <$> op value
+
+instance KnownNat n => GenSym () (WordN S n) where
   fresh spec = withSize @n
     (pure $ pure WordZ)
     (fmap WordP <$> fresh spec)
 
-instance (KnownNat n, GenSymSimple spec (GetWordN mode n)) => GenSymSimple spec (WordN mode n) where
+instance GenSymSimple (WordN mode n) (WordN mode n) where
+  simpleFresh = pure
+
+instance KnownNat n => GenSymSimple () (WordN S n) where
   simpleFresh spec = withSize @n
     (pure WordZ)
     (WordP <$> simpleFresh spec)
