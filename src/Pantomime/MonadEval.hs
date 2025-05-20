@@ -11,6 +11,7 @@ module Pantomime.MonadEval
 
   , EvalIte (..)
   , WeakEq (..)
+  , EvalGenSym (..)
   ) where
 
 import GHC.Plugins
@@ -76,6 +77,9 @@ class Spineable mode a where
 instance DecideEvalMode mode => Spineable mode (RuntimeValue mode a) where
   spine = void
 
+-- TODO: We kind of want to get rid of the monad at the top level. The blocker
+-- for this is Value containing the monad itself. The same for other functions
+-- in this module.
 class MonadEval m => EvalIte m a where
   evalIte :: SymBool -> a -> a -> m a
 
@@ -99,3 +103,7 @@ instance (MonadEval m, SymEq a) => WeakEq m (RuntimeValue S a) where
     let result = liftA2 cmp lhs' rhs'
 
     pure $ simpleMerge result
+
+-- TODO: Perhaps not the best naming, but it will do for now.
+class MonadEval m => EvalGenSym m spec a where
+  evalFresh :: spec -> m a
