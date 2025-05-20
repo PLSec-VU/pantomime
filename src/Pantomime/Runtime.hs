@@ -10,7 +10,6 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DeriveLift #-}
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 
@@ -41,10 +40,14 @@ import Grisette
   , SymEq
   , SymEq1
   , SymBranching
+  , GenSym (..)
+  , GenSymSimple (..)
   , ToSym (..)
   , ToCon (..)
   , Default (..)
   , PPrint
+  , derivedNoSpecFresh
+  , chooseUnionFresh
   )
 
 import Pantomime.Grisette.Union
@@ -136,20 +139,43 @@ instance (DecideEvalMode mode, ToSym a b) => ToSym (RuntimeValue mode a) (Runtim
 instance (DecideEvalMode mode, ToCon a b) => ToCon (RuntimeValue S a) (RuntimeValue mode b) where
   toCon = fmap RuntimeValue . toCon . unRuntimeValue
 
+-- TODO: We could do a GenSym implementation of RuntimeValue for all eval modes,
+-- whereas GenSymSimple can only be for symbolic eval mode.
+
+instance (GenSym () RuntimeError, GenSym () a) => GenSymSimple () (RuntimeValue S a) where
+  simpleFresh _ = simpleFresh ((), ())
+
+instance (GenSym espec RuntimeError, GenSym aspec a) => GenSymSimple (Either espec aspec) (RuntimeValue S a) where
+  simpleFresh = \case
+    Left espec -> wrap . fmap Left <$> fresh espec
+    Right aspec -> wrap . fmap Right <$> fresh aspec
+    where
+      wrap = RuntimeValue . ExceptT . Union
+
+instance (GenSym espec RuntimeError, GenSym aspec a) => GenSymSimple (espec, aspec) (RuntimeValue S a) where
+  simpleFresh (espec, aspec) = do
+    res <- fresh aspec
+    err <- fresh espec
+    let wrap = RuntimeValue . ExceptT . Union
+    wrap <$> chooseUnionFresh [Left <$> err, Right <$> res]
+
 -- TODO: Add support for all primitive runtime errors.
 -- TODO: We could add support for bottom? I guess we would want an option to
 -- enable/disable bottom values for the checker then? Technically, we need to
 -- deal with errors in any case, so maybe the disable should just ensure the
--- inputs are not bot?
+-- inputs are not bot? How is bottom different from these other errors? Perhaps
+-- we don't need to special case it. When creating fresh values, we should have
+-- some flag to specify whether the fresh values should be considered fallible.
 data RuntimeError where
   Overflow :: RuntimeError
   Underflow :: RuntimeError
   DivideByZero :: RuntimeError
+
   -- | Any Symbolic value that cannot be reached in practise.
   --
-  -- For example, we create a symbolic BigNatural via SymInteger with a
-  -- constraint that the value cannot be negative. This error would be reached
-  -- if the constraint solver tries to instantiate a negative number.
+  -- For example, we create a DataCon via a word sized integer. The integer
+  -- should always be a valid DataCon. This error would be reached if the
+  -- constraint solver tries to instantiate an invalid DataCon.
   Invalid :: RuntimeError
   deriving Show
   deriving Generic
@@ -158,6 +184,15 @@ data RuntimeError where
   deriving EvalSym via Default RuntimeError
   deriving SymEq via Default RuntimeError
   deriving PPrint via Default RuntimeError
+
+instance GenSym RuntimeError RuntimeError where
+  fresh = pure . pure
+
+instance GenSym () RuntimeError where
+  fresh = derivedNoSpecFresh
+
+instance GenSymSimple RuntimeError RuntimeError where
+  simpleFresh = pure
 
 instance Outputable RuntimeError where
   ppr = \case
