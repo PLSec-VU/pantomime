@@ -61,6 +61,9 @@ import Grisette
   , SymOrd (..)
   , SymEq (..)
   , EvalSym (..)
+  , MonadFresh (..)
+  , FreshIndex (..)
+  , nextFreshIndex
   , indexed
   )
 
@@ -975,9 +978,10 @@ freshValue
   => Type
   -> m (Value m ws)
 freshValue ty = do
-  idx <- freshIdx
+  ident <- getIdentifier
+  FreshIndex idx <- nextFreshIndex
   let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
-      untyped = pure . sym $ indexed "!fresh" idx
+      untyped = pure . sym $ indexed ident idx
   typedValue untyped ty
 
 -- | Create fresh binders for the given DataCon.
@@ -1423,8 +1427,9 @@ typedPrimitive value ty
     size <- if
           | value' == throwError Invalid -> pure $ throwError Invalid
           | otherwise -> do
-            idx <- freshIdx
-            let size = sym $ indexed "!fresh" idx
+            ident <- getIdentifier
+            FreshIndex idx <- nextFreshIndex
+            let size = sym $ indexed ident idx
             pure $ pure size
     pure $ ByteArray size value'
   | otherwise = throwError UnsupportedExpr

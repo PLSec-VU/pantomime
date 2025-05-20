@@ -30,6 +30,8 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Control.Monad.Trans.Maybe (MaybeT)
 
+import Grisette (FreshT)
+
 import Pantomime.Util
 
 class Monad m => MonadCore m where
@@ -53,10 +55,17 @@ instance MonadCore m => MonadCore (StateT s m) where
 instance MonadCore m => MonadCore (ExceptT s m) where
   liftCore = lift . liftCore
 
+instance MonadCore m => MonadCore (FreshT m) where
+  liftCore = lift . liftCore
+
 -- FIXME: We should perhaps make a wrapper for CoreM, because this orphan is
 -- not so nice...
 instance MonadFail CoreM where
   fail = liftIO . ioError . userError
+
+-- FIXME: This orphan is not nice. We should change it!
+instance MonadFail m => MonadFail (FreshT m) where
+  fail = lift . fail
 
 -- TODO: Remove prime on name of typeclass and function.
 -- | Anything Monad that has module guts.
@@ -81,6 +90,9 @@ instance HasModGuts m => HasModGuts (MaybeT m) where
   modGuts = lift modGuts
 
 instance HasModGuts m => HasModGuts (ExceptT e m) where
+  modGuts = lift modGuts
+
+instance HasModGuts m => HasModGuts (FreshT m) where
   modGuts = lift modGuts
 
 -- | Debug print GHC structures in a CoreM monad stack.

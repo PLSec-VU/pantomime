@@ -40,11 +40,13 @@ library
       Pantomime.Environment
       Pantomime.Evaluate
       Pantomime.Grisette.BitVector
+      Pantomime.Grisette.GenSym
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.Union
       Pantomime.Monad.GHC
       Pantomime.MonadEval
       Pantomime.Passes
+      Pantomime.Primitive
       Pantomime.Runtime
       Pantomime.Solve
       Pantomime.Unification

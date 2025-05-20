@@ -5,9 +5,6 @@ module Pantomime.MonadEval
   ( MonadEval
   , EvalError (..)
 
-  , SymbolicState (..)
-  , freshIdx
-
   , Constraints
   , Forceable (..)
   , Spineable (..)
@@ -25,12 +22,12 @@ import Grisette
   , SymEq (..)
   , Mergeable
   , SimpleMergeable (..)
+  , MonadFresh
   , simpleMerge
   )
 
 import Control.Monad (void)
 import Control.Monad.Except (MonadError)
-import Control.Monad.State (MonadState (..))
 
 import Data.Composition ((.:.))
 
@@ -40,7 +37,7 @@ import Pantomime.Runtime
 -- TODO: Remove MonadCore from the requirements.
 type MonadEval m =
   ( MonadError EvalError m
-  , MonadState SymbolicState m
+  , MonadFresh m
   , MonadCore m
   , HasModGuts m
   )
@@ -58,16 +55,6 @@ instance Outputable EvalError where
     IllTyped -> text "ill-typed"
     UnsupportedExpr -> text "unsupported expression"
     UnboundVariable -> text "unbound variable"
-
--- | State to track the next unique index for a symbolic identifier.
-newtype SymbolicState where
-  SymbolicState :: { nextIdx :: Int } -> SymbolicState
-
-freshIdx :: MonadState SymbolicState m => m Int
-freshIdx = state $ \s -> do
-    let idx = nextIdx s
-    let s' = s { nextIdx = idx + 1 }
-    (idx, s')
 
 type Constraints mode = RuntimeValue mode ()
 

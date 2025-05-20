@@ -37,11 +37,14 @@ import Grisette
   , LogicalOp (..)
   , z3
   , solve
+  , MonadFresh (..)
+  , FreshIndex (..)
+  , runFreshT
+  , nextFreshIndex
   , indexed
   )
 
 import Control.Monad.Except (MonadError (..), modifyError, runExceptT)
-import Control.Monad.State (evalStateT)
 import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
@@ -105,7 +108,7 @@ exprSymEq'
   => CoreExpr
   -> CoreExpr
   -> m (Either NonEq ())
-exprSymEq' lhs rhs = flip evalStateT (SymbolicState 0) . runExceptT $ do
+exprSymEq' lhs rhs = flip runFreshT "fresh" . runExceptT $ do
   unless (exprType lhs `eqType` exprType rhs) $ do
     throwError $ EvalError IllTyped
 
@@ -177,11 +180,12 @@ symbolicBndrs ty = do
   -- Use state monad to track unique identifier for arguments.
   forM argTys $ \argTy -> do
     -- Get next identifier.
-    idx <- freshIdx
+    ident <- getIdentifier
+    FreshIndex idx <- nextFreshIndex
 
     -- Create symbolic variable.
     let untyped :: forall c t. Solvable c t => RuntimeValue S t
-        untyped = pure . sym $ indexed "!arg" idx
+        untyped = pure . sym $ indexed ident idx
 
     -- Type the symbolic variable according to the argument type.
     let argTy' = scaledThing argTy

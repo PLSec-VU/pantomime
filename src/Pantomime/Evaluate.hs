@@ -14,7 +14,6 @@
 module Pantomime.Evaluate
   ( evaluate
   , MonadEval
-  , SymbolicState (..)
   ) where
 
 import GHC.Plugins hiding (empty, (<>))

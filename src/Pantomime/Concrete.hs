@@ -26,9 +26,18 @@ import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Tc.Utils.TcType (eqType)
 import GHC.TypeLits (SomeNat(..), someNatVal)
 
-import Grisette (ToCon (..), EvalSym (..), evalSymToCon, indexed, Symbol)
 import Grisette.Unified (EvalModeTag (..))
 import Grisette.SymPrim
+import Grisette
+  ( ToCon (..)
+  , EvalSym (..)
+  , MonadFresh (..)
+  , FreshIndex (..)
+  , Symbol
+  , nextFreshIndex
+  , evalSymToCon
+  , indexed
+  )
 
 import Control.Monad.Except (MonadError (..))
 import Control.Monad (forM)
@@ -159,8 +168,9 @@ concretise model = \case
       go value _ = concretise model value
 
   Fun argTy _ -> do
-    idx <- freshIdx
-    let symbol = indexed "arg" idx
+    ident <- getIdentifier
+    FreshIndex idx <- nextFreshIndex
+    let symbol = indexed ident idx
     -- TODO: We should actually create a concrete body. It's not very trivial
     -- though, as fetching the concrete instance of function accessors and such
     -- is completely bogus as output. Ideally, we just reconstruct a CoreExpr.
