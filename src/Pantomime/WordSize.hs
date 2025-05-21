@@ -17,7 +17,10 @@ module Pantomime.WordSize
   , KnownBitSize (..)
 
   , IntArch (..)
+  , unIntArch
+
   , WordArch (..)
+  , unWordArch
 
   , SymInt (..)
   , SymWord (..)
@@ -74,11 +77,16 @@ type family WordBits ws = n | n -> ws where
 type KnownPos n = (KnownNat n, 1 <= n)
 
 -- | Wrapper to allow alternative typeclass instances for word-sized ints.
+-- TODO: Maybe IntWS is better? Or IntPW?
 newtype IntArch mode ws where
   IntArch :: IntN mode (WordBits ws) -> IntArch mode ws
 
 unIntArch :: IntArch mode ws -> IntN mode (WordBits ws)
 unIntArch (IntArch value) = value
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Show (IntArch mode ws)
 
 deriving via IntN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
@@ -156,6 +164,10 @@ newtype WordArch mode ws where
 
 unWordArch :: WordArch mode ws -> WordN mode (WordBits ws)
 unWordArch (WordArch value) = value
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Show (WordArch mode ws)
 
 deriving via WordN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)

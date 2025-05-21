@@ -10,6 +10,7 @@
 
 module Pantomime.Primitive
   ( Primitive (..)
+  , RuntimeGenSymSimple
   ) where
 
 import GHC.Plugins hiding (empty)

@@ -55,15 +55,11 @@ import Grisette
   ( Solvable (..)
   , SimpleMergeable (..)
   , Mergeable
-  , Function (..)
   , LogicalOp (..)
   , SymOrd (..)
   , SymEq (..)
   , EvalSym (..)
-  , MonadFresh (..)
-  , FreshIndex (..)
-  , nextFreshIndex
-  , indexed
+  , GenSymSimple (..)
   )
 
 import Data.List ((!?))
@@ -443,6 +439,7 @@ eqTyConRole tyCon = if
 -- why this would possibly fail. We only return IllTyped when nested values
 -- occur. I think we can actually capture this idea in a typeclass (perhaps
 -- called symbolise), which takes a Type and returns itself (if possible).
+-- TODO: We should remove all uses of this in favor of the new interface!
 typedValue
   :: forall m ws
    . MonadEval m
@@ -453,45 +450,51 @@ typedValue
   => (forall t. Symbolisable t ws => RuntimeValue S t)
   -> Type
   -> m (Value m ws)
-typedValue value ty = asum'
-  [ typedBitVector value ty
-  , typedUnsigned value ty
-  , typedSigned value ty
-  , typedBit value ty
-  , Primitive <$> evalFresh (ty, spec)
-  , typedTyFamInst value ty
-  , typedNewtype value ty
-  , typedLambda' value ty
-  , typedADT value ty
-  , typedForall value ty
-  , typedPoly value ty
-  , typedCoercion ty
-  , typedType ty
-  ]
+typedValue value ty = evalFresh (ty, spec)
   where
     spec = if
       | value @SymIntN64 == throwError Invalid -> Left Invalid
       | otherwise -> Right ()
 
-    asum' :: [m a] -> m a
-    asum' [] = dbg ty >> throwError UnsupportedExpr
-    asum' (x:xs) = x `catchError` \case
-      UnsupportedExpr -> asum' xs
-      err -> throwError err
+instance
+  ( MonadEval m
+  , RuntimeGenSymSimple spec
+  , KnownWordSize ws
+  ) => EvalGenSym m (Type, spec) (Value m ws) where
+  evalFresh spec@(ty, _) = asum'
+    [ freshBitVector spec
+    , freshUnsigned spec
+    , freshSigned spec
+    , freshBit spec
+    , Primitive <$> evalFresh spec
+    , freshTyFamInst spec
+    , freshNewtype spec
+    , freshLambda spec
+    , Data <$> evalFresh spec
+    , freshForall spec
+    , freshPoly spec
+    , freshCoercion ty
+    , freshType ty
+    ]
+    where
+      asum' :: [m a] -> m a
+      asum' [] = dbg ty >> throwError UnsupportedExpr
+      asum' (x:xs) = x `catchError` \case
+        UnsupportedExpr -> asum' xs
+        err -> throwError err
 
 -- TODO: This should be defined outside of the base definitions. We should have
 -- an import interface to allow interpretations like this one! Also, I think we
 -- should be able to make interpretations less techinical... At the end of the
 -- day it's just a check: does the type match this pattern, then use this opaque
 -- interpretation instead.
-typedBitVector
-  :: forall m ws
+freshBitVector
+  :: forall m ws spec
    . MonadEval m
-  => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedBitVector value ty = do
+freshBitVector (ty, spec) = do
   -- Get the TyCon and type literal of this type, if possible.
   (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, [size])
@@ -509,20 +512,18 @@ typedBitVector value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  let bv :: RuntimeValue S (Pantomime.WordN S n)
-      bv = withSize @n (pure Pantomime.WordZ) (Pantomime.WordP <$> value)
+  bv :: RuntimeValue S (Pantomime.WordN S n) <- simpleFresh spec
   pure $ Opaque' ty bv
 
 -- TODO: This is a lot of code duplication. Can't we squash this one with
 -- typedBitVector?
-typedUnsigned
-  :: forall m ws
+freshUnsigned
+  :: forall m ws spec
    . MonadEval m
-  => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedUnsigned value ty = do
+freshUnsigned (ty, spec) = do
   -- Get the TyCon and type literal of this type, if possible.
   (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, [size])
@@ -540,18 +541,16 @@ typedUnsigned value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  let bv :: RuntimeValue S (Pantomime.WordN S n)
-      bv = withSize @n (pure Pantomime.WordZ) (Pantomime.WordP <$> value)
+  bv :: RuntimeValue S (Pantomime.WordN S n) <- simpleFresh spec
   pure $ Opaque' ty bv
 
-typedSigned
-  :: forall m ws
+freshSigned
+  :: forall m ws spec
    . MonadEval m
-  => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedSigned value ty = do
+freshSigned (ty, spec) = do
   -- Get the TyCon and type literal of this type, if possible.
   (tyCon, SomeNat @n _) <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, [size])
@@ -569,18 +568,16 @@ typedSigned value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bvTyCon) $ throwError UnsupportedExpr
 
-  let bv :: RuntimeValue S (Pantomime.IntN S n)
-      bv = withSize @n (pure Pantomime.IntZ) (Pantomime.IntP <$> value)
+  bv :: RuntimeValue S (Pantomime.IntN S n) <- simpleFresh spec
   pure $ Opaque' ty bv
 
-typedBit
-  :: forall m ws
+freshBit
+  :: forall m ws spec
    . MonadEval m
-  => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedBit value ty = do
+freshBit (ty, spec) = do
   -- Get the TyCon and type literal of this type, if possible.
   tyCon <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, []) -> pure tyCon
@@ -595,18 +592,17 @@ typedBit value ty = do
     liftCore $ lookupTyCon name'
   unless (tyCon == bitTyCon) $ throwError UnsupportedExpr
 
-  let bv :: RuntimeValue S (Pantomime.WordN S 1)
-      bv = withSize @1 (pure Pantomime.WordZ) (Pantomime.WordP <$> value)
+  bv :: RuntimeValue S (Pantomime.WordN S 1) <- simpleFresh spec
   pure $ Opaque' ty bv
 
-typedTyFamInst
-  :: forall m ws
+freshTyFamInst
+  :: forall m ws spec
    . MonadEval m
   => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedTyFamInst value ty = do
+freshTyFamInst (ty, spec) = do
   -- Ensure there are type families here.
   when (isTyFamFree ty) $ throwError UnsupportedExpr
 
@@ -624,87 +620,47 @@ typedTyFamInst value ty = do
   when (isReflexiveCo co) $ throwError UnsupportedExpr
 
   -- Create the cast.
-  inner <- typedValue value ty'
+  inner <- evalFresh (ty', spec)
   mkCast' co inner
 
-typedNewtype
-  :: forall m ws
+freshNewtype
+  :: forall m ws spec
    . MonadEval m
   => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedNewtype value ty = do
+freshNewtype (ty, spec) = do
   (tyCon, tys) <- whyFail UnsupportedExpr $ tcSplitTyConApp_maybe ty
   (ty', co) <- whyFail UnsupportedExpr $ instNewTyCon_maybe tyCon tys
-  value' <- typedValue value ty'
+  value' <- evalFresh (ty', spec)
   let co' = mkSymCo co
   mkCast' co' value'
 
-typedADT
-  :: forall m ws
+-- FIXME: This one was already broken with the previous setup. For now, we just
+-- simplified it, but the correctness is the same (only good for error
+-- generation). For now, this is all we need though, as we do not symbolic
+-- function arguments at the top level.
+freshLambda
+  :: forall m ws spec
    . MonadEval m
   => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedADT value ty = do
-  -- Ensure this is a ADT we can construct
-  (tyCon, tyArgs) <- whyFail UnsupportedExpr $ tcSplitTyConApp_maybe ty
-  unless (or [isDataTyCon tyCon, isUnboxedTupleTyCon tyCon, isUnboxedSumTyCon tyCon]) $ do
-    throwError UnsupportedExpr
-  dataCons <- whyFail UnsupportedExpr $ tyConDataCons_maybe tyCon
-  -- TODO: This will loop infinitely for recursive types. We need to resolve
-  -- that somehow.
-
-  -- TODO: I don't really like this tag creation. Should the tagInRange
-  -- maybe just return the condition?
-  let tag = value
-  let tag' = tagInRange tag tyCon
-
-  -- TODO: This is really hacky (as is the whole typed value business), but it
-  -- ensures that the enture ADT becomes invalid if the root is invalid.
-  -- Create fresh values for all fields.
-  let create = newDataConBndrs $ if
-        | tag == throwError Invalid -> invalidValue
-        | otherwise -> freshValue
-  fields <- forM dataCons $ flip create tyArgs
-
-  pure $ Data ADT
-    { adtTyCon = tyCon
-    , adtTyArgs = tyArgs
-    , adtTag = tag'
-    , adtFields = fields
-    }
-
-typedLambda'
-  :: forall m ws
-   . MonadEval m
-  => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
-  -> m (Value m ws)
-typedLambda' value ty = do
+freshLambda (ty, spec) = do
   (_, _, argTy, resTy) <- whyFail UnsupportedExpr $ splitFunTy_maybe ty
-  let ident = value
-  -- FIXME: These functions generate fresh copies of typed values **for each**
-  -- call. We cannot lift this operation outside of the lambda it seems. I
-  -- think we'll have to rethink the Fun pattern. Returning an actual function
-  -- breaks so many things. Perhaps it would be better to create a substitution
-  -- function? Something similar to the GHC Subst? I.e. that's a way to generate
-  -- a Value without the annoyance of these function scoping problems I'm facing
-  -- all the time...
-  unless (ident == throwError Invalid) $ throwError UnsupportedExpr
-  typedLambda ident argTy resTy
+  pure . Fun argTy $ \_ -> do
+    evalFresh (resTy, spec)
 
-typedForall
-  :: forall m ws
+freshForall
+  :: forall m ws spec
    . MonadEval m
   => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedForall value ty = do
+freshForall (ty, spec) = do
   (tyCoVar, resTy) <- whyFail UnsupportedExpr $ splitForAllTyCoVar_maybe ty
   let vars = shallowTyCoVarsOfType ty
   let subst = mkEmptySubst $ InScope vars
@@ -717,21 +673,21 @@ typedForall value ty = do
     Ty arg -> do
       let subst' = extendTvSubst subst tyCoVar arg
       let resTy' = substTy subst' resTy
-      typedValue value resTy'
+      evalFresh (resTy', spec)
 
     Co arg -> do
       let subst' = extendCvSubst subst tyCoVar arg
       let resTy' = substTy subst' resTy
-      typedValue value resTy'
+      evalFresh (resTy', spec)
 
     _ -> throwError IllTyped
 
-typedCoercion
+freshCoercion
   :: forall m ws
    . MonadEval m
   => Type
   -> m (Value m ws)
-typedCoercion ty = do
+freshCoercion ty = do
   -- Ensure we have a coercion type.
   (tyCon, a, b) <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, [_, _, a, b]) -> pure (tyCon, a, b)
@@ -745,234 +701,24 @@ typedCoercion ty = do
   let coercion = mkUnivCo provenance role a b
   pure $ Co coercion
 
-typedType
+freshType
   :: forall m ws
    . MonadEval m
   => Type
   -> m (Value m ws)
-typedType ty = if
+freshType ty = if
   | isTypeLikeKind ty -> pure $ Ty alphaTy
   | otherwise -> throwError UnsupportedExpr
 
-typedPoly
-  :: forall m ws
+freshPoly
+  :: forall m ws spec
    . MonadEval m
-  => KnownWordSize ws
-  => (forall t. Symbolisable t ws => RuntimeValue S t)
-  -> Type
+  => RuntimeGenSymSimple spec
+  => (Type, spec)
   -> m (Value m ws)
-typedPoly value ty = if
-  | hasTyVarHead ty -> pure $ Poly ty value
+freshPoly (ty, spec) = if
+  | hasTyVarHead ty -> Poly ty <$> simpleFresh spec
   | otherwise -> throwError UnsupportedExpr
-
--- | Create a uninterpreted lambda of the given type.
---
--- TODO: Can't we make this function a little bit smaller?
---
--- Yes, this function is big. This has everything to do with overlapping
--- instances on SupportedPrim.
---
--- I.e. a, (a -~> b) and (a -~> (b -~> c)) all overlap and have separate
--- instances. To get a symbolic value for these, we need to know the instance
--- concretely. I did some trickery to not have to write this for every product
--- via 'typedValue' and its constraints. Still we get this abominable
--- duplication because we explicitely need to spell out each instance.
--- FIXME: This is completely broken. We should not be creating fresh values
--- inside of lambdas, as this will create separate instances per call.
-typedLambda
-  :: forall m ws
-   . KnownWordSize ws
-  => MonadEval m
-  => RuntimeValue S (Ident S)
-  -> Type
-  -> Type
-  -> m (Value m ws)
-typedLambda ident argTy resTy = if
-  | eqArg intPrimTy -> lam $ \case
-    Primitive (Int arg) -> do
-      let untyped :: forall t. Interpretable (SymIntN (WordBits ws) -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymIntN (WordBits ws) -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg int8PrimTy -> lam $ \case
-    Primitive (Int8 arg) -> do
-      let untyped :: forall t. Interpretable (SymIntN8 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymIntN8 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg int16PrimTy -> lam $ \case
-    Primitive (Int16 arg) -> do
-      let untyped :: forall t. Interpretable (SymIntN16 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymIntN16 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg int32PrimTy -> lam $ \case
-    Primitive (Int32 arg) -> do
-      let untyped :: forall t. Interpretable (SymIntN32 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymIntN32 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg int64PrimTy -> lam $ \case
-    Primitive (Int64 arg) -> do
-      let untyped :: forall t. Interpretable (SymIntN64 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymIntN64 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg wordPrimTy -> lam $ \case
-    Primitive (Word arg) -> do
-      let untyped :: forall t. Interpretable (SymWordN (WordBits ws) -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymWordN (WordBits ws) -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg word8PrimTy -> lam $ \case
-    Primitive (Word8 arg) -> do
-      let untyped :: forall t. Interpretable (SymWordN8 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymWordN8 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg word16PrimTy -> lam $ \case
-    Primitive (Word16 arg) -> do
-      let untyped :: forall t. Interpretable (SymWordN16 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymWordN16 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg word32PrimTy -> lam $ \case
-    Primitive (Word32 arg) -> do
-      let untyped :: forall t. Interpretable (SymWordN32 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymWordN32 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg word64PrimTy -> lam $ \case
-    Primitive (Word64 arg) -> do
-      let untyped :: forall t. Interpretable (SymWordN64 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymWordN64 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg floatPrimTy -> lam $ \case
-    Primitive (Float arg) -> do
-      let untyped :: forall t. Interpretable (SymFP32 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymFP32 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | eqArg doublePrimTy -> lam $ \case
-    Primitive (Double arg) -> do
-      let untyped :: forall t. Interpretable (SymFP64 -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> SymFP64 -~> t
-            liftApply apply ident arg
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | Just (tyCon, _) <- tcSplitTyConApp_maybe argTy
-  , isDataTyCon tyCon -> lam $ \arg -> case arg of
-      Data adt -> do
-        -- TODO: I guess this check is not really necessary if we check types on
-        -- function application.
-        unless (adtType adt `eqType` argTy) $ throwError IllTyped
-
-        invalidValue resTy
-      Opaque' ty _ -> do
-        unless (ty `eqType` argTy) $ throwError IllTyped
-
-        -- TODO: This thing is here because we can interpret Opaque types. It
-        -- is just a hack though, but this whole function construction is broken
-        -- anyway...
-        invalidValue resTy
-      _ -> throwError IllTyped
-
-  | Just (tyCon, tys) <- tcSplitTyConApp_maybe argTy
-  , Just (argTy', co) <- instNewTyCon_maybe tyCon tys -> lam $ \case
-    Cast' co' arg -> do
-      -- TODO: I guess this check is not really necessary if we check types on
-      -- function application.
-      unless (co `eqCoercion` SymCo co') $ throwError IllTyped
-      fun <- typedLambda ident argTy' resTy
-      applyValue fun arg
-    Opaque' ty _ -> do
-      unless (ty `eqType` argTy) $ throwError IllTyped
-      -- TODO: This thing is here because we can interpret Opaque types. It
-      -- is just a hack though, but this whole function construction is broken
-      -- anyway...
-      invalidValue resTy
-    _ -> throwError IllTyped
-
-  | hasTyVarHead argTy -> lam $ \case
-    Poly ty poly -> do
-      -- TODO: I guess this check is not really necessary if we check types on
-      -- function application.
-      unless (ty `eqType` argTy) $ throwError IllTyped
-
-      let untyped :: forall t. Interpretable (Ident S -~> t) => RuntimeValue S t
-          untyped = do
-            let apply = sym name :: Ident S -~> Ident S -~> t
-            liftApply apply ident poly
-
-      typedValue untyped resTy
-    _ -> throwError IllTyped
-
-  | Just (_, _, iArgTy, _) <- splitFunTy_maybe argTy -> lam $ \case
-    Fun iArgTy' _ -> do
-      -- TODO: I guess this check is not really necessary if we check types on
-      -- function application.
-      unless (iArgTy `eqType` iArgTy') $ throwError IllTyped
-
-      invalidValue resTy
-    _ -> throwError IllTyped
-
-  | otherwise -> throwError UnsupportedExpr
-  where
-    lam = pure . Fun argTy
-    eqArg = eqType argTy
-    liftApply apply = liftA2 $ \a0 a1 -> apply # a0 # a1
-    -- TODO: I think we should make a separate file/spot with all the
-    -- non-indexed names. It is very messy and error prone to define global
-    -- names all over the place.
-    name = "!apply"
 
 -- | Create an unconstrained, typed value.
 freshValue
@@ -981,26 +727,7 @@ freshValue
   => KnownWordSize ws
   => Type
   -> m (Value m ws)
-freshValue ty = do
-  ident <- getIdentifier
-  FreshIndex idx <- nextFreshIndex
-  let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
-      untyped = pure . sym $ indexed ident idx
-  typedValue untyped ty
-
--- | Create fresh binders for the given DataCon.
---
--- Note the type arguments will instantiate the universal quantifiers of the
--- DataCon. They in general do not correspond to the types of the binders.
-newDataConBndrs
-  :: Monad m
-  => (Type -> m (Value m ws))
-  -> DataCon
-  -> [Type]
-  -> m [Value m ws]
-newDataConBndrs new dataCon tyArgs = do
-  let fieldTys = scaledThing <$> dataConInstArgTys dataCon tyArgs
-  forM fieldTys new
+freshValue ty = evalFresh (ty, Right @() ())
 
 -- | A value that should not be reachable.
 --
@@ -1011,8 +738,7 @@ invalidValue
   => KnownWordSize ws
   => Type
   -> m (Value m ws)
-invalidValue = typedValue $ mrgThrowError Invalid
--- invalidValue ty = assume false <$> freshValue ty
+invalidValue ty = evalFresh (ty, Left @_ @() Invalid)
 
 -- | Create a function with the arity of whatever we are folding over.
 --
@@ -1135,6 +861,54 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (ADT m ws) where
     -- should be equivalent.
     pure $ invalidTag .|| foldl' (.&&) tagEq fieldEq
 
+instance
+  ( MonadEval m
+  , KnownWordSize ws
+  , RuntimeGenSymSimple spec
+  ) => EvalGenSym m (Type, spec) (ADT m ws) where
+  evalFresh (ty, spec) = do
+    -- Ensure this is a ADT we can construct
+    (tyCon, tyArgs) <- whyFail UnsupportedExpr $ tcSplitTyConApp_maybe ty
+    let isADT = or
+          [ isDataTyCon tyCon
+          , isUnboxedTupleTyCon tyCon
+          , isUnboxedSumTyCon tyCon
+          ]
+    unless isADT $ throwError UnsupportedExpr
+    dataCons <- whyFail UnsupportedExpr $ tyConDataCons_maybe tyCon
+    -- TODO: This will loop infinitely for recursive types. We need to resolve
+    -- that somehow.
+
+    -- Create a fresh tag.
+    tag <- freshTag (tyCon, spec)
+
+    -- Create fresh values for all fields.
+    fields <- forM dataCons $ \dataCon -> do
+      freshBndrs dataCon tyArgs spec
+
+    pure $ ADT
+      { adtTyCon = tyCon
+      , adtTyArgs = tyArgs
+      , adtTag = tag
+      , adtFields = fields
+      }
+
+-- | Create fresh binders for the given DataCon.
+--
+-- Note the type arguments will instantiate the universal quantifiers of the
+-- DataCon. They do not correspond to the types of the binders.
+freshBndrs
+  :: MonadEval m
+  => KnownWordSize ws
+  => RuntimeGenSymSimple spec
+  => DataCon
+  -> [Type]
+  -> spec
+  -> m [Value m ws]
+freshBndrs dataCon tyArgs spec = do
+  let fieldTys = scaledThing <$> dataConInstArgTys dataCon tyArgs
+  forM fieldTys $ evalFresh . (,spec)
+
 -- | Get the Type of an ADT.
 adtType :: ADT m ws -> Type
 adtType adt = mkTyConApp (adtTyCon adt) (adtTyArgs adt)
@@ -1160,7 +934,7 @@ adtFromDataCon dataCon tyArgs fields = do
   -- Populate the remaining fields with fresh values.
   fields' <- forM dataCons $ \dataCon' -> if
     | dataCon == dataCon' -> pure fields
-    | otherwise -> newDataConBndrs invalidValue dataCon' tyArgs
+    | otherwise -> freshBndrs dataCon' tyArgs $ Left @_ @() Invalid
 
   pure ADT
     { adtTyCon = tyCon
@@ -1230,19 +1004,19 @@ tagToDataCon tag tyCon = do
   let cmp = (tag ==) . fromIntegral . dataConTagZ
   find cmp dataCons
 
--- | Add an assertion to a tag that says it's in range.
---
--- I.e. it can only be one of DataCon, and not some undefined value.
-tagInRange
-  :: KnownWordSize ws
-  => Tag S ws
-  -> TyCon
-  -> Tag S ws
-tagInRange tag tyCon = do
-  tag' <- tag
-  let amount = length $ tyConDataCons tyCon
-  -- TODO: Once Grisette adds support for (.&&), we could parameterise on the
-  -- evaluation mode. We could of course implement this (.&&) ourselves already,
-  -- but we leave it for now.
-  let cond =  0 .<= tag' .&& tag' .< fromIntegral amount
-  mrgIte cond (pure tag') $ mrgThrowError Invalid
+-- | Create a fresh 'Tag' for the given 'TyCon'.
+freshTag
+  :: forall m ws spec
+   . KnownWordSize ws
+  => MonadEval m
+  => GenSymSimple spec (RuntimeValue S (SymIntN (WordBits ws)))
+  => (TyCon, spec)
+  -> m (Tag S ws)
+freshTag (tyCon, spec) = do
+  tag :: Tag S ws <- simpleFresh spec
+  pure $ do
+    -- Ensure the tag is within range
+    tag' <- tag
+    let variants = length $ tyConDataCons tyCon
+    let bound = 0 .<= tag' .&& tag' .< fromIntegral variants
+    mrgIte bound tag $ mrgThrowError Invalid
