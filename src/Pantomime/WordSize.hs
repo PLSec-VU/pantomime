@@ -37,6 +37,11 @@ import Grisette
   , SymFromIntegral (..)
   , SizedBV (..)
   , SignConversion (..)
+  , EvalSym
+  , Mergeable
+  , SimpleMergeable
+  , GenSym (..)
+  , GenSymSimple (..)
   , unsafeAxiom
   )
 
@@ -47,7 +52,7 @@ import Data.Bits (Bits)
 import Data.Data (type (:~:) (..), Proxy (..))
 import Data.Type.Ord (Compare)
 
-import Grisette.Unified (DecideEvalMode (..))
+import Grisette.Unified (DecideEvalMode (..), EvalModeTag (..))
 
 import Pantomime.Grisette.BitVector
 
@@ -123,6 +128,28 @@ deriving via IntN mode (WordBits ws')
   instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
   => SymFromIntegral (WordArch mode ws) (IntArch mode ws')
 
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => EvalSym (IntArch mode ws)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Mergeable (IntArch mode ws)
+
+deriving via IntN S (WordBits ws)
+  instance KnownWordSize ws
+  => SimpleMergeable (IntArch S ws)
+
+instance (DecideEvalMode mode, KnownWordSize ws) => GenSym (IntArch mode ws) (IntArch mode ws)
+
+instance KnownWordSize ws => GenSym () (IntArch S ws)
+
+instance GenSymSimple (IntArch mode ws) (IntArch mode ws) where
+  simpleFresh = pure
+
+instance KnownWordSize ws => GenSymSimple () (IntArch S ws) where
+  simpleFresh = fmap IntArch . simpleFresh
+
 -- | Wrapper to allow alternative typeclass instances for word-sized words.
 newtype WordArch mode ws where
   WordArch :: WordN mode (WordBits ws) -> WordArch mode ws
@@ -177,6 +204,28 @@ deriving via WordN mode (WordBits ws')
 deriving via WordN mode (WordBits ws')
   instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
   => SymFromIntegral (IntArch mode ws) (WordArch mode ws')
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => EvalSym (WordArch mode ws)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Mergeable (WordArch mode ws)
+
+deriving via WordN S (WordBits ws)
+  instance KnownWordSize ws
+  => SimpleMergeable (WordArch S ws)
+
+instance (DecideEvalMode mode, KnownWordSize ws) => GenSym (WordArch mode ws) (WordArch mode ws)
+
+instance KnownWordSize ws => GenSym () (WordArch S ws)
+
+instance GenSymSimple (WordArch mode ws) (WordArch mode ws) where
+  simpleFresh = pure
+
+instance KnownWordSize ws => GenSymSimple () (WordArch S ws) where
+  simpleFresh = fmap WordArch . simpleFresh
 
 instance (DecideEvalMode mode, KnownWordSize ws)
   => SignConversion (WordArch mode ws) (IntArch mode ws) where
