@@ -1,3 +1,4 @@
+{-# LANGUAGE TypeOperators #-}
 module Pantomime
   ( plugin
   , Pantomime (..)
@@ -12,7 +13,6 @@ import qualified Language.Haskell.TH.Syntax as TH
 import Pantomime.Annotation
 import Pantomime.Combinator
 import Pantomime.Passes
-import Pantomime.Monad.GHC
 
 plugin :: Plugin
 plugin = defaultPlugin
@@ -20,7 +20,11 @@ plugin = defaultPlugin
   , pluginRecompile = purePlugin
   }
 
-install :: MonadCore m => [CommandLineOption] -> [CoreToDo] -> m [CoreToDo]
+install
+  :: Applicative m
+  => [CommandLineOption]
+  -> [CoreToDo]
+  -> m [CoreToDo]
 install _ todo = do
   let symComparePasses =
         [ printAndLintPass @(SymCompare TH.Name)

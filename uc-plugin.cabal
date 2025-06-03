@@ -25,6 +25,11 @@ source-repository head
 
 library
   exposed-modules:
+      Effectful.GHC.CoreE
+      Effectful.GHC.Display
+      Effectful.GHC.DynFlags
+      Effectful.GHC.External
+      Effectful.GHC.TyThing
       Pantomime
       Pantomime.Annotation
       Pantomime.Base
@@ -43,6 +48,7 @@ library
       Pantomime.Grisette.GenSym
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.Union
+      Pantomime.Loopy
       Pantomime.Monad.GHC
       Pantomime.MonadEval
       Pantomime.Passes
@@ -77,16 +83,16 @@ library
       TypeApplications
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
-      QuickCheck
-    , base >=4.7 && <5
+      base >=4.7 && <5
     , clash-prelude
     , composition
     , containers
+    , effectful >=2.5.1.0
+    , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , grisette >=0.11.0.0
     , microlens
     , mtl
-    , syb >=0.7.2.4
     , template-haskell
     , transformers
   default-language: Haskell2010
@@ -95,6 +101,7 @@ executable uc-plugin-exe
   main-is: Main.hs
   other-modules:
       ClassInline
+      Core
       LocalClass
       Processor
       ProcessorControl
@@ -134,11 +141,12 @@ executable uc-plugin-exe
     , clash-prelude
     , composition
     , containers
+    , effectful >=2.5.1.0
+    , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , grisette >=0.11.0.0
     , microlens
     , mtl
-    , syb >=0.7.2.4
     , template-haskell
     , transformers
     , uc-plugin
@@ -172,12 +180,13 @@ test-suite uc-plugin-test
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       HUnit
-    , QuickCheck
     , base >=4.7 && <5
     , clash-prelude
     , composition
     , containers
     , directory
+    , effectful >=2.5.1.0
+    , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , ghc-paths
     , grisette >=0.11.0.0
@@ -185,7 +194,6 @@ test-suite uc-plugin-test
     , microlens
     , mtl
     , silently
-    , syb >=0.7.2.4
     , template-haskell
     , transformers
     , uc-plugin

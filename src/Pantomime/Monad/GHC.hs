@@ -1,4 +1,6 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 module Pantomime.Monad.GHC
   ( MonadCore (..)
   , HasModGuts (..)
@@ -32,10 +34,19 @@ import Control.Monad.Trans.Maybe (MaybeT)
 
 import Grisette (FreshT)
 
+import Effectful
+import Effectful.GHC.CoreE qualified as CoreE
+import Effectful.Reader.Static (Reader, ask)
+
 import Pantomime.Util
 
 class Monad m => MonadCore m where
   liftCore :: CoreM a -> m a
+
+-- WARNING: This orhpan is the canonical instance the effect instance. We will
+-- remove it once we completely swap towards an effect system.
+instance (IOE :> es, CoreE.CoreE :> es) => MonadCore (Eff es) where
+  liftCore = CoreE.liftCore
 
 instance MonadCore CoreM where
   liftCore = id
@@ -95,8 +106,11 @@ instance HasModGuts m => HasModGuts (ExceptT e m) where
 instance HasModGuts m => HasModGuts (FreshT m) where
   modGuts = lift modGuts
 
+instance Reader ModGuts :> es => HasModGuts (Eff es) where
+  modGuts = ask
+
 -- | Debug print GHC structures in a CoreM monad stack.
-dbg :: (MonadCore m, Outputable o) => o -> m ()
+dbg :: MonadCore m => Outputable o => o -> m ()
 dbg = liftCore . debugTraceMsg . ppr
 
 -- | Debug print a string in a CoreM monad stack.

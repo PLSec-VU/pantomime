@@ -39,16 +39,16 @@ default-extensions:
 dependencies:
 - base >= 4.7 && < 5
 - ghc >= 9.6.4
-- syb >= 0.7.2.4
 - composition
 - containers
 - transformers
 - template-haskell
 - mtl
 - microlens
-- QuickCheck
 - grisette >= 0.11.0.0
 - clash-prelude
+- effectful >= 2.5.1.0
+- effectful-core >= 2.5.1.0
 
 ghc-options:
 - -Wall
@@ -66,8 +66,8 @@ library:
 
 executables:
   uc-plugin-exe:
-    main:                Main.hs
-    source-dirs:         app
+    main: Main.hs
+    source-dirs: app
     ghc-options:
     - -threaded
     - -rtsopts
@@ -75,12 +75,13 @@ executables:
     - -fplugin Pantomime
     - -fexpose-all-unfoldings
     dependencies:
+    - QuickCheck
     - uc-plugin
 
 tests:
   uc-plugin-test:
-    main:                Spec.hs
-    source-dirs:         test
+    main: Spec.hs
+    source-dirs: test
     ghc-options:
     - -threaded
     - -rtsopts
