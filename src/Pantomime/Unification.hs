@@ -261,6 +261,8 @@ unifyApps fun args = do
   -- TODO: Can we just ignore the multiplicity on this application?
   let (argTysRequired, _) = splitFunTys funTy & _1 . mapped %~ scaledThing
   let pairs = zip argTysRequired argTys
+  -- TODO: This should return the reasons why it fails! We should probably do
+  -- this through an effect system.
   guard $ length pairs == length argTys
   unif <- unifyTypes pairs
 

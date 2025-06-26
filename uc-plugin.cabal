@@ -25,10 +25,15 @@ source-repository head
 
 library
   exposed-modules:
+      Control.Error
+      Effectful.Break
+      Effectful.Cont
       Effectful.GHC.CoreE
       Effectful.GHC.Display
       Effectful.GHC.DynFlags
       Effectful.GHC.External
+      Effectful.GHC.ModGuts
+      Effectful.GHC.TH
       Effectful.GHC.TyThing
       Pantomime
       Pantomime.Annotation
@@ -45,7 +50,6 @@ library
       Pantomime.Environment
       Pantomime.Evaluate
       Pantomime.Grisette.BitVector
-      Pantomime.Grisette.GenSym
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.Union
       Pantomime.Loopy
@@ -66,21 +70,30 @@ library
   hs-source-dirs:
       src
   default-extensions:
+      AllowAmbiguousTypes
+      BlockArguments
       ConstraintKinds
+      DataKinds
       DeriveDataTypeable
       DeriveTraversable
       FlexibleContexts
       FlexibleInstances
+      GADTs
       ImportQualifiedPost
+      KindSignatures
       LambdaCase
       MultiParamTypeClasses
       MultiWayIf
       NamedFieldPuns
       RankNTypes
+      RecordWildCards
       ScopedTypeVariables
       TemplateHaskell
       TupleSections
+      TypeAbstractions
       TypeApplications
+      TypeFamilies
+      TypeOperators
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
@@ -119,21 +132,30 @@ executable uc-plugin-exe
   hs-source-dirs:
       app
   default-extensions:
+      AllowAmbiguousTypes
+      BlockArguments
       ConstraintKinds
+      DataKinds
       DeriveDataTypeable
       DeriveTraversable
       FlexibleContexts
       FlexibleInstances
+      GADTs
       ImportQualifiedPost
+      KindSignatures
       LambdaCase
       MultiParamTypeClasses
       MultiWayIf
       NamedFieldPuns
       RankNTypes
+      RecordWildCards
       ScopedTypeVariables
       TemplateHaskell
       TupleSections
+      TypeAbstractions
       TypeApplications
+      TypeFamilies
+      TypeOperators
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -fplugin Pantomime -fexpose-all-unfoldings
   build-depends:
       QuickCheck
@@ -162,21 +184,30 @@ test-suite uc-plugin-test
   hs-source-dirs:
       test
   default-extensions:
+      AllowAmbiguousTypes
+      BlockArguments
       ConstraintKinds
+      DataKinds
       DeriveDataTypeable
       DeriveTraversable
       FlexibleContexts
       FlexibleInstances
+      GADTs
       ImportQualifiedPost
+      KindSignatures
       LambdaCase
       MultiParamTypeClasses
       MultiWayIf
       NamedFieldPuns
       RankNTypes
+      RecordWildCards
       ScopedTypeVariables
       TemplateHaskell
       TupleSections
+      TypeAbstractions
       TypeApplications
+      TypeFamilies
+      TypeOperators
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       HUnit

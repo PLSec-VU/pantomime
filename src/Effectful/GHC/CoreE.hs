@@ -1,13 +1,6 @@
--- TODO: I guess this doesn't really need to be part of pantomime? Maybe it
+-- TODO: I guess this doesn't really need to be part of Pantomime? Maybe it
 -- should be split into a separate package? Otherwise, we can keep it here for
 -- now.
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE RecordWildCards #-}
-
 module Effectful.GHC.CoreE
   ( CoreE
   , liftCore
@@ -21,9 +14,10 @@ module Effectful.GHC.CoreE
 
   , runAllCoreE
   , runExtPackages
-  , runLookupThing
+  , runHasThings
   , runHasDynFlagsE
   , runDisplay
+  , runThNameToGhcName
   ) where
 
 import Effectful
@@ -48,6 +42,7 @@ import Effectful.GHC.External
 import Effectful.GHC.TyThing
 import Effectful.GHC.DynFlags
 import Effectful.GHC.Display
+import Effectful.GHC.TH (THNameToGHCName(..))
 
 import GHC.Plugins
   ( CoreM
@@ -70,10 +65,13 @@ import GHC.Plugins
   , runCoreM
   , initRuleEnv
   , hscEPS
-  , getDynFlags, msg
+  , getDynFlags
+  , msg
+  , thNameToGhcName
   )
-import GHC.Types.TyThing (MonadThings(..))
 import GHC.Utils.Logger (logHasDumpFlag)
+import GHC.Tc.Utils.Env (lookupGlobal_maybe)
+import GHC.Data.Maybe (MaybeErr(..))
 
 -- | The effect that allows one to run monadic computations of type 'CoreM'.
 --
@@ -203,15 +201,21 @@ runAllCoreE
   :: IOE :> es
   => CoreE :> es
   => Eff
-    ( Display
-    : LookupThing
+    ( THNameToGHCName
+    : Display
+    : HasThings
     : ExtInstEnv
     : ExtFamInstEnv
     : ExtPackages
     : es
     ) a
   -> Eff es a
-runAllCoreE = runExtPackages . runExtAll . runLookupThing . runDisplay
+runAllCoreE
+  = runExtPackages
+  . runExtAll
+  . runHasThings
+  . runDisplay
+  . runThNameToGhcName
 
 -- | Run the 'ExtPackages' effect through the 'CoreE' effect.
 runExtPackages
@@ -223,16 +227,20 @@ runExtPackages = interpret_ $ \ExtPackages -> do
   hscEnv <- liftCore getHscEnv
   liftIO $ hscEPS hscEnv
 
--- | Run the 'LookupThing' effect through the 'CoreE' effect.
-runLookupThing
+-- | Run the 'HasThings' effect through the 'CoreE' effect.
+runHasThings
   :: IOE :> es
   => CoreE :> es
-  => Eff (LookupThing : es) a
+  => Eff (HasThings : es) a
   -> Eff es a
-runLookupThing = interpret_ $ \(LookupThing name) -> do
-  liftCore $ lookupThing name
+runHasThings = interpret_ $ \(LookupThing name) -> do
+  env <- liftCore getHscEnv
+  res <- liftIO $ lookupGlobal_maybe env name
+  case res of
+    Succeeded thing -> pure $ Just thing
+    Failed _ -> pure Nothing
 
--- | Run the 'LookupThing' effect through the 'CoreE' effect.
+-- | Run the 'HasDynFlagsE' effect through the 'CoreE' effect.
 runHasDynFlagsE
   :: IOE :> es
   => CoreE :> es
@@ -241,6 +249,7 @@ runHasDynFlagsE
 runHasDynFlagsE = interpret_ $ \GetDynFlags -> do
   liftCore getDynFlags
 
+-- | Run the 'Display' effect through the 'CoreE' effect.
 runDisplay
   :: IOE :> es
   => CoreE :> es
@@ -248,3 +257,12 @@ runDisplay
   -> Eff es a
 runDisplay = interpret_ $ \(Display cls doc) -> do
   liftCore $ msg cls doc
+
+-- | Run the 'THNameToGHCName' effect through the 'CoreE' effect.
+runThNameToGhcName
+  :: IOE :> es
+  => CoreE :> es
+  => Eff (THNameToGHCName : es) a
+  -> Eff es a
+runThNameToGhcName = interpret_ $ \(THNameToGHCName name) -> do
+  liftCore $ thNameToGhcName name

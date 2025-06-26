@@ -20,21 +20,30 @@ extra-source-files:
 description:         Please see the README on GitHub at <https://github.com/RobinWebbers/uc-plugin#readme>
 
 default-extensions:
+- AllowAmbiguousTypes
+- BlockArguments
 - ConstraintKinds
+- DataKinds
 - DeriveDataTypeable
 - DeriveTraversable
 - FlexibleContexts
 - FlexibleInstances
+- GADTs
 - ImportQualifiedPost
+- KindSignatures
 - LambdaCase
 - MultiParamTypeClasses
 - MultiWayIf
 - NamedFieldPuns
 - RankNTypes
+- RecordWildCards
 - ScopedTypeVariables
 - TemplateHaskell
 - TupleSections
+- TypeAbstractions
 - TypeApplications
+- TypeFamilies
+- TypeOperators
 
 dependencies:
 - base >= 4.7 && < 5
