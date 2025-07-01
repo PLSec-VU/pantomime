@@ -19,7 +19,6 @@ import Prelude hiding (break)
 import Effectful
 import Effectful.Dispatch.Dynamic (send)
 import Effectful.Error.Static (HasCallStack, Error, throwError_, runError)
-import Effectful.Reader.Static (Reader, ask)
 import Effectful.Break
 
 import GHC.Plugins (CoreProgram, Id, Bind (..), varName)
@@ -30,6 +29,7 @@ import Data.Foldable (find, asum)
 import Data.Functor ((<&>))
 
 import Control.Error
+import Effectful.Context
 
 -- | Effect drop-in for 'MonadThings'.
 data HasThings :: Effect where
@@ -49,11 +49,11 @@ instance (Error (LookupError Name) :> es, HasThings :> es) => MonadThings (Eff e
 lookupIdLocal
   :: HasCallStack
   => Error (LookupError Name) :> es
-  => Reader CoreProgram :> es
+  => Context Reader CoreProgram :> es
   => Name
   -> Eff es Id
 lookupIdLocal name = do
-  prog <- ask @CoreProgram
+  prog <- get @CoreProgram
   let match = (== name) . varName
   let result = asum $ prog <&> \case
         NonRec x _ | match x -> pure x
@@ -67,7 +67,7 @@ lookupIdLocal name = do
 lookupIdAll
   :: HasCallStack
   => Error (LookupError Name) :> es
-  => Reader CoreProgram :> es
+  => Context Reader CoreProgram :> es
   => HasThings :> es
   => Name
   -> Eff es Id

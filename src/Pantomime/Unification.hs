@@ -1,30 +1,79 @@
+{-# LANGUAGE OverloadedStrings #-}
 -- TODO: Add module docs.
 module Pantomime.Unification
-  ( unifyApp
+  ( UnificationError (..)
+  , OversaturatedError (..)
+  , unifyApp
   , unifyApps
   , unifyExprs
   , resolveInstances
   ) where
 
-import GHC.Plugins hiding (empty, (<>))
+import Prelude hiding (break)
+
+import GHC.Plugins hiding ((<>))
 import GHC.Core.Unify (tcUnifyTys, alwaysBindFun)
 import GHC.Core.Map.Type (TypeMap)
 import GHC.Core.Predicate (isDictId)
-import GHC.Core.InstEnv (InstEnvs, lookupUniqueInstEnv, instanceDFunId)
+import GHC.Core.InstEnv (lookupUniqueInstEnv, instanceDFunId, InstEnv)
 import GHC.Core.TyCo.Rep (Type (..), Scaled (..), scaledThing)
 import GHC.Data.TrieMap (TrieMap (..), insertTM)
-import GHC.Data.Maybe (rightToMaybe)
+import GHC.Data.Maybe (rightToMaybe, whenIsJust)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy)
 
-import Data.Maybe (fromMaybe)
+import Data.List (intersperse)
 
-import Control.Applicative (Alternative (..))
-import Control.Monad (guard)
+import Control.Applicative (Alternative ((<|>)))
+import Control.Monad (when, forM)
+import Control.Error (LookupError (..))
 
 import Lens.Micro
 import Lens.Micro.Extras (view)
 
 import Pantomime.Util
+
+import Effectful
+import Effectful.Error.Static
+import Effectful.Break
+import Effectful.Context
+import GHC.Unit.Module.Deps (Dependencies)
+import Effectful.GHC.External (ExtInstEnv, getInstEnvs)
+
+-- | Error to indicate unification failure.
+--
+-- Note that there may actually exists a unification for all the pars
+-- individually. However, there doesn't exists a single mapping to unify all
+-- type pairs.
+data UnificationError = UnificationError [(Type, Type)]
+
+instance Outputable UnificationError where
+  ppr (UnificationError pairs) = do
+    hang "Cannot unify the pairs of types" 2 $ ppr pairs
+
+-- | Error to indicate oversaturation on an application.
+data OversaturatedError = OversaturatedError CoreExpr [CoreExpr]
+
+instance Outputable OversaturatedError where
+  ppr (OversaturatedError fun args) = do
+    -- Vertically concatenate using ($+$).
+    let vcat' = foldl' @[] ($+$) empty
+
+    -- Vertically separate with newlines in between.
+    let vsep' = vcat' . intersperse ""
+
+    -- Pretty print an expression with its type.
+    let pprExpr expr = vcat'
+          [ "::" <+> ppr (exprType expr)
+          , ppr expr
+          ]
+
+    -- The actual pretty print.
+    vsep'
+      [ hang "Function is oversaturated" 2 do
+        pprExpr fun
+      , hang "Given arguments" 2 do
+        vsep' $ fmap pprExpr args
+      ]
 
 -- | Mapping used to track information for unification.
 data Unification = Unification
@@ -85,88 +134,108 @@ scopeSubst f (Subst scope' ids tvs cvs) = do
 -- This will not resolve instances. The purpose of this lookup is to not have
 -- duplicate dictionary constraints in a unified expression.
 lookupDict
-  :: Type
-  -> Unification
-  -> (CoreExpr, Unification)
-lookupDict ty unif = do
-  -- Note that we need to use the new type for lookup in order to properly
-  -- deduplicate constraints.
+  :: Context Reader Unification :> es
+  => Context Writer Unification :> es
+  => Type
+  -> Eff es CoreExpr
+lookupDict ty = runBreak do
+  -- We need to use the new type for lookup in order to properly deduplicate
+  -- constraints.
+  unif <- get @Unification
   let ty' = substTy (unif ^. substitution) ty
 
-  -- Attempt to get an already existing identifier in the unification map.
-  let found = do
-        let existing = lookupTM ty' $ unif ^. dictionaries
-        (, unif) <$> existing
+  -- Early return when there already exists a mapping for this dictionary.
+  let existing = lookupTM ty' $ unif ^. dictionaries
+  whenIsJust existing break
 
-  -- If it doesn't exists, we create a fresh variable with the appropriate type.
-  -- Additionally, we add it to the dictionary map for future unification.
-  let new = do
-        let scaled = Scaled ManyTy ty'
-        let (fresh, unif') = unif
-              & substitution . scopeSubst %~~ freshId "dict" scaled
+  -- Create a fresh variable with the appropriate type.
+  let scaled = Scaled ManyTy ty'
+  fresh <- state $ substitution . scopeSubst %~~ freshId "dict" scaled
 
-        let fresh' = Var fresh
-        let unif'' = unif' & dictionaries %~ insertTM ty' fresh'
-        (fresh', unif'')
+  -- Add the fresh variable to the dictionary map for future unification.
+  let fresh' = Var fresh
+  modify $ dictionaries %~ insertTM ty' fresh'
 
-  -- Attempt to use an existing dictionary, otherwise create a fresh one.
-  fromMaybe new found
+  -- Return the fresh variable.
+  pure fresh'
 
 -- | Multiple lookups using 'lookupDict'.
 lookupDicts
-  :: Traversable f
+  :: Context Reader Unification :> es
+  => Context Writer Unification :> es
+  => Traversable f
   => f Type
-  -> Unification
-  -> (f CoreExpr, Unification)
-lookupDicts = accumL lookupDict
+  -> Eff es (f CoreExpr)
+lookupDicts = traverse lookupDict
 
 -- | Lookup the unifying type of a type variable.
 --
 -- This will additionally track the type variables that are used by the new,
 -- unified type in the unification map.
 lookupTy
-  :: TyVar
-  -> Unification
-  -> (Type, Unification)
-lookupTy var unif = do
+  :: Context Reader Unification :> es
+  => Context Writer Unification :> es
+  => TyVar
+  -> Eff es Type
+lookupTy var = do
+  -- Lookup the unifying type.
+  unif <- get @Unification
   let ty = substTyVar (unif ^. substitution) var
-  -- Extend the quantifier set if the substitution was a type variable.
-  let extend = case ty of
-        TyVarTy var' -> flip extendDVarSet var'
-        _ -> id
-  let unif' = unif & quantifiers %~ extend
 
-  (ty, unif')
+  -- Extend the quantifier set if the substitution was a type variable.
+  case ty of
+    TyVarTy var' -> modify $ quantifiers %~ flip extendDVarSet var'
+    _ -> pure ()
+
+  -- Return the unifying type
+  pure ty
 
 -- | Multiple lookups using 'lookupTy'.
 lookupTys
-  :: Traversable f
+  :: Context Reader Unification :> es
+  => Context Writer Unification :> es
+  => Traversable f
   => f TyVar
-  -> Unification
-  -> (f Type, Unification)
-lookupTys = accumL lookupTy
+  -> Eff es (f Type)
+lookupTys = traverse lookupTy
 
--- | Fetches all free type and dictionary variables.
+-- | Fetches all free type variables.
 --
 -- The intent for this is to close expressions which we unified using
 -- 'applyUnification'.
-tyVarsAndDictIds :: Unification -> ([TyVar], [DictId])
-tyVarsAndDictIds unif = do
-  let tyVars = dVarSetElems $ unif ^. quantifiers
+freeTyVars
+  :: Context Reader Unification :> es
+  => Eff es [TyVar]
+freeTyVars = do
+  unif <- get @Unification
+  pure $ unif ^. quantifiers . to dVarSetElems
+
+-- | Fetches all free dictionary variables.
+--
+-- The intent for this is to close expressions which we unified using
+-- 'applyUnification'.
+freeDictIds
+  :: Context Reader Unification :> es
+  => Eff es [DictId]
+freeDictIds = do
+  unif <- get @Unification
   let select = \case
         Var var | isDictId var && isLocalId var -> (var :)
         _ -> id
-  let dictIds = foldTM select (unif ^. dictionaries) []
-  (tyVars, dictIds)
+  pure $ foldTM select (unif ^. dictionaries) []
 
 -- | Closes an expression using a unification.
 --
 -- It is assumed that this expression has been first unified using the
 -- 'applyUnification'.
-closeExpr :: Unification -> CoreExpr -> CoreExpr
-closeExpr unif expr = do
-  let (tyVars, dictIds) = tyVarsAndDictIds unif
-  foldr Lam expr $ tyVars <> dictIds
+closeExpr
+  :: Context Reader Unification :> es
+  => CoreExpr
+  -> Eff es CoreExpr
+closeExpr expr = do
+  tyVars <- freeTyVars
+  dictIds <- freeDictIds
+  pure $ mkLams (tyVars <> dictIds) expr
 
 -- | Split the type of an expression into its components.
 splitExprTy :: CoreExpr -> ([TyVar], ThetaType, Type)
@@ -174,24 +243,24 @@ splitExprTy = tcSplitSigmaTy . exprType
 
 -- | Unify two types using 'unifyTypes'.
 unifyType
-  :: Alternative m
-  => Monad m
+  :: Error UnificationError :> es
   => Type
   -> Type
-  -> m Unification
+  -> Eff es Unification
 unifyType lhs rhs = unifyTypes [(lhs, rhs)]
 
 -- | Unify the given types.
 --
 -- Creates a unification map for use in 'applyUnification'.
 unifyTypes
-  :: Alternative m
-  => Monad m
+  :: HasCallStack
+  => Error UnificationError :> es
   => [(Type, Type)]
-  -> m Unification
+  -> Eff es Unification
 unifyTypes tys = do
+  let err = UnificationError tys
   let (lhs, rhs) = unzip tys
-  subst <- maybeM $ tcUnifyTys alwaysBindFun lhs rhs
+  subst <- whyFail' err $ tcUnifyTys alwaysBindFun lhs rhs
   pure $ Unification subst emptyTM emptyDVarSet
 
 -- | Applies the unification map the the expression.
@@ -204,40 +273,39 @@ unifyTypes tys = do
 -- unification mapping. However way the expression is used, make sure to
 -- eventually close the expression using 'closeExpr'.
 applyUnification
-  :: CoreExpr
-  -> Unification
-  -> (CoreExpr, Unification)
-applyUnification expr unif = do
+  :: Context Reader Unification :> es
+  => Context Writer Unification :> es
+  => CoreExpr
+  -> Eff es CoreExpr
+applyUnification expr = do
   -- Split the type variables and theta type.
   let (tyVars, thetaTy, _) = splitExprTy expr
 
   -- Get the type arguments and lookup the dictionary variables.
-  let (tyArgs, unif') = lookupTys tyVars unif
-  let (thetaArg, unif'') = lookupDicts thetaTy unif'
+  tyArgs <- lookupTys tyVars
+  thetaArg <- lookupDicts thetaTy
 
   -- Apply the type arguments and dictionary variables
   let args = fmap Type tyArgs <> thetaArg
-  let expr' = foldl' App expr args
-
-  -- Return the updated unification map and expression with the appropriate
-  -- unification variables applied.
-  (expr', unif'')
+  pure $ mkApps expr args
 
 -- | Multiple applications of the unification via 'applyUnification'.
 applyUnifications
-  :: Traversable f
+  :: Context Reader Unification :> es
+  => Context Writer Unification :> es
+  => Traversable f
   => f CoreExpr
-  -> Unification
-  -> (f CoreExpr, Unification)
-applyUnifications = accumL applyUnification
+  -> Eff es (f CoreExpr)
+applyUnifications = traverse applyUnification
 
 -- | A single unifying application using 'unifyApps'.
 unifyApp
-  :: Alternative m
-  => Monad m
+  :: HasCallStack
+  => Error UnificationError :> es
+  => Error OversaturatedError :> es
   => CoreExpr
   -> CoreArg
-  -> m CoreExpr
+  -> Eff es CoreExpr
 unifyApp fun arg = unifyApps fun [arg]
 
 -- | Application that unifies polymorphic types.
@@ -246,11 +314,12 @@ unifyApp fun arg = unifyApps fun [arg]
 -- variables that occur prior any of the body type are unified and placed as
 -- outer type and dictionary variables.
 unifyApps
-  :: Alternative m
-  => Monad m
+  :: HasCallStack
+  => Error UnificationError :> es
+  => Error OversaturatedError :> es
   => CoreExpr
   -> [CoreArg]
-  -> m CoreExpr
+  -> Eff es CoreExpr
 unifyApps fun args = do
   -- Get the base types without type variables or theta type of all expressions.
   let bodyTy = view _3 . splitExprTy
@@ -261,32 +330,27 @@ unifyApps fun args = do
   -- TODO: Can we just ignore the multiplicity on this application?
   let (argTysRequired, _) = splitFunTys funTy & _1 . mapped %~ scaledThing
   let pairs = zip argTysRequired argTys
-  -- TODO: This should return the reasons why it fails! We should probably do
-  -- this through an effect system.
-  guard $ length pairs == length argTys
+  when (length argTys > length argTysRequired) do
+    throwError_ $ OversaturatedError fun args
   unif <- unifyTypes pairs
 
   -- Perform apply unification.
-  let (fun', unif') = applyUnification fun unif
-  let (args', unif'') = applyUnifications args unif'
-
-  -- Apply the function to the argument. The type and dictionary variables are
-  -- still free in this expression.
-  let open = mkApps fun' args'
-
-  -- Close the expression by binding the type and dictionary variables.
-  pure $ closeExpr unif'' open
+  evalContextLocal unif do
+    fun' <- applyUnification fun
+    args' <- applyUnifications args
+    -- Apply the function to the arguments. The fresh type and dictionary
+    -- variables are still free in this expression, so we close them.
+    closeExpr $ mkApps fun' args'
 
 -- | Unify two expressions.
 --
 -- This can be used to compare two expressions that are quantified different,
 -- but are otherwise comparable.
 unifyExprs
-  :: Alternative m
-  => Monad m
+  :: Error UnificationError :> es
   => CoreExpr
   -> CoreExpr
-  -> m (CoreExpr, CoreExpr)
+  -> Eff es (CoreExpr, CoreExpr)
 unifyExprs lhs rhs = do
   -- Get the unifiable part of the type.
   let bodyTy = view _3 . splitExprTy
@@ -296,33 +360,45 @@ unifyExprs lhs rhs = do
   -- Get a unification mapping.
   unif <- unifyType lhsTy rhsTy
 
-  -- Apply the unification for both expressions.
-  let (lhs', unif') = applyUnification lhs unif
-  let (rhs', unif'') = applyUnification rhs unif'
+  -- Use this unification mapping to unify the types..
+  evalContextLocal unif do
+    -- Perform apply unification. Note, it is important to first perform this
+    -- step for both expressions, as we want to close both of them in the exact
+    -- same way.
+    lhs' <- applyUnification lhs
+    rhs' <- applyUnification rhs
 
-  -- Close both expressions.
-  let lhs'' = closeExpr unif'' lhs'
-  let rhs'' = closeExpr unif'' rhs'
-
-  pure (lhs'', rhs'')
+    -- Close both expressions.
+    lhs'' <- closeExpr lhs'
+    rhs'' <- closeExpr rhs'
+    pure (lhs'', rhs'')
 
 -- | Lookup a class instance in the instantiation environment.
 --
 -- This will return a dictionary instance as core expression.
 lookupClassInst
-  :: Alternative m
-  => Monad m
-  => InstEnvs
-  -> Type
-  -> m CoreExpr
-lookupClassInst env ty = do
+  :: forall es
+   . HasCallStack
+  => Error (LookupError Type) :> es
+  => ExtInstEnv :> es
+  => Context Reader InstEnv :> es
+  => Context Reader Dependencies :> es
+  => Type
+  -> Eff es CoreExpr
+lookupClassInst ty = do
+  -- TODO: Maybe this should be called whyFail', once we get rid of the original
+  -- whyFail in this package.
+  let note :: Maybe a -> Eff es a
+      note = whyFail' $ LookupError ty
+
   -- Get the typeclass constructor of this type, if possible.
-  (tyCon, tyArgs) <- maybeM $ splitTyConApp_maybe ty
-  tyClass <- maybeM $ tyConClass_maybe tyCon
+  (tyCon, tyArgs) <- note $ splitTyConApp_maybe ty
+  tyClass <- note $ tyConClass_maybe tyCon
 
   -- Get the instance for this typeclass with supplied types, if possible.
+  env <- getInstEnvs
   let eitherInst = lookupUniqueInstEnv env tyClass tyArgs
-  (clsInst, tys) <- maybeM $ rightToMaybe eitherInst
+  (clsInst, tys) <- note $ rightToMaybe eitherInst
 
   -- Create an expression for the instance.
   let dict = Var $ instanceDFunId clsInst
@@ -336,21 +412,27 @@ lookupClassInst env ty = do
 -- unification-like functions in this module, as these unifications can create
 -- resolvable typeclass constraints.
 resolveInstances
-  :: InstEnvs
-  -> CoreExpr
-  -> CoreExpr
-resolveInstances env expr = do
+  :: ExtInstEnv :> es
+  => Context Reader InstEnv :> es
+  => Context Reader Dependencies :> es
+  => CoreExpr
+  -> Eff es CoreExpr
+resolveInstances expr = do
   -- Get a mapping from constraints to instances.
   let theta = splitExprTy expr ^. _2
-  let instances = zip theta $ theta <&> lookupClassInst env
+  results <- forM theta do
+    runErrorNoCallStack @(LookupError Type) . lookupClassInst
+  let instances = zip theta results
 
   -- Convert this mapping into a trie map.
-  let extend key val = alterTM key (val <|>)
-  let dicts = foldl' (flip $ uncurry extend) emptyTM instances
+  let dicts = foldlBy emptyTM instances \acc (ty, inst) -> do
+          -- Alter the dictionary map if we found an instance.
+          alterTM ty (rightToMaybe inst <|>) acc
 
   -- Set this dictionary for a unification.
   let unif = emptyUnif & dictionaries .~ dicts
 
   -- Apply the unification using the resolved instances and close it.
-  let (expr', unif') = applyUnification expr unif
-  closeExpr unif' expr'
+  evalContextLocal unif $ do
+    expr' <- applyUnification expr
+    closeExpr expr'

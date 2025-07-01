@@ -25,7 +25,6 @@ module Effectful.GHC.External
 
 import Effectful
 import Effectful.Dispatch.Dynamic (send, interpret_)
-import Effectful.Reader.Static (Reader, ask)
 
 import GHC.Plugins
 import GHC.Core.FamInstEnv (FamInstEnv, FamInstEnvs)
@@ -36,6 +35,7 @@ import GHC.Unit.External
   , PackageFamInstEnv
   )
 import GHC.Unit.Module.Deps (Dependencies (..))
+import Effectful.Context
 
 -- | Effect to get the complete 'ExternalPackageState'.
 data ExtPackages :: Effect where
@@ -87,13 +87,13 @@ runExtInstEnv = interpret_ $ \ExtInstEnv -> do
 -- dependencies to gather the visible orphan modules.
 getInstEnvs
   :: ExtInstEnv :> es
-  => Reader InstEnv :> es
-  => Reader Dependencies :> es
+  => Context Reader InstEnv :> es
+  => Context Reader Dependencies :> es
   => Eff es InstEnvs
 getInstEnvs = do
-  local <- ask @InstEnv
+  local <- get @InstEnv
   global <- getExtInstEnv
-  dependencies <- ask @Dependencies
+  dependencies <- get @Dependencies
   pure InstEnvs
     { ie_local = local
     , ie_global = global
@@ -127,10 +127,10 @@ runExtFamInstEnv = interpret_ $ \ExtFamInstEnv -> do
 -- Get the complete type family instance environments using the effects that
 -- fetch the local and global environment.
 getFamInstEnvs
-  :: Reader FamInstEnv :> es
+  :: Context Reader FamInstEnv :> es
   => ExtFamInstEnv :> es
   => Eff es FamInstEnvs
 getFamInstEnvs = do
-  local <- ask @FamInstEnv
+  local <- get @FamInstEnv
   global <- getExtFamInstEnv
   pure (local, global)

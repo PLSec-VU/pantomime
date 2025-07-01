@@ -28,6 +28,9 @@ library
       Control.Error
       Effectful.Break
       Effectful.Cont
+      Effectful.Context
+      Effectful.Context.Dynamic
+      Effectful.Context.Static.Local
       Effectful.GHC.CoreE
       Effectful.GHC.Display
       Effectful.GHC.DynFlags
@@ -99,6 +102,7 @@ library
       base >=4.7 && <5
     , clash-prelude
     , composition
+    , constraints >=0.14.2
     , containers
     , effectful >=2.5.1.0
     , effectful-core >=2.5.1.0
@@ -162,6 +166,7 @@ executable uc-plugin-exe
     , base >=4.7 && <5
     , clash-prelude
     , composition
+    , constraints >=0.14.2
     , containers
     , effectful >=2.5.1.0
     , effectful-core >=2.5.1.0
@@ -214,6 +219,7 @@ test-suite uc-plugin-test
     , base >=4.7 && <5
     , clash-prelude
     , composition
+    , constraints >=0.14.2
     , containers
     , directory
     , effectful >=2.5.1.0

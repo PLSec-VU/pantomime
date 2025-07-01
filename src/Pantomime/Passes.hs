@@ -19,14 +19,14 @@ import Control.Error
 import Language.Haskell.TH qualified as TH
 
 import Pantomime.Combinator qualified as Combinator
-import Pantomime.Util
 import Pantomime.Unification
 import Pantomime.Solve
 import Pantomime.Annotation
 
 import Effectful
-import Effectful.Reader.Static
-import Effectful.Error.Static (Error, runErrorWith, CallStack, throwError_)
+import Effectful.Context
+import Effectful.Reader.Static (runReader)
+import Effectful.Error.Static (Error, CallStack, runErrorWith)
 import Effectful.Fail (Fail, runFailIO)
 import Effectful.GHC.TH
 import Effectful.GHC.ModGuts
@@ -40,7 +40,7 @@ resolveTH
   :: HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
-  => Reader CoreProgram :> es
+  => Context Reader CoreProgram :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => TH.Name
@@ -123,6 +123,8 @@ runSymbolic
   => Eff
     [ Error (LookupError TH.Name)
     , Error (LookupError Name)
+    , Error OversaturatedError
+    , Error UnificationError
     , THNameToGHCName
     , HasThings
     , ExtInstEnv
@@ -144,6 +146,8 @@ runSymbolic
   . runExtAll
   . runHasThings
   . runThNameToGhcName
+  . runErrorWith @UnificationError propagateError
+  . runErrorWith @OversaturatedError propagateError
   . runErrorWith @(LookupError Name) propagateError
   . runErrorWith @(LookupError TH.Name) propagateErrorShow
   where
@@ -182,16 +186,16 @@ checkSpecPass = do
 
 printAndLint
   :: HasCallStack
+  => Context Reader ModGuts :> es
   => IOE :> es
   => CoreE :> es
   => Display :> es
-  => Reader ModGuts :> es
   => CoreBind'
   -> Eff es CoreBind'
 printAndLint bind = do
   dflags <- liftCore getDynFlags
   let cfg = initLintConfig dflags []
-  prog <- asks mg_binds
+  prog <- gets mg_binds
   let res = lintCoreBindings' cfg prog
   debug bind
   debug res
@@ -199,11 +203,12 @@ printAndLint bind = do
 
 composeImpl
   :: HasCallStack
-  => Fail :> es
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
+  => Error UnificationError :> es
+  => Error OversaturatedError :> es
+  => Context Reader CoreProgram :> es
   => THNameToGHCName :> es
-  => Reader CoreProgram :> es
   => HasThings :> es
   => Pantomime TH.Name
   -> CoreExpr
@@ -214,20 +219,19 @@ composeImpl spec expr = do
   compose <- resolve 'Combinator.composeI
 
   obs <- resolve $ observation spec
-  _ <- throwError_ $ LookupError 'observation
   proj <- resolve $ projection spec
 
   expr' <- unifyApps compose [expr, obs, proj]
-    ??= "Incompatible types on implementation/observation/projection composition"
 
   pure $ occurAnalyseExpr expr'
 
 composeSim
   :: HasCallStack
-  => Fail :> es
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
-  => Reader CoreProgram :> es
+  => Error UnificationError :> es
+  => Error OversaturatedError :> es
+  => Context Reader CoreProgram :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Pantomime TH.Name
@@ -242,7 +246,6 @@ composeSim uc = do
   proj <- resolve $ projection uc
 
   expr' <- unifyApps compose [leak, sim, proj]
-    ??= "Incompatible types on leakage/simulator/projection composition"
 
   pure $ occurAnalyseExpr expr'
 
@@ -250,14 +253,16 @@ checkSpec
   :: HasCallStack
   => Error (LookupError Name) :> es
   => Error (LookupError TH.Name) :> es
+  => Error UnificationError :> es
+  => Error OversaturatedError :> es
+  => Context Reader CoreProgram :> es
+  => Context Reader InstEnv :> es
+  => Context Reader Dependencies :> es
+  => Context Reader ModGuts :> es
   => IOE :> es
   => CoreE :> es
   => Fail :> es
   => Display :> es
-  => Reader CoreProgram :> es
-  => Reader InstEnv :> es
-  => Reader Dependencies :> es
-  => Reader ModGuts :> es
   => ExtInstEnv :> es
   => HasDynFlagsE :> es
   => HasThings :> es
@@ -266,7 +271,7 @@ checkSpec
   -> CoreBind'
   -> Eff es CoreBind'
 checkSpec spec (Bind' var expr) = do
-  program <- ask @CoreProgram
+  program <- get @CoreProgram
   let scope = extendInScopeSetBndrs emptyInScopeSet program
 
   imp <- composeImpl spec expr
@@ -276,16 +281,16 @@ checkSpec spec (Bind' var expr) = do
   lintPanic scope sim
 
   (imp', sim') <- unifyExprs imp sim
-    ??= "Unable to unify implementation projection with simulator"
 
-  instEnvs <- getInstEnvs
-  let imp'' = resolveInstances instEnvs imp'
-  let sim'' = resolveInstances instEnvs sim'
+  imp'' <- resolveInstances imp'
+  sim'' <- resolveInstances sim'
 
   lintPanic scope imp''
   lintPanic scope sim''
 
-  result <- exprSymEq imp'' sim''
+  -- TODO: Remove this once we remove the MonadReader constraint.
+  guts <- get @ModGuts
+  result <- runReader guts $ exprSymEq imp'' sim''
 
   case result of
     Right _ -> do
@@ -300,12 +305,12 @@ symCompare
   :: HasCallStack
   => Error (LookupError Name) :> es
   => Error (LookupError TH.Name) :> es
+  => Context Reader CoreProgram :> es
+  => Context Reader ModGuts :> es
   => IOE :> es
   => CoreE :> es
   => Fail :> es
   => Display :> es
-  => Reader CoreProgram :> es
-  => Reader ModGuts :> es
   => HasDynFlagsE :> es
   => THNameToGHCName :> es
   => HasThings :> es
@@ -317,7 +322,9 @@ symCompare (SymCompare other) (Bind' var expr) = do
 
   other' <- resolve other
 
-  result <- exprSymEq expr other'
+  -- TODO: Remove this once we remove the MonadReader constraint.
+  guts <- get @ModGuts
+  result <- runReader guts $ exprSymEq expr other'
 
   case result of
     Right _ -> do

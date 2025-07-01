@@ -4,7 +4,8 @@ module Effectful.GHC.ModGuts
   ) where
 
 import Effectful
-import Effectful.Reader.Static (Reader, runReader)
+import Effectful.Context
+
 import GHC.Core (CoreProgram)
 import GHC.Core.InstEnv (InstEnv)
 import GHC.Core.FamInstEnv (FamInstEnv)
@@ -12,22 +13,22 @@ import GHC.Unit.Module.ModGuts (ModGuts (..))
 import GHC.Unit.Module.Deps (Dependencies)
 
 type ModGutsEs es =
-  ( Reader InstEnv :> es
-  , Reader FamInstEnv :> es
-  , Reader CoreProgram :> es
-  , Reader Dependencies :> es
+  ( Context Reader InstEnv :> es
+  , Context Reader FamInstEnv :> es
+  , Context Reader CoreProgram :> es
+  , Context Reader Dependencies :> es
   -- TODO: Remove this once we don't depend on it anymore!
-  , Reader ModGuts :> es
+  , Context Reader ModGuts :> es
   )
 
 runModGuts
   :: ModGuts
-  -> Eff (Reader InstEnv : Reader FamInstEnv : Reader CoreProgram : Reader Dependencies : Reader ModGuts : es) a
+  -> Eff (Context Reader InstEnv : Context Reader FamInstEnv : Context Reader CoreProgram : Context Reader Dependencies : Context Reader ModGuts : es) a
   -> Eff es a
 runModGuts guts
   -- TODO: Remove this once we don't depend on it anymore!
-  = runReader guts
-  . runReader (mg_deps guts)
-  . runReader (mg_binds guts)
-  . runReader (mg_fam_inst_env guts)
-  . runReader (mg_inst_env guts)
+  = runContextReader guts
+  . runContextReader (mg_deps guts)
+  . runContextReader (mg_binds guts)
+  . runContextReader (mg_fam_inst_env guts)
+  . runContextReader (mg_inst_env guts)
