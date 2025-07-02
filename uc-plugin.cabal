@@ -38,6 +38,7 @@ library
       Effectful.GHC.ModGuts
       Effectful.GHC.TH
       Effectful.GHC.TyThing
+      Effectful.Grisette.Fresh
       Pantomime
       Pantomime.Annotation
       Pantomime.Base

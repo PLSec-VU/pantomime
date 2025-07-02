@@ -25,7 +25,6 @@ import Pantomime.Annotation
 
 import Effectful
 import Effectful.Context
-import Effectful.Reader.Static (runReader)
 import Effectful.Error.Static (Error, CallStack, runErrorWith)
 import Effectful.Fail (Fail, runFailIO)
 import Effectful.GHC.TH
@@ -288,9 +287,7 @@ checkSpec spec (Bind' var expr) = do
   lintPanic scope imp''
   lintPanic scope sim''
 
-  -- TODO: Remove this once we remove the MonadReader constraint.
-  guts <- get @ModGuts
-  result <- runReader guts $ exprSymEq imp'' sim''
+  result <- exprSymEq imp'' sim''
 
   case result of
     Right _ -> do
@@ -322,9 +319,7 @@ symCompare (SymCompare other) (Bind' var expr) = do
 
   other' <- resolve other
 
-  -- TODO: Remove this once we remove the MonadReader constraint.
-  guts <- get @ModGuts
-  result <- runReader guts $ exprSymEq expr other'
+  result <- exprSymEq expr other'
 
   case result of
     Right _ -> do

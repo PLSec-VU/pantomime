@@ -37,20 +37,17 @@ import Grisette
   , LogicalOp (..)
   , z3
   , solve
-  , MonadFresh (..)
-  , FreshIndex (..)
-  , runFreshT
-  , nextFreshIndex
   , indexed
   )
 
-import Control.Monad.Except (MonadError (..), modifyError, runExceptT)
+-- import Control.Monad.Except (MonadError (..), modifyError, runExceptT)
+import Control.Monad.Except (throwError)
 import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
 import Data.Foldable (forM_)
 
-import Pantomime.Monad.GHC
+-- import Pantomime.Monad.GHC
 import Pantomime.WordSize
 import Pantomime.Evaluate
 import Pantomime.Environment
@@ -63,6 +60,15 @@ import Pantomime.MonadEval
 -- just provide the interpretations they require for the code!
 import Pantomime.Base
 import Pantomime.Clash
+
+import Effectful
+import Effectful.Context
+import Effectful.Error.Static (throwError_, runErrorNoCallStack, runErrorNoCallStackWith)
+import Effectful.Fail
+import Effectful.GHC.CoreE
+import Effectful.GHC.DynFlags
+import Effectful.GHC.Display
+import Effectful.Grisette.Fresh
 
 -- TODO: Rename this thing.
 data NonEq
@@ -81,14 +87,17 @@ instance Outputable NonEq where
     SolveError err -> text "solver error: " <+> text (show err)
 
 exprSymEq
-  :: forall m
-   . MonadCore m
-  => MonadFail m
-  => HasModGuts m
-  => HasDynFlags m
+  :: forall es
+   . HasCallStack
+  => Context Reader ModGuts :> es
+  => IOE :> es
+  => CoreE :> es
+  => Fail :> es
+  => Display :> es
+  => HasDynFlagsE :> es
   => CoreExpr
   -> CoreExpr
-  -> m (Either NonEq ())
+  -> Eff es (Either NonEq ())
 exprSymEq lhs rhs = do
   -- Get the target platform word size.
   dflags <- getDynFlags
@@ -96,30 +105,37 @@ exprSymEq lhs rhs = do
 
   -- We run the comparison with the word size of the target platform.
   case pwsize of
-    PW4 -> exprSymEq' @m @PW4 lhs rhs
-    PW8 -> exprSymEq' @m @PW8 lhs rhs
+    PW4 -> exprSymEq' @PW4 lhs rhs
+    PW8 -> exprSymEq' @PW8 lhs rhs
 
 exprSymEq'
-  :: forall m ws
-   . MonadCore m
-  => MonadFail m
-  => HasModGuts m
+  :: forall ws es
+   . HasCallStack
+  => Context Reader ModGuts :> es
+  => IOE :> es
+  => CoreE :> es
+  => Fail :> es
+  => Display :> es
   => KnownWordSize ws
   => CoreExpr
   -> CoreExpr
-  -> m (Either NonEq ())
-exprSymEq' lhs rhs = flip runFreshT "fresh" . runExceptT $ do
-  unless (exprType lhs `eqType` exprType rhs) $ do
-    throwError $ EvalError IllTyped
+  -> Eff es (Either NonEq ())
+exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
+  let lty = exprType lhs
+  let rty = exprType rhs
+  unless (lty `eqType` rty) $ do
+    throwError_ $ EvalError IllTyped
 
-  (bndrs, lres, rres, eq) <- modifyError EvalError $ do
+  let runEvalErr = runErrorNoCallStackWith $ throwError_ . EvalError
+
+  (bndrs, lres, rres, eq) <- runEvalErr $ runMonadEval do
     bndrs <- symbolicBndrs $ exprType lhs
 
     base <- baseValues
     clash <- clashInterp
     env <- extendManyEnv emptyEnv $ base ++ clash
 
-    prog <- mg_binds <$> modGuts
+    prog <- runEvalEff $ gets @ModGuts mg_binds
     let env' = extendLocalEnv env prog
 
     let saturate expr = do
@@ -143,21 +159,21 @@ exprSymEq' lhs rhs = flip runFreshT "fresh" . runExceptT $ do
 
   case result of
     Right model -> do
-      let concretise' = modifyError EvalError . concretise model
+      let concretise' = runEvalErr . runMonadEval . concretise model
       bndrs' <- forM bndrs concretise'
       lres' <- concretise' lres
       rres' <- concretise' rres
-      dbg' "-------------"
-      forM_ bndrs' dbg
-      dbg' "-------------"
-      dbg lres'
-      dbg' "=/=/=/=/=/=/="
-      dbg rres'
-      _ <- error "We crash on non-equal for now."
+      debugS "-------------"
+      forM_ bndrs' debug
+      debugS "-------------"
+      debug lres'
+      debugS "=/=/=/=/=/=/="
+      debug rres'
+      _ <- fail "We crash on non-equal for now."
 
-      throwError $ Counterexample bndrs'
+      throwError_ $ Counterexample bndrs'
     Left Unsat -> pure ()
-    Left err -> throwError $ SolveError err
+    Left err -> throwError_ $ SolveError err
 
 -- TODO: We have a function to create a fresh typed value now, together with
 -- types attached to function values. We should be able to saturate a value
@@ -173,6 +189,7 @@ symbolicBndrs ty = do
     ([], [], ty') -> pure ty'
     -- TODO: Support polymorphism.
     -- For now, we don't support polymorphism or dictionaries at the top level.
+    -- Do we really not at this point? I'll have to verify it!
     _ -> throwError UnsupportedExpr
 
   let (argTys, _) = splitFunTys ty'

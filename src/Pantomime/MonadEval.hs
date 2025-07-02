@@ -12,28 +12,83 @@ module Pantomime.MonadEval
   , EvalIte (..)
   , WeakEq (..)
   , EvalGenSym (..)
+  , runMonadEval
+  , runEvalEff
   ) where
 
 import GHC.Plugins
 
 import Grisette.Unified (EvalModeTag (..), DecideEvalMode (..))
-import Grisette 
+import Grisette
   ( SymBool
   , LogicalOp (..)
   , SymEq (..)
   , Mergeable
+  , FreshT (..)
   , SimpleMergeable (..)
-  , MonadFresh
   , simpleMerge
   )
 
 import Control.Monad (void)
-import Control.Monad.Except (MonadError)
+import Control.Monad.Except (MonadError (..), ExceptT, runExceptT)
+import Control.Monad.Reader (ReaderT (..))
 
 import Data.Composition ((.:.))
 
 import Pantomime.Monad.GHC
 import Pantomime.Runtime
+
+import Effectful
+import Effectful.Error.Static (Error, throwError_, runErrorNoCallStack)
+import Effectful.Context
+import Effectful.Grisette.Fresh
+import Effectful.GHC.CoreE hiding (liftCore)
+
+runMonadEval
+  :: Error EvalError :> es
+  => Context Reader ModGuts :> es
+  => Fresh :> es
+  => IOE :> es
+  => CoreE :> es
+  => ExceptT EvalError (FreshT (ReaderT ModGuts CoreM)) a
+  -> Eff es a
+runMonadEval m = do
+  -- Get required environment.
+  guts <- get @ModGuts
+  identifier <- getIdentifier
+  idx <- getFreshIndex
+
+  -- Run the inner monad eval instance.
+  let runner
+        = liftCore
+        . flip runReaderT guts
+        . (\m' -> runFreshTFromIndex m' identifier idx)
+        . runExceptT
+  (result, idx') <- runner m
+
+  -- Ensure we first set the resulting index, to retain semantics with the
+  -- effect system.
+  setFreshIndex idx'
+  either throwError_ pure result
+
+runEvalEff
+  :: MonadEval m
+  => Eff [Error EvalError, Context Reader ModGuts, Fresh, CoreE, IOE] a
+  -> m a
+runEvalEff m = do
+  guts <- modGuts
+  identifier <- getIdentifier
+  idx <- getFreshIndex
+
+  let runner
+        = runCoreEM
+        . runFreshWithIndex identifier idx
+        . runContextReader guts
+        . runErrorNoCallStack
+  (result, idx') <- liftCore $ runner m
+
+  setFreshIndex idx'
+  either throwError pure result
 
 -- TODO: Remove MonadCore from the requirements.
 type MonadEval m =
