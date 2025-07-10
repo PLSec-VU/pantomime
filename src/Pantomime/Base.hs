@@ -6,9 +6,10 @@ module Pantomime.Base
   , integerToInt'#
   ) where
 
-import GHC.Plugins
+import GHC.Plugins hiding (thNameToGhcName)
 import GHC.Types.TyThing (lookupId)
 import GHC.Base (noinline)
+import GHC.Core.FamInstEnv (FamInstEnv)
 
 import GHC.Real (overflowError, divZeroError)
 import GHC.Num.Integer (integerToInt#, integerToWord#)
@@ -16,22 +17,35 @@ import GHC.Num.Natural (naturalToWord#)
 
 import Control.Monad.Except (MonadError(..))
 
-import Grisette
+import Grisette hiding (Fresh)
 
 import Pantomime.Value
 import Pantomime.MonadEval
 import Pantomime.WordSize
 import Pantomime.Runtime
-import Pantomime.Clash.Util
-import Pantomime.Monad.GHC
-import Pantomime.Util
+
+import Language.Haskell.TH qualified as TH
+
+import Effectful
+import Effectful.GHC.TyThing
+import Effectful.GHC.TH
+import Effectful.Error.Static (Error, throwError_)
+import Effectful.Context
+import Effectful.Grisette.Fresh
+import Effectful.GHC.External
 
 baseValues
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
+  :: forall es ws
+   . Error EvalError :> es
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => Context Reader FamInstEnv :> es
+  => ExtFamInstEnv :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
+  => Fresh :> es
   => KnownWordSize ws
-  => m [(Var, Value m ws)]
+  => Eff es [(Var, Value (Eff es) ws)]
 baseValues = sequence
   [ integerToInt'#
   , integerToWord'#
@@ -45,33 +59,34 @@ baseValues = sequence
   ]
 
 integerToInt'#
-  :: forall m m' ws
-   . MonadCore m
-  => MonadFail m
-  => MonadEval m'
+  :: forall es ws
+   . Error EvalError :> es
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => KnownWordSize ws
-  => m (Var, Value m' ws)
+  => Eff es (Var, Value (Eff es) ws)
 integerToInt'# = do
-  name <- thNameToGhcName' 'integerToInt#
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
+  name <- thNameToGhcName 'integerToInt#
+  var <- lookupId name
 
   let value = Fun integerTy $ \case
         Data adt -> do
           let condIS = adtIsDataCon adt integerISDataCon
           valueIS <- case adtDataConFields adt integerISDataCon of
             Just [Primitive (Int i)] -> pure i
-            _ -> throwError IllTyped
+            _ -> throwError_ IllTyped
 
           let condIP = adtIsDataCon adt integerIPDataCon
           valueIP <- case adtDataConFields adt integerIPDataCon of
             Just [Primitive (ByteArray _ i)] -> pure $ symFromIntegral <$> i
-            _ -> throwError IllTyped
+            _ -> throwError_ IllTyped
 
           let condIN = adtIsDataCon adt integerINDataCon
           valueIN <- case adtDataConFields adt integerINDataCon of
             Just [Primitive (ByteArray _ i)] -> pure $ negate . symFromIntegral <$> i
-            _ -> throwError IllTyped
+            _ -> throwError_ IllTyped
 
           let alts =
                 [ (condIS, valueIS)
@@ -85,44 +100,45 @@ integerToInt'# = do
 
           -- FIXME: This unfolds the prerequisites for the tag multiple times,
           -- potentially bloating the guard.
-          let final = foldl'' invalid alts $ \fl (cond, body) -> do
+          let final = foldl'' invalid alts \fl (cond, body) -> do
                 cond' <- cond
                 mrgIte cond' body fl
 
           pure . Primitive . Int $ final
 
-        _ -> throwError IllTyped
+        _ -> throwError_ IllTyped
 
   pure (var, value)
 
 integerToWord'#
-  :: forall m m' ws
-   . MonadCore m
-  => MonadFail m
-  => MonadEval m'
+  :: forall es ws
+   . Error EvalError :> es
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => KnownWordSize ws
-  => m (Var, Value m' ws)
+  => Eff es (Var, Value (Eff es) ws)
 integerToWord'# = do
-  name <- thNameToGhcName' 'integerToWord#
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
+  name <- thNameToGhcName 'integerToWord#
+  var <- lookupId name
 
   let value = Fun integerTy $ \case
         Data adt -> do
           let condIS = adtIsDataCon adt integerISDataCon
           valueIS <- case adtDataConFields adt integerISDataCon of
             Just [Primitive (Int i)] -> pure $ toUnsigned <$> i
-            _ -> throwError IllTyped
+            _ -> throwError_ IllTyped
 
           let condIP = adtIsDataCon adt integerIPDataCon
           valueIP <- case adtDataConFields adt integerIPDataCon of
             Just [Primitive (ByteArray _ i)] -> pure $ symFromIntegral <$> i
-            _ -> throwError IllTyped
+            _ -> throwError_ IllTyped
 
           let condIN = adtIsDataCon adt integerINDataCon
           valueIN <- case adtDataConFields adt integerINDataCon of
             Just [Primitive (ByteArray _ i)] -> pure $ negate . symFromIntegral <$> i
-            _ -> throwError IllTyped
+            _ -> throwError_ IllTyped
 
           let alts =
                 [ (condIS, valueIS)
@@ -142,33 +158,34 @@ integerToWord'# = do
 
           pure . Primitive . Word $ final
 
-        _ -> throwError IllTyped
+        _ -> throwError_ IllTyped
 
   pure (var, value)
 
 naturalToWord'#
-  :: forall m m' ws
-   . MonadCore m
-  => MonadFail m
-  => MonadEval m'
+  :: forall es ws
+   . Error EvalError :> es
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => KnownWordSize ws
-  => m (Var, Value m' ws)
+  => Eff es (Var, Value (Eff es) ws)
 naturalToWord'# = do
-  name <- thNameToGhcName' 'naturalToWord#
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
+  name <- thNameToGhcName 'naturalToWord#
+  var <- lookupId name
 
   let value = Fun naturalTy $ \case
         Data adt -> do
           let condNS = adtIsDataCon adt naturalNSDataCon
           valueNS <- case adtDataConFields adt naturalNSDataCon of
             Just [Primitive (Word w)] -> pure w
-            _ -> throwError IllTyped
+            _ -> throwError_ IllTyped
 
           let condNB = adtIsDataCon adt naturalNBDataCon
           valueNB <- case adtDataConFields adt naturalNBDataCon of
             Just [Primitive (ByteArray _ i)] -> pure $ symFromIntegral <$> i
-            _ -> throwError IllTyped
+            _ -> throwError_ IllTyped
 
           let alts =
                 [ (condNS, valueNS)
@@ -187,7 +204,7 @@ naturalToWord'# = do
 
           pure . Primitive . Word $ final
 
-        _ -> throwError IllTyped
+        _ -> throwError_ IllTyped
 
   pure (var, value)
 
@@ -305,47 +322,61 @@ naturalToWord'# = do
 --   pure (var, value)
 
 overflowError'
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
+  :: forall es ws
+   . Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => Error EvalError :> es
+  => Context Reader FamInstEnv :> es
+  => Fresh :> es
+  => HasThings :> es
+  => ExtFamInstEnv :> es
+  => THNameToGHCName :> es
   => KnownWordSize ws
-  => m (Var, Value m ws)
+  => Eff es (Var, Value (Eff es) ws)
 overflowError' = do
-  name <- thNameToGhcName' 'overflowError
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
+  name <- thNameToGhcName 'overflowError
+  var <- lookupId name
 
   let value = Fun tYPEKind $ \case
-        Ty ty -> typedValue (throwError Overflow) ty
-        _ -> throwError IllTyped
+        Ty ty -> evalFresh (ty, Left @_ @() Overflow)
+        _ -> throwError_ IllTyped
 
   pure (var, value)
 
 divZeroError'
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
+  :: forall es ws
+   . Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => Error EvalError :> es
+  => Context Reader FamInstEnv :> es
+  => Fresh :> es
+  => HasThings :> es
+  => ExtFamInstEnv :> es
+  => THNameToGHCName :> es
   => KnownWordSize ws
-  => m (Var, Value m ws)
+  => Eff es (Var, Value (Eff es) ws)
 divZeroError' = do
-  name <- thNameToGhcName' 'divZeroError
-    ??= "Lookup failed."
-  var <- liftCore $ lookupId name
+  name <- thNameToGhcName 'divZeroError
+  var <- lookupId name
 
   let value = Fun tYPEKind $ \case
-        Ty ty -> typedValue (throwError DivideByZero) ty
-        _ -> throwError IllTyped
+        Ty ty -> evalFresh (ty, Left @_ @() DivideByZero)
+        _ -> throwError_ IllTyped
 
   pure (var, value)
 
 interpNoInline
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
-  => m (Var, Value m ws)
+  :: forall es ws
+   . Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => Error EvalError :> es
+  => HasThings :> es
+  => THNameToGHCName :> es
+  => Eff es (Var, Value (Eff es) ws)
 interpNoInline = do
-  var <- lookupThId 'noinline
+  name <- thNameToGhcName 'noinline
+  var <- lookupId name
   let value = Fun tYPEKind $ \case
         Ty ty -> pure . Fun ty $ \arg -> pure arg
-        _ -> throwError IllTyped
+        _ -> throwError_ IllTyped
   pure (var, value)

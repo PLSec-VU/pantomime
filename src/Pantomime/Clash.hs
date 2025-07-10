@@ -8,21 +8,31 @@ module Pantomime.Clash
 
 import GHC.Plugins
 
-import qualified Pantomime.Clash.BitVector as BitVector
-import qualified Pantomime.Clash.Unsigned as Unsigned
-import qualified Pantomime.Clash.Signed as Signed
-import qualified Pantomime.Clash.Bit as Bit
+import Pantomime.Clash.BitVector qualified as BitVector
+import Pantomime.Clash.Unsigned qualified as Unsigned
+import Pantomime.Clash.Signed qualified as Signed
+import Pantomime.Clash.Bit qualified as Bit
 
 import Pantomime.MonadEval
 import Pantomime.Value
 import Pantomime.WordSize
 
+import Language.Haskell.TH qualified as TH
+
+import Effectful
+import Effectful.Error.Static (Error)
+import Effectful.GHC.TH
+import Effectful.GHC.TyThing
+
 clashInterp
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
+  :: forall es ws
+   . Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => Error EvalError :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => KnownWordSize ws
-  => m [(Var, Value m ws)]
+  => Eff es [(Var, Value (Eff es) ws)]
 clashInterp = concat <$> sequence
   [ BitVector.clashInterp
   , Unsigned.clashInterp

@@ -10,12 +10,16 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DeriveLift #-}
 {-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
 -- TODO: I want to remove many of these pragmas, also for the other files. Most
 -- of them should just be included in the top-level flags. There also seems to
 -- be a lot of obsolete stuff. Perhaps its good to first find out which flags
 -- are actually used.
+
+-- TODO: I feel like the pantomime dependencies that are used solely by the
+-- final solver should go under Pantomime.Solve.X (e.g. Pantomime.Solve.Value).
+-- Right now, the hierarchy is a bit too flat, which makes the project structure
+-- a lot less clear.
 
 module Pantomime.Solve
   ( NonEq (..)
@@ -25,29 +29,26 @@ module Pantomime.Solve
 import GHC.Plugins
 import GHC.Platform (PlatformWordSize (..), Platform (..))
 import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Core.FamInstEnv (FamInstEnv)
 import GHC.Tc.Utils.TcType (eqType, tcSplitSigmaTy)
 
-import Grisette.Unified (EvalModeTag (..))
 import Grisette
   ( GrisetteSMTConfig (..)
   , SMTConfig (..)
   , Timing (..)
-  , Solvable (..)
   , SolvingFailure (..)
   , LogicalOp (..)
   , z3
   , solve
-  , indexed
   )
 
--- import Control.Monad.Except (MonadError (..), modifyError, runExceptT)
-import Control.Monad.Except (throwError)
 import Control.Monad (forM, unless)
 
 import Data.Functor ((<&>))
 import Data.Foldable (forM_)
 
--- import Pantomime.Monad.GHC
+import Language.Haskell.TH qualified as TH
+
 import Pantomime.WordSize
 import Pantomime.Evaluate
 import Pantomime.Environment
@@ -63,14 +64,17 @@ import Pantomime.Clash
 
 import Effectful
 import Effectful.Context
-import Effectful.Error.Static (throwError_, runErrorNoCallStack, runErrorNoCallStackWith)
+import Effectful.Error.Static (Error, throwError_, runErrorNoCallStack, runErrorNoCallStackWith)
 import Effectful.Fail
-import Effectful.GHC.CoreE
 import Effectful.GHC.DynFlags
 import Effectful.GHC.Display
 import Effectful.Grisette.Fresh
+import Effectful.GHC.TyThing
+import Effectful.GHC.TH
+import Effectful.GHC.External
 
--- TODO: Rename this thing.
+-- TODO: We really want to remove this thing once we get rid of MonadEval in
+-- the entire codebase. This return is a horrible overapproximation!
 data NonEq
   -- TODO: It would be nice if the counterexample also included the final
   -- result. Even if just for checking whether the output is actually correct!
@@ -89,9 +93,14 @@ instance Outputable NonEq where
 exprSymEq
   :: forall es
    . HasCallStack
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
   => Context Reader ModGuts :> es
+  => Context Reader FamInstEnv :> es
+  => HasThings :> es
+  => THNameToGHCName :> es
+  => ExtFamInstEnv :> es
   => IOE :> es
-  => CoreE :> es
   => Fail :> es
   => Display :> es
   => HasDynFlagsE :> es
@@ -111,9 +120,14 @@ exprSymEq lhs rhs = do
 exprSymEq'
   :: forall ws es
    . HasCallStack
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
   => Context Reader ModGuts :> es
+  => Context Reader FamInstEnv :> es
+  => HasThings :> es
+  => THNameToGHCName :> es
+  => ExtFamInstEnv :> es
   => IOE :> es
-  => CoreE :> es
   => Fail :> es
   => Display :> es
   => KnownWordSize ws
@@ -128,14 +142,14 @@ exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
 
   let runEvalErr = runErrorNoCallStackWith $ throwError_ . EvalError
 
-  (bndrs, lres, rres, eq) <- runEvalErr $ runMonadEval do
+  (bndrs, lres, rres, eq) <- runEvalErr do
     bndrs <- symbolicBndrs $ exprType lhs
 
     base <- baseValues
     clash <- clashInterp
     env <- extendManyEnv emptyEnv $ base ++ clash
 
-    prog <- runEvalEff $ gets @ModGuts mg_binds
+    prog <- gets @ModGuts mg_binds
     let env' = extendLocalEnv env prog
 
     let saturate expr = do
@@ -155,11 +169,12 @@ exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
           }
         }
 
-  result <- liftCore . liftIO . solve z3' . symNot $ eq
+  -- TODO: This should be an effect. We really want to get rid of the IO effect.
+  result <- liftIO $ solve z3' (symNot eq)
 
   case result of
     Right model -> do
-      let concretise' = runEvalErr . runMonadEval . concretise model
+      let concretise' = runEvalErr . concretise model
       bndrs' <- forM bndrs concretise'
       lres' <- concretise' lres
       rres' <- concretise' rres
@@ -179,31 +194,27 @@ exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
 -- types attached to function values. We should be able to saturate a value
 -- without being given its type separately.
 symbolicBndrs
-  :: forall m ws
-   . MonadEval m
+  :: forall ws es
+   . Error EvalError :> es
+  => Context Reader FamInstEnv :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
+  => Fresh :> es
+  => ExtFamInstEnv :> es
   => KnownWordSize ws
   => Type
-  -> m [Value m ws]
+  -> Eff es [Value (Eff es) ws]
 symbolicBndrs ty = do
   ty' <- case tcSplitSigmaTy ty of
     ([], [], ty') -> pure ty'
     -- TODO: Support polymorphism.
     -- For now, we don't support polymorphism or dictionaries at the top level.
     -- Do we really not at this point? I'll have to verify it!
-    _ -> throwError UnsupportedExpr
+    _ -> throwError_ UnsupportedExpr
 
   let (argTys, _) = splitFunTys ty'
 
-  -- Use state monad to track unique identifier for arguments.
-  forM argTys $ \argTy -> do
-    -- Get next identifier.
-    ident <- getIdentifier
-    FreshIndex idx <- nextFreshIndex
-
-    -- Create symbolic variable.
-    let untyped :: forall c t. Solvable c t => RuntimeValue S t
-        untyped = pure . sym $ indexed ident idx
-
+  forM argTys \argTy -> do
     -- Type the symbolic variable according to the argument type.
     let argTy' = scaledThing argTy
-    typedValue untyped argTy'
+    evalFresh (argTy', Right @RuntimeError ())

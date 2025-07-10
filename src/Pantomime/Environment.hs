@@ -14,23 +14,25 @@ import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.Type (substTy)
 
 import Control.Monad (foldM)
-import Control.Monad.Except (MonadError (..))
 import Control.Applicative (Alternative(..))
 
 import Pantomime.Value
 import Pantomime.Util
 import Pantomime.MonadEval
 
+import Effectful
+import Effectful.Error.Static
+
 -- TODO: Add comments to this module! In short, an environment is like a Subst,
 -- but for symbolic lookups.
-data Environment m ws = Environment
-  { idSubst :: IdEnv (Value m ws)
+data Environment es ws = Environment
+  { idSubst :: IdEnv (Value (Eff es) ws)
   , tvSubst :: TvSubstEnv
   , cvSubst :: CvSubstEnv
   , localIds :: IdEnv CoreExpr
   }
 
-emptyEnv :: Environment m ws
+emptyEnv :: Environment es ws
 emptyEnv = Environment
   { idSubst = emptyVarEnv
   , tvSubst = emptyVarEnv
@@ -39,15 +41,15 @@ emptyEnv = Environment
   }
 
 lookupLocalEnv
-  :: Environment m ws
+  :: Environment es ws
   -> Var
   -> Maybe CoreExpr
 lookupLocalEnv env = lookupVarEnv (localIds env)
 
 extendLocalEnv
-  :: Environment m ws
+  :: Environment es ws
   -> CoreProgram
-  -> Environment m ws
+  -> Environment es ws
 extendLocalEnv = foldl' $ \env -> \case
   NonRec bndr expr -> do
     let local = extendVarEnv (localIds env) bndr expr
@@ -55,22 +57,22 @@ extendLocalEnv = foldl' $ \env -> \case
   Rec _ -> env
 
 lookupIdEnv
-  :: MonadError EvalError m
-  => Environment m ws
+  :: Error EvalError :> es
+  => Environment es ws
   -> Var
-  -> m (Value m ws)
-lookupIdEnv env var = whyFail UnboundVariable $ if
+  -> Eff es (Value (Eff es) ws)
+lookupIdEnv env var = whyFail' UnboundVariable $ if
   | isTyVar var -> Ty <$> lookupVarEnv (tvSubst env) var
   | isCoVar var -> Co <$> lookupVarEnv (cvSubst env) var
   | isNonCoVarId var -> lookupVarEnv (idSubst env) var
   | otherwise -> empty
 
 extendEnv
-  :: MonadError EvalError m
-  => Environment m ws
+  :: Error EvalError :> es
+  => Environment es ws
   -> Var
-  -> Value m ws
-  -> m (Environment m ws)
+  -> Value (Eff es) ws
+  -> Eff es (Environment es ws)
 extendEnv env var = \case
   Ty ty | isTyVar var -> pure $ env
     { tvSubst = extendVarEnv (tvSubst env) var ty
@@ -81,15 +83,15 @@ extendEnv env var = \case
   value | isNonCoVarId var -> pure $ env
     { idSubst = extendVarEnv (idSubst env) var value
     }
-  _ -> throwError IllTyped
+  _ -> throwError_ IllTyped
 
 extendManyEnv
-  :: MonadError EvalError m
+  :: Error EvalError :> es
   => Foldable t
-  => Environment m ws
-  -> t (Var, Value m ws)
-  -> m (Environment m ws)
-extendManyEnv = foldM $ \env (var, value) -> extendEnv env var value
+  => Environment es ws
+  -> t (Var, Value (Eff es) ws)
+  -> Eff es (Environment es ws)
+extendManyEnv = foldM \env (var, value) -> extendEnv env var value
 
 envToSubst :: Environment m ws -> Subst
 envToSubst env = Subst emptyInScopeSet emptyVarEnv (tvSubst env) (cvSubst env)

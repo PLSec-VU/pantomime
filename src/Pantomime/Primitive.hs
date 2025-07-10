@@ -28,7 +28,10 @@ import Grisette
   )
 
 import Control.Monad (void)
-import Control.Monad.Except (MonadError (..))
+
+import Effectful
+import Effectful.Grisette.Fresh (Fresh)
+import Effectful.Error.Static (Error, throwError_)
 
 import Pantomime.WordSize
 import Pantomime.Runtime
@@ -150,7 +153,7 @@ instance DecideEvalMode mode => Spineable mode (Primitive mode ws) where
     Double value -> void value
     ByteArray size value -> size >> void value
 
-instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive S ws) where
+instance (Error EvalError :> es, KnownWordSize ws) => WeakEq (Eff es) (Primitive S ws) where
   weakEq = curry $ \case
     (Int lhs, Int rhs) -> weakEq lhs rhs
     (Int8 lhs, Int8 rhs) -> weakEq lhs rhs
@@ -168,9 +171,9 @@ instance (MonadEval m, KnownWordSize ws) => WeakEq m (Primitive S ws) where
       eqSize <- weakEq lsize rsize
       eqArr <- weakEq larr rarr
       pure $ eqSize .&& eqArr
-    _ -> throwError IllTyped
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive S ws) where
+instance (Error EvalError :> es, KnownWordSize ws) => EvalIte (Eff es) (Primitive S ws) where
   evalIte cond = curry $ \case
     (Int lhs, Int rhs) -> Int <$> evalIte cond lhs rhs
     (Int8 lhs, Int8 rhs) -> Int8 <$> evalIte cond lhs rhs
@@ -188,12 +191,12 @@ instance (MonadEval m, KnownWordSize ws) => EvalIte m (Primitive S ws) where
       size <- evalIte cond lsize rsize
       array <- evalIte cond larr rarr
       pure $ ByteArray size array
-    _ -> throwError IllTyped
+    _ -> throwError_ IllTyped
 
 class
   ( GenSymSimple spec (RuntimeValue S SymInteger)
   , forall eb sb. ValidFP eb sb => GenSymSimple spec (RuntimeValue S (SymFP eb sb))
-  -- TODO: Remove these instances once we only use pantomime bitvectors.
+  -- TODO: Replace these instances once we only use pantomime bitvectors.
   , forall n. KnownPos n => GenSymSimple spec (RuntimeValue S (SymIntN n))
   , forall n. KnownPos n => GenSymSimple spec (RuntimeValue S (SymWordN n))
   , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (Pantomime.IntN S n))
@@ -211,9 +214,10 @@ instance
 
 instance
   ( KnownWordSize ws
-  , MonadEval m
+  , Fresh :> es
+  , Error EvalError :> es
   , RuntimeGenSymSimple spec
-  ) => EvalGenSym m (Type, spec) (Primitive S ws) where
+  ) => EvalGenSym (Eff es) (Type, spec) (Primitive S ws) where
   evalFresh (ty, spec) = if
     | ty `eqType` intPrimTy -> Int <$> simpleFresh'
     | ty `eqType` int8PrimTy -> Int8 <$> simpleFresh'
@@ -231,10 +235,10 @@ instance
       size <- simpleFresh'
       array <- simpleFresh'
       pure $ ByteArray size array
-    | otherwise -> throwError UnsupportedExpr
+    | otherwise -> throwError_ UnsupportedExpr
     where
       -- FIXME: Not all errors are actually allowed for any value. I think we
       -- should have a specific spec that tells us this. For now though, this
       -- works well enough.
-      simpleFresh' :: GenSymSimple spec a => m a
+      simpleFresh' :: GenSymSimple spec a => Eff es a
       simpleFresh' = simpleFresh spec

@@ -31,15 +31,11 @@ import Grisette.SymPrim
 import Grisette
   ( ToCon (..)
   , EvalSym (..)
-  , MonadFresh (..)
-  , FreshIndex (..)
   , Symbol
-  , nextFreshIndex
   , evalSymToCon
   , indexed
   )
 
-import Control.Monad.Except (MonadError (..))
 import Control.Monad (forM)
 
 import Data.Typeable (cast)
@@ -48,10 +44,13 @@ import Pantomime.WordSize
 import Pantomime.Value
 import Pantomime.Runtime
 import Pantomime.Util
-import Pantomime.Evaluate
 import Pantomime.MonadEval
 import Pantomime.Dict
-import qualified Pantomime.Grisette.BitVector as Pantomime
+import Pantomime.Grisette.BitVector qualified as Pantomime
+
+import Effectful
+import Effectful.Error.Static
+import Effectful.Grisette.Fresh
 
 -- TODO: I think this is not the cleanest representation. We should make this
 -- a bit better.
@@ -129,12 +128,13 @@ pprConcrete addHeader addParens = \case
 -- TODO: I should be able to reconstruct a full CoreExpr from a Value. That
 -- would be the ideal concrete form!
 concretise
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Error EvalError :> es
+  => Fresh :> es
   => KnownWordSize ws
   => Model
-  -> Value m ws
-  -> m Concrete
+  -> Value (Eff es) ws
+  -> Eff es Concrete
 concretise model = \case
   Primitive prim -> pure $ concretePrimitive model prim
   -- TODO: Clean this horrible piece of code up!
@@ -158,11 +158,11 @@ concretise model = \case
   Cast' co value' -> go value' $ coercionRKind co
     where
       go value ty | not $ ty `eqType` coercionLKind co = do
-        (tyCon, tys) <- whyFail IllTyped $ splitTyConApp_maybe ty
-        dataCon <- whyFail IllTyped $ tyConSingleDataCon_maybe tyCon
+        (tyCon, tys) <- whyFail' IllTyped $ splitTyConApp_maybe ty
+        dataCon <- whyFail' IllTyped $ tyConSingleDataCon_maybe tyCon
         argTy <- case dataConInstArgTys dataCon tys of
           [argTy] -> pure $ scaledThing argTy
-          _ -> throwError IllTyped
+          _ -> throwError_ IllTyped
         arg' <- go value argTy
         pure $ Record dataCon [arg']
       go value _ = concretise model value
@@ -171,13 +171,7 @@ concretise model = \case
     ident <- getIdentifier
     FreshIndex idx <- nextFreshIndex
     let symbol = indexed ident idx
-    -- TODO: We should actually create a concrete body. It's not very trivial
-    -- though, as fetching the concrete instance of function accessors and such
-    -- is completely bogus as output. Ideally, we just reconstruct a CoreExpr.
-    -- let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
-        -- untyped = pure $ sym symbol
-
-    -- arg <- typedValue @m @ws untyped argTy
+    -- arg <- undefined
     -- res <- fun arg
 
     -- body <- concretise model res
@@ -215,8 +209,8 @@ concretise model = \case
   -- should make a new one... Maybe we should make an error for concrete lookup
   -- failures. Alternatively, I guess we could actually just return the type as
   -- is no? It is actually also a concrete version in a sense.
-  Ty _ -> throwError IllTyped
-  Co _ -> throwError IllTyped
+  Ty _ -> throwError_ IllTyped
+  Co _ -> throwError_ IllTyped
 
 concretePrimitive
   :: forall ws

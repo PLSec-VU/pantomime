@@ -24,8 +24,6 @@ import Clash.Sized.Internal.BitVector
 import Grisette.Unified (EvalModeTag (..))
 import Grisette hiding (SizedBV (..))
 
-import Control.Monad.Except (MonadError (..))
-
 import Data.Typeable (cast)
 
 import Pantomime.MonadEval
@@ -35,15 +33,25 @@ import Pantomime.Runtime
 import Pantomime.Util
 import Pantomime.Clash.Util
 import Pantomime.Dict
-import qualified Pantomime.Grisette.BitVector as Pantomime
+import Pantomime.Grisette.BitVector qualified as Pantomime
 import Pantomime.Grisette.SizedBV
 
+import Language.Haskell.TH qualified as TH
+
+import Effectful
+import Effectful.Error.Static (Error, throwError_)
+import Effectful.GHC.TH
+import Effectful.GHC.TyThing
+
 clashInterp
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
+  :: forall es ws
+   . Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => Error EvalError :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => KnownWordSize ws
-  => m [(Var, Value m ws)]
+  => Eff es [(Var, Value (Eff es) ws)]
 clashInterp = sequence
   [ interpEq
   , interpNeq
@@ -53,17 +61,17 @@ clashInterp = sequence
   ]
 
 bitEquality
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Error EvalError :> es
   => KnownWordSize ws
   => (Pantomime.WordN S 1 -> Pantomime.WordN S 1 -> SymBool)
   -> Type
-  -> Value m ws
+  -> Value (Eff es) ws
 bitEquality cmp bitTy = Fun bitTy $ \case
   Opaque' _ lhs -> pure . Fun bitTy $ \case
     Opaque' _ rhs -> do
-      lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) lhs
-      rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) rhs
+      lhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) lhs
+      rhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) rhs
 
       let conditional = mrgLiftA2 cmp lhs' rhs'
       let tr = dataConToTag trueDataCon
@@ -76,15 +84,18 @@ bitEquality cmp bitTy = Fun bitTy $ \case
         , adtFields = [[], []]
         }
 
-    _ -> throwError IllTyped
-  _ -> throwError IllTyped
+    _ -> throwError_ IllTyped
+  _ -> throwError_ IllTyped
 
 interpEq
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
+  :: forall es ws
+   . Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => Error EvalError :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => KnownWordSize ws
-  => m (Var, Value m ws)
+  => Eff es (Var, Value (Eff es) ws)
 interpEq = do
   var <- lookupThId 'eq##
   bitTyCon <- lookupThTyCon ''Bit
@@ -93,11 +104,14 @@ interpEq = do
   pure (var, value)
 
 interpNeq
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
+  :: forall es ws
+   . Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => Error EvalError :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => KnownWordSize ws
-  => m (Var, Value m ws)
+  => Eff es (Var, Value (Eff es) ws)
 interpNeq = do
   var <- lookupThId 'neq##
   bitTyCon <- lookupThTyCon ''Bit
@@ -106,10 +120,12 @@ interpNeq = do
   pure (var, value)
 
 interpHigh
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
-  => m (Var, Value m ws)
+  :: forall es ws
+   . Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
+  => Eff es (Var, Value (Eff es) ws)
 interpHigh = do
   var <- lookupThId 'high
   bitTyCon <- lookupThTyCon ''Bit
@@ -127,10 +143,12 @@ highValue bitTy = do
   Opaque' bitTy $ pure value
 
 interpLow
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
-  => m (Var, Value m ws)
+  :: forall es ws
+   . Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
+  => Eff es (Var, Value (Eff es) ws)
 interpLow = do
   var <- lookupThId 'low
   bitTyCon <- lookupThTyCon ''Bit
@@ -148,11 +166,14 @@ lowValue bitTy = do
   Opaque' bitTy $ pure value
 
 interpMsb
-  :: forall m ws
-   . MonadFail m
-  => MonadEval m
+  :: forall es ws
+   . Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => Error EvalError :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => KnownWordSize ws
-  => m (Var, Value m ws)
+  => Eff es (Var, Value (Eff es) ws)
 interpMsb = do
   var <- lookupThId 'msb#
   bvTyCon <- lookupThTyCon ''BitVector
@@ -162,20 +183,20 @@ interpMsb = do
   pure (var, value)
 
 msbValue
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Error EvalError :> es
   => KnownWordSize ws
   => TyCon
   -> Type
-  -> Value m ws
+  -> Value (Eff es) ws
 msbValue bvTyCon bitTy = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
   Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ (Data adt) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
       Opaque' _ value -> do
-        size <- whyFail UnsupportedExpr $ concreteNat adt
+        size <- whyFail' UnsupportedExpr $ concreteNat adt
         SomeNat @n _ <- pure $ someNatVal size
 
-        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
+        value' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
 
         SomeNat @idx _ <- pure . someNatVal $ size - 1
         Dict <- pure $ unsafeDict @(idx + 1 <= n)
@@ -183,6 +204,6 @@ msbValue bvTyCon bitTy = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
             sliced = sizedBVSelect @_ @idx @1 @n <$> value'
 
         pure $ Opaque' bitTy sliced
-      _ -> throwError IllTyped
-    _ -> throwError IllTyped
-  _ -> throwError IllTyped
+      _ -> throwError_ IllTyped
+    _ -> throwError_ IllTyped
+  _ -> throwError_ IllTyped

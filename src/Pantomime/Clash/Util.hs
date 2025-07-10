@@ -11,46 +11,52 @@ module Pantomime.Clash.Util
   , symShiftRA'
   ) where
 
-import GHC.Plugins hiding (empty)
+import GHC.Plugins hiding (empty, thNameToGhcName)
 import GHC.Types.TyThing (MonadThings (..))
 import GHC.TypeNats
 import GHC.Data.Maybe (rightToMaybe)
 import GHC.Core.TyCo.Compare (eqType)
 
-import qualified Language.Haskell.TH as TH
+import Language.Haskell.TH qualified as TH
 
 import Grisette (ToCon(..), WordN, SymIntN, SymShift (..), SymFromIntegral (..))
 import Grisette.Unified (EvalModeTag (..))
 
 import Control.Monad (guard)
 import Control.Applicative (Alternative (empty))
+import Control.Error
 
 import Pantomime.Value
 import Pantomime.WordSize
 import Pantomime.Runtime
-import qualified Pantomime.Grisette.BitVector as Pantomime
-import Pantomime.Monad.GHC
-import Pantomime.Util
+import Pantomime.Grisette.BitVector qualified as Pantomime
+
+import Effectful
+import Effectful.GHC.TH
+import Effectful.Error.Static (Error)
+import Effectful.GHC.TyThing
 
 lookupThId
-  :: MonadCore m
-  => MonadFail m
+  :: Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => TH.Name
-  -> m Var
+  -> Eff es Var
 lookupThId th = do
-  name <- thNameToGhcName' th
-    ??= "Lookup failed."
-  liftCore $ lookupId name
+  name <- thNameToGhcName th
+  lookupId name
 
 lookupThTyCon
-  :: MonadCore m
-  => MonadFail m
+  :: Error (LookupError Name) :> es
+  => Error (LookupError TH.Name) :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
   => TH.Name
-  -> m TyCon
+  -> Eff es TyCon
 lookupThTyCon th = do
-  name <- thNameToGhcName' th
-    ??= "Lookup failed."
-  liftCore $ lookupTyCon name
+  name <- thNameToGhcName th
+  lookupTyCon name
 
 concreteNat
   :: forall m ws

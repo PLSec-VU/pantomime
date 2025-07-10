@@ -13,24 +13,23 @@
 
 module Pantomime.Evaluate
   ( evaluate
-  , MonadEval
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Core.FamInstEnv (FamInstEnv)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
 
 import GHC.Data.Maybe (rightToMaybe, catMaybes)
 
 import Control.Monad (forM)
-import Control.Monad.Except
 
 import Data.Functor ((<&>))
 import Data.Bits (Bits(..), (.^.))
 import Data.Composition ((.:))
 
-import Grisette hiding (Rec, (<+>))
+import Grisette hiding (Fresh, Rec, (<+>))
 import Grisette.Unified (EvalModeTag (..))
 
 import Pantomime.Util
@@ -39,21 +38,33 @@ import Pantomime.Runtime
 import Pantomime.Value
 import Pantomime.Environment
 import Pantomime.MonadEval
-import Pantomime.Monad.GHC
+
+import Effectful
+import Effectful.Context
+import Effectful.Error.Static (Error, throwError_)
+import Effectful.GHC.TH
+import Effectful.GHC.TyThing
+import Effectful.GHC.External
+import Effectful.Grisette.Fresh
 
 -- | Evaluate an expression into a symbolic Value.
 evaluate
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Context Reader FamInstEnv :> es
+  => Error EvalError :> es
+  => Fresh :> es
+  => ExtFamInstEnv :> es
+  => HasThings :> es
+  => THNameToGHCName :> es
   => KnownWordSize ws
-  => Environment m ws
+  => Environment es ws
   -> CoreExpr
-  -> m (Value m ws)
+  -> Eff es (Value (Eff es) ws)
 evaluate env = \case
   Var var | Opaque _ <- inl_inline $ idInlinePragma var -> do
-    dbg' "OPAQUE:"
-    dbg $ varType var
-    dbg var
+    -- dbg' "OPAQUE:"
+    -- dbg $ varType var
+    -- dbg var
     lookupIdEnv env var
 
   Var var | Just op <- isPrimOpId_maybe var -> evalPrimOp op
@@ -70,20 +81,7 @@ evaluate env = \case
 
   Var var | Just expr <- lookupLocalEnv env var -> evaluate env expr
 
-  -- Var var -> lookupIdEnv env var
-  Var var -> lookupIdEnv env var `catchError` \err -> do
-    dbg $ varType var
-    dbg var
-    throwError err
-
-  -- Var var -> lookupIdEnv env var `catchError` \_ -> do
-  --   dbg $ "Unbound variable:" <+> ppr var $+$ "Using uninterpreted function."
-
-  --   let untyped :: forall t. Solvable (ConType t) t => RuntimeValue S t
-  --       untyped = pure $ sym "unbound"
-
-  --   let ty' = substTyEnv env $ varType var
-  --   typedValue untyped ty'
+  Var var -> lookupIdEnv env var
 
   Lit lit -> Primitive <$> evalLiteral lit
 
@@ -105,15 +103,10 @@ evaluate env = \case
   -- invariant. Otherwise though, we don't really care about recursive
   -- definitions. I guess bounded recursion would be nice to have, but let's
   -- leave this for now.
-  Let (Rec _) _ -> throwError UnsupportedExpr
+  Let (Rec _) _ -> throwError_ UnsupportedExpr
 
   Case scrut bndr ty alts -> do
     -- Evaluate the scrutinee and extend the environment using the case binder.
-    -- TODO: Since we force the scrutinee later anyway, couldn't just drop the
-    -- constraints on the spine? Maybe we should add it to the typeclass? It
-    -- seems we are duplicating a constraint with the current setup! Actually,
-    -- something similar seems to happen with normal lambdas. We definitely
-    -- duplicate constraints if the variable occurs more than once.
     scrut' <- evaluate env scrut
     env' <- extendEnv env bndr scrut'
 
@@ -127,7 +120,7 @@ evaluate env = \case
     invalid <- invalidValue ty'
 
     -- Fold the alternatives into a large if-then-else.
-    result <- foldM' invalid alts' $ \fl (cond, rhs) -> do
+    result <- foldM' invalid alts' \fl (cond, rhs) -> do
       evalIte cond rhs fl
 
     pure $ force @S (spine scrut') result
@@ -153,25 +146,30 @@ evaluate env = \case
 -- Expects the case binder to already be bound to the scrutinee in the
 -- environment.
 evalAlt
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Context Reader FamInstEnv :> es
+  => Error EvalError :> es
+  => Fresh :> es
+  => ExtFamInstEnv :> es
+  => HasThings :> es
+  => THNameToGHCName :> es
   => KnownWordSize ws
-  => Environment m ws
-  -> Value m ws
+  => Environment es ws
+  -> Value (Eff es) ws
   -> CoreAlt
-  -> m (SymBool, Value m ws)
+  -> Eff es (SymBool, Value (Eff es) ws)
 evalAlt env scrut = \case
   Alt (DataAlt dataCon) bndrs rhs -> do
     -- Ensure the scrutinee is actually an ADT.
     scrut' <- case scrut of
       Data adt -> pure adt
-      _ -> throwError IllTyped
+      _ -> throwError_ IllTyped
 
     -- Whether the tag of this ADT is equivalent to the DataCon.
     let conditional = onlyBool $ adtIsDataCon scrut' dataCon
 
     -- Extend the environment with the field for each binder.
-    fields <- whyFail IllTyped $ adtDataConFields scrut' dataCon
+    fields <- whyFail' IllTyped $ adtDataConFields scrut' dataCon
     env' <- extendManyEnv env $ zip bndrs fields
 
     -- Evaluate the right-hand side with the extended environment.
@@ -184,7 +182,7 @@ evalAlt env scrut = \case
     -- The scrutinee has to be a primitive to match the literal alt.
     scrut' <- case scrut of
       Primitive prim -> pure prim
-      _ -> throwError IllTyped
+      _ -> throwError_ IllTyped
 
     -- Compare the literal, to the scrutinee.
     lit' <- evalLiteral lit
@@ -200,7 +198,7 @@ evalAlt env scrut = \case
     rhs' <- evaluate env rhs
     pure (true, rhs')
 
-  _ -> throwError UnsupportedExpr
+  _ -> throwError_ UnsupportedExpr
 
 -- | Gathers only the boolean part of the constraint.
 --
@@ -215,12 +213,12 @@ onlyBool = symAnd
   . unRuntimeS
 
 onlyPrimEq
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Error EvalError :> es
   => KnownWordSize ws
   => Primitive S ws
   -> Primitive S ws
-  -> m SymBool
+  -> Eff es SymBool
 onlyPrimEq = curry $ \case
   (Int lhs, Int rhs) -> cmp lhs rhs
   (Int8 lhs, Int8 rhs) -> cmp lhs rhs
@@ -234,22 +232,27 @@ onlyPrimEq = curry $ \case
   (Word64 lhs, Word64 rhs) -> cmp lhs rhs
   (Float lhs, Float rhs) -> cmp lhs rhs
   (Double lhs, Double rhs) -> cmp lhs rhs
-  _ -> throwError IllTyped
+  _ -> throwError_ IllTyped
   where
     cmp
       :: Mergeable a
       => SymEq a
       => RuntimeValue S a
       -> RuntimeValue S a
-      -> m SymBool
+      -> Eff es SymBool
     cmp = pure . onlyBool .: mrgLiftA2 (.==)
 
 evalDataCon
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Context Reader FamInstEnv :> es
+  => Error EvalError :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
+  => Fresh :> es
+  => ExtFamInstEnv :> es
   => KnownWordSize ws
   => DataCon
-  -> m (Value m ws)
+  -> Eff es (Value (Eff es) ws)
 evalDataCon dataCon = do
   -- The root creates the actually symbolic DataCon using the given type
   -- instantiation.
@@ -262,7 +265,7 @@ evalDataCon dataCon = do
   -- the data constructor.
   final <- nArity root kinds $ \univ _ -> \case
     Ty ty -> pure $ univ <> [ty]
-    _ -> throwError IllTyped
+    _ -> throwError_ IllTyped
 
   -- We start with an emtpy list of type instances.
   final []
@@ -274,15 +277,20 @@ evalDataCon dataCon = do
 -- passed to the function by use of 'dataConInstArgTys'. I.e. the given types
 -- should be those applied to the TyCon when constructing the final type.
 evalDataConInst
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Context Reader FamInstEnv :> es
+  => Error EvalError :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
+  => Fresh :> es
+  => ExtFamInstEnv :> es
   => KnownWordSize ws
   => DataCon
   -- ^ The DataCon for which we will create a symbolic instance.
   -> [Type]
   -- ^ The types with which we will instantiate universal quantifiers of the
   -- DataCon.
-  -> m (Value m ws)
+  -> Eff es (Value (Eff es) ws)
 evalDataConInst dataCon tyArgs = do
   -- Gather the types of the binders.
   let bndrTys = ((),) . scaledThing <$> dataConInstArgTys dataCon tyArgs
@@ -302,11 +310,11 @@ evalDataConInst dataCon tyArgs = do
 
 -- | Get the value corresponding to a literal.
 evalLiteral
-  :: forall m ws
-   . MonadError EvalError m
+  :: forall es ws
+   . Error EvalError :> es
   => KnownWordSize ws
   => Literal
-  -> m (Primitive S ws)
+  -> Eff es (Primitive S ws)
 evalLiteral = \case
   LitNumber ty num -> case ty of
     LitNumInt -> pure $ Int num'
@@ -322,7 +330,7 @@ evalLiteral = \case
     -- TODO: The BigNat primitive operations are kind of "hidden". Somehow, we
     -- want to wrap the behaviour!
     -- LitNumBigNat -> throwError ()
-    _ -> throwError UnsupportedExpr
+    _ -> throwError_ UnsupportedExpr
     where
       num' :: Num a => RuntimeValue S a
       num' = pure $ fromInteger num
@@ -335,33 +343,38 @@ evalLiteral = \case
     let num' = pure $ fromRational num
     pure $ Double num'
 
-  _ -> throwError UnsupportedExpr
+  _ -> throwError_ UnsupportedExpr
 
 -- | Get the value corresponding to a primitive operation.
 -- TODO: I want to add support for rem and quot.
 evalPrimOp
-  :: forall m ws
-   . MonadEval m
+  :: forall es ws
+   . Context Reader FamInstEnv :> es
+  => Error EvalError :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
+  => ExtFamInstEnv :> es
+  => Fresh :> es
   => KnownWordSize ws
   => PrimOp
-  -> m (Value m ws)
+  -> Eff es (Value (Eff es) ws)
 evalPrimOp = \case
-  CharGtOp -> throwError UnsupportedExpr
-  CharGeOp -> throwError UnsupportedExpr
-  CharEqOp -> throwError UnsupportedExpr
-  CharNeOp -> throwError UnsupportedExpr
-  CharLtOp -> throwError UnsupportedExpr
-  CharLeOp -> throwError UnsupportedExpr
-  OrdOp -> throwError UnsupportedExpr
+  CharGtOp -> throwError_ UnsupportedExpr
+  CharGeOp -> throwError_ UnsupportedExpr
+  CharEqOp -> throwError_ UnsupportedExpr
+  CharNeOp -> throwError_ UnsupportedExpr
+  CharLtOp -> throwError_ UnsupportedExpr
+  CharLeOp -> throwError_ UnsupportedExpr
+  OrdOp -> throwError_ UnsupportedExpr
   Int8ToIntOp -> unary $ toIntArch @8
   IntToInt8Op -> unary $ toIntSized @8
   Int8NegOp -> unary $ negate @SymIntN8
   Int8AddOp -> binary $ (+) @SymIntN8
   Int8SubOp -> binary $ (-) @SymIntN8
   Int8MulOp -> binary $ (*) @SymIntN8
-  Int8QuotOp -> throwError UnsupportedExpr
-  Int8RemOp -> throwError UnsupportedExpr
-  Int8QuotRemOp -> throwError UnsupportedExpr
+  Int8QuotOp -> throwError_ UnsupportedExpr
+  Int8RemOp -> throwError_ UnsupportedExpr
+  Int8QuotRemOp -> throwError_ UnsupportedExpr
   Int8SllOp -> binary $ symShiftL' @SymIntN8
   Int8SraOp -> binary $ symShiftRA' @SymIntN8
   Int8SrlOp -> binary $ symShiftRL' @SymIntN8
@@ -377,9 +390,9 @@ evalPrimOp = \case
   Word8AddOp -> binary $ (+) @SymWordN8
   Word8SubOp -> binary $ (-) @SymWordN8
   Word8MulOp -> binary $ (*) @SymWordN8
-  Word8QuotOp -> throwError UnsupportedExpr
-  Word8RemOp -> throwError UnsupportedExpr
-  Word8QuotRemOp -> throwError UnsupportedExpr
+  Word8QuotOp -> throwError_ UnsupportedExpr
+  Word8RemOp -> throwError_ UnsupportedExpr
+  Word8QuotRemOp -> throwError_ UnsupportedExpr
   Word8AndOp -> binary $ (.&.) @SymWordN8
   Word8OrOp -> binary $ (.|.) @SymWordN8
   Word8XorOp -> binary $ (.^.) @SymWordN8
@@ -399,9 +412,9 @@ evalPrimOp = \case
   Int16AddOp -> binary $ (+) @SymIntN16
   Int16SubOp -> binary $ (-) @SymIntN16
   Int16MulOp -> binary $ (*) @SymIntN16
-  Int16QuotOp -> throwError UnsupportedExpr
-  Int16RemOp -> throwError UnsupportedExpr
-  Int16QuotRemOp -> throwError UnsupportedExpr
+  Int16QuotOp -> throwError_ UnsupportedExpr
+  Int16RemOp -> throwError_ UnsupportedExpr
+  Int16QuotRemOp -> throwError_ UnsupportedExpr
   Int16SllOp -> binary $ symShiftL' @SymIntN16
   Int16SraOp -> binary $ symShiftRA' @SymIntN16
   Int16SrlOp -> binary $ symShiftRL' @SymIntN16
@@ -417,9 +430,9 @@ evalPrimOp = \case
   Word16AddOp -> binary $ (+) @SymWordN16
   Word16SubOp -> binary $ (-) @SymWordN16
   Word16MulOp -> binary $ (*) @SymWordN16
-  Word16QuotOp -> throwError UnsupportedExpr
-  Word16RemOp -> throwError UnsupportedExpr
-  Word16QuotRemOp -> throwError UnsupportedExpr
+  Word16QuotOp -> throwError_ UnsupportedExpr
+  Word16RemOp -> throwError_ UnsupportedExpr
+  Word16QuotRemOp -> throwError_ UnsupportedExpr
   Word16AndOp -> binary $ (.&.) @SymWordN16
   Word16OrOp -> binary $ (.|.) @SymWordN16
   Word16XorOp -> binary $ (.^.) @SymWordN16
@@ -439,9 +452,9 @@ evalPrimOp = \case
   Int32AddOp -> binary $ (+) @SymIntN32
   Int32SubOp -> binary $ (-) @SymIntN32
   Int32MulOp -> binary $ (*) @SymIntN32
-  Int32QuotOp -> throwError UnsupportedExpr
-  Int32RemOp -> throwError UnsupportedExpr
-  Int32QuotRemOp -> throwError UnsupportedExpr
+  Int32QuotOp -> throwError_ UnsupportedExpr
+  Int32RemOp -> throwError_ UnsupportedExpr
+  Int32QuotRemOp -> throwError_ UnsupportedExpr
   Int32SllOp -> binary $ symShiftL' @SymIntN32
   Int32SraOp -> binary $ symShiftRA' @SymIntN32
   Int32SrlOp -> binary $ symShiftRL' @SymIntN32
@@ -457,9 +470,9 @@ evalPrimOp = \case
   Word32AddOp -> binary $ (+) @SymWordN32
   Word32SubOp -> binary $ (-) @SymWordN32
   Word32MulOp -> binary $ (*) @SymWordN32
-  Word32QuotOp -> throwError UnsupportedExpr
-  Word32RemOp -> throwError UnsupportedExpr
-  Word32QuotRemOp -> throwError UnsupportedExpr
+  Word32QuotOp -> throwError_ UnsupportedExpr
+  Word32RemOp -> throwError_ UnsupportedExpr
+  Word32QuotRemOp -> throwError_ UnsupportedExpr
   Word32AndOp -> binary $ (.&.) @SymWordN32
   Word32OrOp -> binary $ (.|.) @SymWordN32
   Word32XorOp -> binary $ (.^.) @SymWordN32
@@ -479,8 +492,8 @@ evalPrimOp = \case
   Int64AddOp -> binary $ (+) @SymIntN64
   Int64SubOp -> binary $ (-) @SymIntN64
   Int64MulOp -> binary $ (*) @SymIntN64
-  Int64QuotOp -> throwError UnsupportedExpr
-  Int64RemOp -> throwError UnsupportedExpr
+  Int64QuotOp -> throwError_ UnsupportedExpr
+  Int64RemOp -> throwError_ UnsupportedExpr
   Int64SllOp -> binary $ symShiftL' @SymIntN64
   Int64SraOp -> binary $ symShiftRA' @SymIntN64
   Int64SrlOp -> binary $ symShiftRL' @SymIntN64
@@ -496,8 +509,8 @@ evalPrimOp = \case
   Word64AddOp -> binary $ (+) @SymWordN64
   Word64SubOp -> binary $ (-) @SymWordN64
   Word64MulOp -> binary $ (*) @SymWordN64
-  Word64QuotOp -> throwError UnsupportedExpr
-  Word64RemOp -> throwError UnsupportedExpr
+  Word64QuotOp -> throwError_ UnsupportedExpr
+  Word64RemOp -> throwError_ UnsupportedExpr
   Word64AndOp -> binary $ (.&.) @SymWordN64
   Word64OrOp -> binary $ (.|.) @SymWordN64
   Word64XorOp -> binary $ (.^.) @SymWordN64
@@ -514,44 +527,44 @@ evalPrimOp = \case
   IntAddOp -> binary $ (+) @(SymInt ws)
   IntSubOp -> binary $ (-) @(SymInt ws)
   IntMulOp -> binary $ (*) @(SymInt ws)
-  IntMul2Op -> throwError UnsupportedExpr
-  IntMulMayOfloOp -> throwError UnsupportedExpr
-  IntQuotOp -> throwError UnsupportedExpr
-  IntRemOp -> throwError UnsupportedExpr
-  IntQuotRemOp -> throwError UnsupportedExpr
+  IntMul2Op -> throwError_ UnsupportedExpr
+  IntMulMayOfloOp -> throwError_ UnsupportedExpr
+  IntQuotOp -> throwError_ UnsupportedExpr
+  IntRemOp -> throwError_ UnsupportedExpr
+  IntQuotRemOp -> throwError_ UnsupportedExpr
   IntAndOp -> binary $ (.&.) @(SymInt ws)
   IntOrOp -> binary $ (.|.) @(SymInt ws)
   IntXorOp -> binary $ (.^.) @(SymInt ws)
   IntNotOp -> unary $ complement @(SymInt ws)
   IntNegOp -> unary $ negate @(SymInt ws)
-  IntAddCOp -> throwError UnsupportedExpr
-  IntSubCOp -> throwError UnsupportedExpr
+  IntAddCOp -> throwError_ UnsupportedExpr
+  IntSubCOp -> throwError_ UnsupportedExpr
   IntGtOp -> binary $ symGt @(SymInt ws)
   IntGeOp -> binary $ symGe @(SymInt ws)
   IntEqOp -> binary $ symEq @(SymInt ws)
   IntNeOp -> binary $ symNe @(SymInt ws)
   IntLtOp -> binary $ symLt @(SymInt ws)
   IntLeOp -> binary $ symLe @(SymInt ws)
-  ChrOp -> throwError UnsupportedExpr
+  ChrOp -> throwError_ UnsupportedExpr
   IntToWordOp -> unary $ toUnsigned @(SymWord ws) @(SymInt ws)
-  IntToFloatOp -> throwError UnsupportedExpr
-  IntToDoubleOp -> throwError UnsupportedExpr
-  WordToFloatOp -> throwError UnsupportedExpr
-  WordToDoubleOp -> throwError UnsupportedExpr
+  IntToFloatOp -> throwError_ UnsupportedExpr
+  IntToDoubleOp -> throwError_ UnsupportedExpr
+  WordToFloatOp -> throwError_ UnsupportedExpr
+  WordToDoubleOp -> throwError_ UnsupportedExpr
   IntSllOp -> binary $ symShiftL' @(SymInt ws)
   IntSraOp -> binary $ symShiftRA' @(SymInt ws)
   IntSrlOp -> binary $ symShiftRL' @(SymInt ws)
   WordAddOp -> binary $ (+) @(SymWord ws)
-  WordAddCOp -> throwError UnsupportedExpr
-  WordSubCOp -> throwError UnsupportedExpr
-  WordAdd2Op -> throwError UnsupportedExpr
+  WordAddCOp -> throwError_ UnsupportedExpr
+  WordSubCOp -> throwError_ UnsupportedExpr
+  WordAdd2Op -> throwError_ UnsupportedExpr
   WordSubOp -> binary $ (-) @(SymWord ws)
   WordMulOp -> binary $ (*) @(SymWord ws)
-  WordMul2Op -> throwError UnsupportedExpr
-  WordQuotOp -> throwError UnsupportedExpr
-  WordRemOp -> throwError UnsupportedExpr
-  WordQuotRemOp -> throwError UnsupportedExpr
-  WordQuotRem2Op -> throwError UnsupportedExpr
+  WordMul2Op -> throwError_ UnsupportedExpr
+  WordQuotOp -> throwError_ UnsupportedExpr
+  WordRemOp -> throwError_ UnsupportedExpr
+  WordQuotRemOp -> throwError_ UnsupportedExpr
+  WordQuotRem2Op -> throwError_ UnsupportedExpr
   WordAndOp -> binary $ (.&.) @(SymWord ws)
   WordOrOp -> binary $ (.|.) @(SymWord ws)
   WordXorOp -> binary $ (.^.) @(SymWord ws)
@@ -569,18 +582,18 @@ evalPrimOp = \case
     Ty ty -> pure . Fun intPrimTy $ \case
       Primitive (Int tag) -> do
         -- TODO: Comment this!
-        value <- freshValue @m @ws ty
+        value <- freshValue @es @ws ty
         adt <- case value of
           Data adt -> pure $ adt { adtTag = tag }
-          _ -> throwError IllTyped
+          _ -> throwError_ IllTyped
 
         -- Return the new ADT with matching tag.
         pure $ Data adt
-      _ -> throwError IllTyped
-    _ -> throwError IllTyped
+      _ -> throwError_ IllTyped
+    _ -> throwError_ IllTyped
   DataToTagSmallOp -> pure dataToTag
   DataToTagLargeOp -> pure dataToTag
-  _ -> throwError UnsupportedExpr
+  _ -> throwError_ UnsupportedExpr
   where
     -- We don't distinguish between small or large tags, thus we have one
     -- implementation for dataToTag.
@@ -588,16 +601,16 @@ evalPrimOp = \case
     -- This function has the following Haskell type:
     --
     -- forall {l::levity} (a::TYPE (BoxedRep l)). a -> Int#
-    dataToTag :: Value m ws
+    dataToTag :: Value (Eff es) ws
     dataToTag = Fun levPolyAlphaTy $ \case
       Ty levity -> pure . Fun (mkTyConApp boxedRepDataConTyCon [levity]) $ \case
         Ty ty -> pure . Fun ty $ \case
           Data adt -> do
             let tag = Int $ adtTag adt
             pure $ Primitive tag
-          _ -> throwError IllTyped
-        _ -> throwError IllTyped
-      _ -> throwError IllTyped
+          _ -> throwError_ IllTyped
+        _ -> throwError_ IllTyped
+      _ -> throwError_ IllTyped
 
     symShiftRA'
       :: forall bv
@@ -659,96 +672,98 @@ evalPrimOp = \case
     symLe lhs rhs = SymInt $ symIte (lhs .<= rhs) 1 0
 
 binary
-  :: Wrap m ws (RuntimeValue S a -> RuntimeValue S b -> RuntimeValue S c)
+  :: Error EvalError :> es
+  => Wrap ws (RuntimeValue S a -> RuntimeValue S b -> RuntimeValue S c)
   => (a -> b -> c)
-  -> m (Value m ws)
+  -> Eff es (Value (Eff es) ws)
 binary = pure . wrap . liftA2 @(RuntimeValue S)
 
 unary
-  :: Wrap m ws (RuntimeValue S a -> RuntimeValue S b)
+  :: Error EvalError :> es
+  => Wrap ws (RuntimeValue S a -> RuntimeValue S b)
   => (a -> b)
-  -> m (Value m ws)
+  -> Eff es (Value (Eff es) ws)
 unary = pure . wrap . fmap @(RuntimeValue S)
 
-class MonadEval m => Wrap m ws a where
-  wrap :: a -> Value m ws
+class Wrap ws a where
+  wrap :: Error EvalError :> es => a -> Value (Eff es) ws
 
-instance MonadEval m => Wrap m ws (RuntimeValue S (SymInt ws)) where
+instance Wrap ws (RuntimeValue S (SymInt ws)) where
   wrap = Primitive . Int . fmap unSymInt
 
-instance MonadEval m => Wrap m ws (RuntimeValue S SymIntN8) where
+instance Wrap ws (RuntimeValue S SymIntN8) where
   wrap = Primitive . Int8
 
-instance MonadEval m => Wrap m ws (RuntimeValue S SymIntN16) where
+instance Wrap ws (RuntimeValue S SymIntN16) where
   wrap = Primitive . Int16
 
-instance MonadEval m => Wrap m ws (RuntimeValue S SymIntN32) where
+instance Wrap ws (RuntimeValue S SymIntN32) where
   wrap = Primitive . Int32
 
-instance MonadEval m => Wrap m ws (RuntimeValue S SymIntN64) where
+instance Wrap ws (RuntimeValue S SymIntN64) where
   wrap = Primitive . Int64
 
-instance (MonadEval m, KnownWordSize ws) => Wrap m ws (RuntimeValue S (SymWord ws)) where
+instance KnownWordSize ws => Wrap ws (RuntimeValue S (SymWord ws)) where
   wrap = Primitive . Word . fmap unSymWord
 
-instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN8) where
+instance Wrap ws (RuntimeValue S SymWordN8) where
   wrap = Primitive . Word8
 
-instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN16) where
+instance Wrap ws (RuntimeValue S SymWordN16) where
   wrap = Primitive . Word16
 
-instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN32) where
+instance Wrap ws (RuntimeValue S SymWordN32) where
   wrap = Primitive . Word32
 
-instance MonadEval m => Wrap m ws (RuntimeValue S SymWordN64) where
+instance Wrap ws (RuntimeValue S SymWordN64) where
   wrap = Primitive . Word64
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S (SymInt ws) -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (SymInt ws) -> b) where
   wrap f = Fun intPrimTy $ \case
-    Primitive (Int arg) -> pure $ wrap @m @ws (f $ arg <&> SymInt)
-    _ -> throwError IllTyped
+    Primitive (Int arg) -> pure $ wrap @ws (f $ arg <&> SymInt)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN8 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S SymIntN8 -> b) where
   wrap f = Fun int8PrimTy $ \case
-    Primitive (Int8 arg) -> pure $ wrap @m @ws (f arg)
-    _ -> throwError IllTyped
+    Primitive (Int8 arg) -> pure $ wrap @ws (f arg)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN16 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S SymIntN16 -> b) where
   wrap f = Fun int16PrimTy $ \case
-    Primitive (Int16 arg) -> pure $ wrap @m @ws (f arg)
-    _ -> throwError IllTyped
+    Primitive (Int16 arg) -> pure $ wrap @ws (f arg)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN32 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S SymIntN32 -> b) where
   wrap f = Fun int32PrimTy $ \case
-    Primitive (Int32 arg) -> pure $ wrap @m @ws (f arg)
-    _ -> throwError IllTyped
+    Primitive (Int32 arg) -> pure $ wrap @ws (f arg)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymIntN64 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S SymIntN64 -> b) where
   wrap f = Fun int64PrimTy $ \case
-    Primitive (Int64 arg) -> pure $ wrap @m @ws (f arg)
-    _ -> throwError IllTyped
+    Primitive (Int64 arg) -> pure $ wrap @ws (f arg)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S (SymWord ws) -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (SymWord ws) -> b) where
   wrap f = Fun wordPrimTy $ \case
-    Primitive (Word arg) -> pure $ wrap @m @ws (f $ arg <&> SymWord)
-    _ -> throwError IllTyped
+    Primitive (Word arg) -> pure $ wrap @ws (f $ arg <&> SymWord)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN8 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S SymWordN8 -> b) where
   wrap f = Fun word8PrimTy $ \case
-    Primitive (Word8 arg) -> pure $ wrap @m @ws (f arg)
-    _ -> throwError IllTyped
+    Primitive (Word8 arg) -> pure $ wrap @ws (f arg)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN16 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S SymWordN16 -> b) where
   wrap f = Fun word16PrimTy $ \case
-    Primitive (Word16 arg) -> pure $ wrap @m @ws (f arg)
-    _ -> throwError IllTyped
+    Primitive (Word16 arg) -> pure $ wrap @ws (f arg)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN32 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S SymWordN32 -> b) where
   wrap f = Fun word32PrimTy $ \case
-    Primitive (Word32 arg) -> pure $ wrap @m @ws (f arg)
-    _ -> throwError IllTyped
+    Primitive (Word32 arg) -> pure $ wrap @ws (f arg)
+    _ -> throwError_ IllTyped
 
-instance (MonadEval m, Wrap m ws b) => Wrap m ws (RuntimeValue S SymWordN64 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S SymWordN64 -> b) where
   wrap f = Fun word64PrimTy $ \case
-    Primitive (Word64 arg) -> pure $ wrap @m @ws (f arg)
-    _ -> throwError IllTyped
+    Primitive (Word64 arg) -> pure $ wrap @ws (f arg)
+    _ -> throwError_ IllTyped

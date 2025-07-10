@@ -34,6 +34,7 @@ import Effectful.GHC.DynFlags
 import Effectful.GHC.Display
 import Effectful.GHC.TyThing
 import Effectful.GHC.External
+import GHC.Core.FamInstEnv (FamInstEnv)
 
 resolveTH
   :: HasCallStack
@@ -256,13 +257,14 @@ checkSpec
   => Error OversaturatedError :> es
   => Context Reader CoreProgram :> es
   => Context Reader InstEnv :> es
+  => Context Reader FamInstEnv :> es
   => Context Reader Dependencies :> es
   => Context Reader ModGuts :> es
   => IOE :> es
-  => CoreE :> es
   => Fail :> es
   => Display :> es
   => ExtInstEnv :> es
+  => ExtFamInstEnv :> es
   => HasDynFlagsE :> es
   => HasThings :> es
   => THNameToGHCName :> es
@@ -303,14 +305,15 @@ symCompare
   => Error (LookupError Name) :> es
   => Error (LookupError TH.Name) :> es
   => Context Reader CoreProgram :> es
+  => Context Reader FamInstEnv :> es
   => Context Reader ModGuts :> es
   => IOE :> es
-  => CoreE :> es
   => Fail :> es
   => Display :> es
+  => ExtFamInstEnv :> es
   => HasDynFlagsE :> es
-  => THNameToGHCName :> es
   => HasThings :> es
+  => THNameToGHCName :> es
   => SymCompare TH.Name
   -> CoreBind'
   -> Eff es CoreBind'
