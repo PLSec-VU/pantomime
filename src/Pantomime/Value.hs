@@ -41,7 +41,7 @@ import GHC.Core.Type (substTy)
 import GHC.Core.TyCo.FVs (shallowTyCoVarsOfType)
 import GHC.Core.Coercion.Opt
 import GHC.Core.Reduction (Reduction (..))
-import GHC.Core.FamInstEnv (normaliseType, FamInstEnv)
+import GHC.Core.FamInstEnv (normaliseType)
 import GHC.Builtin.Types.Prim
 import GHC.Tc.Utils.TcType (hasTyVarHead, isTyFamFree)
 import GHC.Types.TyThing (MonadThings(..))
@@ -69,6 +69,8 @@ import Control.Monad.Except (MonadError (throwError))
 
 import Clash.Prelude (BitVector, Unsigned, Signed, Bit)
 
+import Language.Haskell.TH qualified as TH
+
 import Pantomime.Util
 import Pantomime.WordSize
 import Pantomime.Runtime
@@ -82,9 +84,7 @@ import Effectful.Error.Static (Error, throwError_, runErrorNoCallStackWith, catc
 import Effectful.Grisette.Fresh
 import Effectful.GHC.TH
 import Effectful.GHC.TyThing
-import qualified Language.Haskell.TH as TH
 import Effectful.GHC.External
-import Effectful.Context
 
 -- TODO: Add comment to what this data type is!
 data Value m ws where
@@ -268,11 +268,10 @@ instance
 -- me like it would be much better to split the runtime errors from Invalid.
 instance
   ( Error EvalError :> es
-  , Context Reader FamInstEnv :> es
   , THNameToGHCName :> es
   , HasThings :> es
   , Fresh :> es
-  , ExtFamInstEnv :> es
+  , HasFamInstEnvs :> es
   , KnownWordSize ws
   ) => WeakEq (Eff es) (Value (Eff es) ws) where
   weakEq = curry $ \case
@@ -424,8 +423,7 @@ instance
   , THNameToGHCName :> es
   , HasThings :> es
   , Fresh :> es
-  , Context Reader FamInstEnv :> es
-  , ExtFamInstEnv :> es
+  , HasFamInstEnvs :> es
   , RuntimeGenSymSimple spec
   , KnownWordSize ws
   ) => EvalGenSym (Eff es) (Type, spec) (Value (Eff es) ws) where
@@ -592,8 +590,7 @@ freshBit (ty, spec) = do
 freshTyFamInst
   :: forall es ws spec
    . Error EvalError :> es
-  => Context Reader FamInstEnv :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
@@ -625,11 +622,10 @@ freshTyFamInst (ty, spec) = do
 freshNewtype
   :: forall es ws spec
    . Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => RuntimeGenSymSimple spec
   => (Type, spec)
@@ -648,11 +644,10 @@ freshNewtype (ty, spec) = do
 freshLambda
   :: forall es ws spec
    . Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => RuntimeGenSymSimple spec
   => (Type, spec)
@@ -665,11 +660,10 @@ freshLambda (ty, spec) = do
 freshForall
   :: forall es ws spec
    . Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => RuntimeGenSymSimple spec
   => (Type, spec)
@@ -739,11 +733,10 @@ freshPoly (ty, spec) = if
 freshValue
   :: forall es ws
    . Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => Type
   -> Eff es (Value (Eff es) ws)
@@ -755,11 +748,10 @@ freshValue ty = evalFresh (ty, Right @() ())
 invalidValue 
   :: forall es ws
    . Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => THNameToGHCName :> es
   => HasThings :> es
+  => HasFamInstEnvs :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
   => KnownWordSize ws
   => Type
   -> Eff es (Value (Eff es) ws)
@@ -854,11 +846,10 @@ instance Spineable S (ADT m ws) where
 
 instance
   ( Error EvalError :> es
-  , Context Reader FamInstEnv :> es
   , THNameToGHCName :> es
   , HasThings :> es
   , Fresh :> es
-  , ExtFamInstEnv :> es
+  , HasFamInstEnvs :> es
   , KnownWordSize ws
   ) => WeakEq (Eff es) (ADT (Eff es) ws) where
   weakEq lhs rhs = do
@@ -899,8 +890,7 @@ instance
 
 instance
   ( Error EvalError :> es
-  , Context Reader FamInstEnv :> es
-  , ExtFamInstEnv :> es
+  , HasFamInstEnvs :> es
   , THNameToGHCName :> es
   , HasThings :> es
   , Fresh :> es
@@ -939,12 +929,11 @@ instance
 -- Note the type arguments will instantiate the universal quantifiers of the
 -- DataCon. They do not correspond to the types of the binders.
 freshBndrs
-  :: Context Reader FamInstEnv :> es
-  => Error EvalError :> es
+  :: Error EvalError :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => RuntimeGenSymSimple spec
   => DataCon
@@ -965,11 +954,10 @@ adtType adt = mkTyConApp (adtTyCon adt) (adtTyArgs adt)
 -- The Value arguments are the fields that match the given DataCon.
 adtFromDataCon
   :: Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => DataCon
   -> [Type]

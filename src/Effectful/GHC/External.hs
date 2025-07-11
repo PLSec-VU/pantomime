@@ -1,26 +1,19 @@
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
-
 -- TODO: There are quite a few more effects we should write for the external
 -- package registry. For now, we will extend it on a by need basis.
+-- TODO: Module level comments.
 
 module Effectful.GHC.External
-  ( ExtPackages (..)
-  , getExtPackages
-  , runExtAll
+  ( HasExternalPackageState (..)
+  , getExternalPackageState
 
-  , ExtInstEnv (..)
-  , getExtInstEnv
-  , runExtInstEnv
+  , HasInstEnvs (..)
   , getInstEnvs
+  , runHasInstEnvs
+  , runHasInstEnvs'
 
-  , ExtFamInstEnv (..)
-  , getExtFamInstEnv
-  , runExtFamInstEnv
+  , HasFamInstEnvs (..)
   , getFamInstEnvs
+  , runHasFamInstEnv
   ) where
 
 import Effectful
@@ -29,108 +22,100 @@ import Effectful.Dispatch.Dynamic (send, interpret_)
 import GHC.Plugins
 import GHC.Core.FamInstEnv (FamInstEnv, FamInstEnvs)
 import GHC.Core.InstEnv (InstEnv, InstEnvs (..))
-import GHC.Unit.External
-  ( ExternalPackageState (..)
-  , PackageInstEnv
-  , PackageFamInstEnv
-  )
+import GHC.Unit.External (ExternalPackageState (..))
 import GHC.Unit.Module.Deps (Dependencies (..))
-import Effectful.Context
 
--- | Effect to get the complete 'ExternalPackageState'.
-data ExtPackages :: Effect where
-  ExtPackages :: ExtPackages m ExternalPackageState
+-- | Effect to get the 'ExternalPackageState'.
+data HasExternalPackageState :: Effect where
+  GetExternalPackageState :: HasExternalPackageState m ExternalPackageState
 
-type instance DispatchOf ExtPackages = Dynamic
+type instance DispatchOf HasExternalPackageState = Dynamic
 
 -- | Get the 'ExternalPackageState'.
---
--- This will dispatch the 'ExtPackages' effect.
-getExtPackages
-  :: ExtPackages :> es
+getExternalPackageState
+  :: HasExternalPackageState :> es
   => Eff es ExternalPackageState
-getExtPackages = send ExtPackages
+getExternalPackageState = send GetExternalPackageState
 
--- | Runner to expose all effects derived from the 'ExtPackages' effect.
-runExtAll
-  :: ExtPackages :> es
-  => Eff (ExtInstEnv : ExtFamInstEnv : es) a
+-- | Effect to get the 'InstEnvs'.
+data HasInstEnvs :: Effect where
+  GetInstEnvs :: HasInstEnvs m InstEnvs
+
+type instance DispatchOf HasInstEnvs = Dynamic
+
+-- | Get the complete type class instance environments.
+getInstEnvs :: HasInstEnvs :> es => Eff es InstEnvs
+getInstEnvs = send GetInstEnvs
+
+-- | Run the 'HasInstEnvs' effect.
+--
+-- This will fetch the necessary components from the 'ModGuts'. To provide just
+-- the necessary components manually, use 'runHasInstEnvs''.
+runHasInstEnvs
+  :: HasExternalPackageState :> es
+  => ModGuts
+  -> Eff (HasInstEnvs : es) a
   -> Eff es a
-runExtAll = runExtFamInstEnv . runExtInstEnv
+runHasInstEnvs guts = do
+  let local = mg_inst_env guts
+  let orphans = mkModuleSet . dep_orphs . mg_deps $ guts
+  runHasInstEnvs' local orphans
 
--- | Effect to get the external 'InstEnv'.
+-- | Run the 'HasInstEnvs' effect.
 --
--- The 'InstEnv' contains typeclass instances declared in external modules.
-data ExtInstEnv :: Effect where
-  ExtInstEnv :: ExtInstEnv m PackageInstEnv
-
-type instance DispatchOf ExtInstEnv = Dynamic
-
--- | Get the external 'PackageInstEnv'.
---
--- This will dispatch the 'ExtInstEnv' effect.
-getExtInstEnv :: ExtInstEnv :> es => Eff es PackageInstEnv
-getExtInstEnv = send ExtInstEnv
-
--- | Run the 'ExtInstEnv' effect through the 'ExtPackages' effect.
-runExtInstEnv
-  :: ExtPackages :> es
-  => Eff (ExtInstEnv : es) a
+-- This requires only the necessary components to construct the instance
+-- environment. In most cases, these should directly come from the current
+-- 'ModGuts'. Prefer to use 'runHasInstEnv', which fetches these values from
+-- the current module.
+runHasInstEnvs'
+  :: HasExternalPackageState :> es
+  => InstEnv
+  -- ^ Local type class instance environment.
+  -> ModuleSet
+  -- ^ Visible orphan instances.
+  -> Eff (HasInstEnvs : es) a
   -> Eff es a
-runExtInstEnv = interpret_ $ \ExtInstEnv -> do
-  eps_inst_env <$> getExtPackages
-
--- | Get the typeclass instance environments.
---
--- Get the complete typeclass instance environments using the effects that
--- fetch the local and global environment. We additionally require the
--- dependencies to gather the visible orphan modules.
-getInstEnvs
-  :: ExtInstEnv :> es
-  => Context Reader InstEnv :> es
-  => Context Reader Dependencies :> es
-  => Eff es InstEnvs
-getInstEnvs = do
-  local <- get @InstEnv
-  global <- getExtInstEnv
-  dependencies <- get @Dependencies
+runHasInstEnvs' local orphans = interpret_ $ \GetInstEnvs -> do
+  global <- eps_inst_env <$> getExternalPackageState
   pure InstEnvs
     { ie_local = local
     , ie_global = global
-    , ie_visible = mkModuleSet $ dep_orphs dependencies
+    , ie_visible = orphans
     }
 
--- | Effect to get the external 'FamInstEnv'.
+-- | Effect to get the 'FamInstEnvs'.
+data HasFamInstEnvs :: Effect where
+  GetFamInstEnvs :: HasFamInstEnvs m FamInstEnvs
+
+type instance DispatchOf HasFamInstEnvs = Dynamic
+
+-- | Get the complete type family instance environments.
+getFamInstEnvs :: HasFamInstEnvs :> es => Eff es FamInstEnvs
+getFamInstEnvs = send GetFamInstEnvs
+
+-- | Run the 'HasFamInstEnvs' effect.
 --
--- The 'FamInstEnv' contains type-family instances declared in external modules.
-data ExtFamInstEnv :: Effect where
-  ExtFamInstEnv :: ExtFamInstEnv m PackageFamInstEnv
-
-type instance DispatchOf ExtFamInstEnv = Dynamic
-
--- | Get the external 'PackageFamInstEnv'.
---
--- This will dispatch the 'ExtFamInstEnv' effect.
-getExtFamInstEnv :: ExtFamInstEnv :> es => Eff es PackageFamInstEnv
-getExtFamInstEnv = send ExtFamInstEnv
-
--- | Run the 'ExtInstEnv' effect through the 'ExtPackages' effect.
-runExtFamInstEnv
-  :: ExtPackages :> es
-  => Eff (ExtFamInstEnv : es) a
+-- This will fetch the necessary components from the 'ModGuts'. To provide just
+-- the necessary components manually, use 'runHasFamInstEnvs''.
+runHasFamInstEnv
+  :: HasExternalPackageState :> es
+  => ModGuts
+  -> Eff (HasFamInstEnvs : es) a
   -> Eff es a
-runExtFamInstEnv = interpret_ $ \ExtFamInstEnv -> do
-  eps_fam_inst_env <$> getExtPackages
+runHasFamInstEnv = runHasFamInstEnv' . mg_fam_inst_env
 
--- | Get the 'FamInstEnvs'.
+-- | Run the 'HasFamInstEnvs' effect.
 --
--- Get the complete type family instance environments using the effects that
--- fetch the local and global environment.
-getFamInstEnvs
-  :: Context Reader FamInstEnv :> es
-  => ExtFamInstEnv :> es
-  => Eff es FamInstEnvs
-getFamInstEnvs = do
-  local <- get @FamInstEnv
-  global <- getExtFamInstEnv
+-- This requires only the necessary components to construct the instance
+-- environment. In most cases, these should directly come from the current
+-- 'ModGuts'. Prefer to use 'runHasFamInstEnv', which fetches these values from
+-- the current module.
+runHasFamInstEnv'
+  :: HasExternalPackageState :> es
+  => FamInstEnv
+  -- ^ Local type family instance environment.
+  -> Eff (HasFamInstEnvs : es) a
+  -> Eff es a
+runHasFamInstEnv' local = interpret_ $ \GetFamInstEnvs -> do
+  global <- eps_fam_inst_env <$> getExternalPackageState
   pure (local, global)

@@ -1,13 +1,8 @@
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
 
 module Pantomime.WordSize
@@ -366,6 +361,8 @@ instance KnownWordSize ws => SignConversion (SymWord ws) (SymInt ws) where
   toSigned = SymInt . toSigned . unSymWord
   toUnsigned = SymWord . toUnsigned . unSymInt
 
+-- TODO: Adjust code to use this instance! Same for the shiftRA, which should
+-- work both for symbolic and non-symbolic shifts btw.
 -- | Class to statically lookup the size of a bitvector.
 --
 -- This may be used to add constraints on bitvector conversion, without

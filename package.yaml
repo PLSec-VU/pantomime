@@ -57,8 +57,8 @@ dependencies:
 - microlens
 - grisette >= 0.11.0.0
 - clash-prelude
-- effectful >= 2.5.1.0
 - effectful-core >= 2.5.1.0
+- text
 
 ghc-options:
 - -Wall
@@ -70,6 +70,7 @@ ghc-options:
 - -Wmissing-home-modules
 - -Wpartial-fields
 - -Wredundant-constraints
+- -Wprepositive-qualified-module
 
 library:
   source-dirs: src

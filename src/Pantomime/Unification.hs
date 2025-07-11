@@ -15,7 +15,7 @@ import GHC.Plugins hiding ((<>))
 import GHC.Core.Unify (tcUnifyTys, alwaysBindFun)
 import GHC.Core.Map.Type (TypeMap)
 import GHC.Core.Predicate (isDictId)
-import GHC.Core.InstEnv (lookupUniqueInstEnv, instanceDFunId, InstEnv)
+import GHC.Core.InstEnv (lookupUniqueInstEnv, instanceDFunId)
 import GHC.Core.TyCo.Rep (Type (..), Scaled (..), scaledThing)
 import GHC.Data.TrieMap (TrieMap (..), insertTM)
 import GHC.Data.Maybe (rightToMaybe, whenIsJust)
@@ -36,12 +36,11 @@ import Effectful
 import Effectful.Error.Static
 import Effectful.Break
 import Effectful.Context
-import GHC.Unit.Module.Deps (Dependencies)
-import Effectful.GHC.External (ExtInstEnv, getInstEnvs)
+import Effectful.GHC.External (HasInstEnvs, getInstEnvs)
 
 -- | Error to indicate unification failure.
 --
--- Note that there may actually exists a unification for all the pars
+-- Note that there may actually exists a unification for all the parts
 -- individually. However, there doesn't exists a single mapping to unify all
 -- type pairs.
 data UnificationError = UnificationError [(Type, Type)]
@@ -380,9 +379,7 @@ lookupClassInst
   :: forall es
    . HasCallStack
   => Error (LookupError Type) :> es
-  => ExtInstEnv :> es
-  => Context Reader InstEnv :> es
-  => Context Reader Dependencies :> es
+  => HasInstEnvs :> es
   => Type
   -> Eff es CoreExpr
 lookupClassInst ty = do
@@ -412,9 +409,7 @@ lookupClassInst ty = do
 -- unification-like functions in this module, as these unifications can create
 -- resolvable typeclass constraints.
 resolveInstances
-  :: ExtInstEnv :> es
-  => Context Reader InstEnv :> es
-  => Context Reader Dependencies :> es
+  :: HasInstEnvs :> es
   => CoreExpr
   -> Eff es CoreExpr
 resolveInstances expr = do

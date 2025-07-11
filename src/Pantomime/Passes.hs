@@ -4,12 +4,17 @@ module Pantomime.Passes
   , checkSpecPass
   ) where
 
-import GHC.Plugins hiding (empty, (<>), thNameToGhcName)
+import GHC.Plugins hiding (empty, (<>), thNameToGhcName, getFirstAnnotations)
 import GHC.Core.Lint
 import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
-import GHC.Core.InstEnv (InstEnv)
-import GHC.Unit.Module.Deps (Dependencies)
 import GHC.Driver.Config.Core.Lint (initLintConfig)
+
+import Grisette
+  ( GrisetteSMTConfig (..)
+  , SMTConfig (..)
+  , Timing (..)
+  , z3
+  )
 
 import Data.Data
 
@@ -24,17 +29,19 @@ import Pantomime.Solve
 import Pantomime.Annotation
 
 import Effectful
+import Effectful.Provider
+import Effectful.Grisette.Solver
+import Effectful.Exception (throwIO)
 import Effectful.Context
 import Effectful.Error.Static (Error, CallStack, runErrorWith)
 import Effectful.Fail (Fail, runFailIO)
 import Effectful.GHC.TH
-import Effectful.GHC.ModGuts
 import Effectful.GHC.CoreE
 import Effectful.GHC.DynFlags
 import Effectful.GHC.Display
 import Effectful.GHC.TyThing
 import Effectful.GHC.External
-import GHC.Core.FamInstEnv (FamInstEnv)
+import Effectful.GHC.Annotations
 
 resolveTH
   :: HasCallStack
@@ -72,14 +79,13 @@ type CoreBind' = Bind' CoreBndr
 annBindsPass
   :: forall a es
    . Data a
-  => IOE :> es
-  => CoreE :> es
+  => HasAnnotations :> es
   => (a -> CoreBind' -> Eff es CoreBind')
   -> ModGuts
   -> Eff es ModGuts
 annBindsPass pass guts = do
   -- TODO: We should probably run every annotation!
-  (_, anns) <- liftCore $ getFirstAnnotations @a deserializeWithData guts
+  (_, anns) <- getFirstAnnotations @a deserializeWithData
 
   binds <- forM (mg_binds guts) $ \case
     NonRec x e | Just ann <- lookupUFM anns $ varName x -> do
@@ -115,21 +121,26 @@ printAndLintPass
   => CoreToDo
 printAndLintPass = do
   let name = TH.nameBase 'printAndLintPass
-  let pass guts = runModGuts guts $ annBindsPass (const @_ @a printAndLint) guts
-  CoreDoPluginPass name $ runCoreEM . runDisplay . pass
+  let pass guts = runSymbolic guts $ annBindsPass (const @_ @a printAndLint) guts
+  CoreDoPluginPass name pass
 
 runSymbolic
   :: HasCallStack
-  => Eff
+  => ModGuts
+  -> Eff
     [ Error (LookupError TH.Name)
     , Error (LookupError Name)
     , Error OversaturatedError
     , Error UnificationError
+    , Provider_ Solver ()
+    , Error SolverError
+    , HasAnnotations
     , THNameToGHCName
     , HasThings
-    , ExtInstEnv
-    , ExtFamInstEnv
-    , ExtPackages
+    , Context Reader CoreProgram
+    , HasInstEnvs
+    , HasFamInstEnvs
+    , HasExternalPackageState
     , Display
     , HasDynFlagsE
     , Fail
@@ -137,26 +148,38 @@ runSymbolic
     , IOE
     ] a
   -> CoreM a
-runSymbolic
+runSymbolic guts
   = runCoreEM
   . runFailIO
   . runHasDynFlagsE
   . runDisplay
-  . runExtPackages
-  . runExtAll
+  . runHasExternalPackageState
+  . runHasFamInstEnv guts
+  . runHasInstEnvs guts
+  . runContextReader (mg_binds guts)
   . runHasThings
   . runThNameToGhcName
+  . runHasAnnotations guts
+  . runErrorWith @SolverError propagateErrorShow
+  . runProvider_ (const $ runSolver z3')
   . runErrorWith @UnificationError propagateError
   . runErrorWith @OversaturatedError propagateError
   . runErrorWith @(LookupError Name) propagateError
   . runErrorWith @(LookupError TH.Name) propagateErrorShow
   where
-    panicDocIO :: IOE :> es => String -> SDoc -> Eff es a
-    panicDocIO s doc = liftIO . throwGhcExceptionIO $ PprPanic s doc
+    -- TODO: We could let the user decide which solver no?
+    z3' = z3
+      { sbvConfig = (sbvConfig z3)
+        { verbose = True
+        , timing = PrintTiming
+        }
+      }
+
+    panicDocIO :: String -> SDoc -> Eff es a
+    panicDocIO s doc = throwIO $ PprPanic s doc
 
     propagateError
-      :: IOE :> es
-      => Outputable o
+      :: Outputable o
       => CallStack
       -> o
       -> Eff es a
@@ -165,13 +188,18 @@ runSymbolic
       , prettyCallStackDoc cs
       ]
 
-    propagateErrorShow cs s = propagateError cs $ text @SDoc (show s)
+    propagateErrorShow
+      :: Show s
+      => CallStack
+      -> s
+      -> Eff es a
+    propagateErrorShow cs = propagateError cs . text @SDoc . show
 
 symComparePass :: CoreToDo
 symComparePass = do
   let name = TH.nameBase 'symComparePass
-  let pass guts = runModGuts guts $ annBindsPass symCompare guts
-  CoreDoPluginPass name $ runSymbolic . pass
+  let pass guts = runSymbolic guts $ annBindsPass symCompare guts
+  CoreDoPluginPass name pass
 
 -- TODO: Instead of just running a pass per binder, I want to accumulate the
 -- results for all checks. In fact, this isn't even a pass as we do not modify
@@ -181,21 +209,20 @@ symComparePass = do
 checkSpecPass :: CoreToDo
 checkSpecPass = do
   let name = TH.nameBase 'checkSpecPass
-  let pass guts = runModGuts guts $ annBindsPass checkSpec guts
-  CoreDoPluginPass name $ runSymbolic . pass
+  let pass guts = runSymbolic guts $ annBindsPass checkSpec guts
+  CoreDoPluginPass name pass
 
 printAndLint
   :: HasCallStack
-  => Context Reader ModGuts :> es
-  => IOE :> es
-  => CoreE :> es
+  => Context Reader CoreProgram :> es
+  => HasDynFlagsE :> es
   => Display :> es
   => CoreBind'
   -> Eff es CoreBind'
 printAndLint bind = do
-  dflags <- liftCore getDynFlags
+  dflags <- getDynFlags
   let cfg = initLintConfig dflags []
-  prog <- gets mg_binds
+  prog <- get @CoreProgram
   let res = lintCoreBindings' cfg prog
   debug bind
   debug res
@@ -236,14 +263,14 @@ composeSim
   => HasThings :> es
   => Pantomime TH.Name
   -> Eff es CoreExpr
-composeSim uc = do
+composeSim spec = do
   let resolve name = Var <$> resolveTH name
 
   compose <- resolve 'Combinator.composeS
 
-  sim <- resolve $ simulator uc
-  leak <- resolve $ leakage uc
-  proj <- resolve $ projection uc
+  sim <- resolve $ simulator spec
+  leak <- resolve $ leakage spec
+  proj <- resolve $ projection spec
 
   expr' <- unifyApps compose [leak, sim, proj]
 
@@ -256,15 +283,11 @@ checkSpec
   => Error UnificationError :> es
   => Error OversaturatedError :> es
   => Context Reader CoreProgram :> es
-  => Context Reader InstEnv :> es
-  => Context Reader FamInstEnv :> es
-  => Context Reader Dependencies :> es
-  => Context Reader ModGuts :> es
-  => IOE :> es
+  => Provider_ Solver () :> es
   => Fail :> es
   => Display :> es
-  => ExtInstEnv :> es
-  => ExtFamInstEnv :> es
+  => HasInstEnvs :> es
+  => HasFamInstEnvs :> es
   => HasDynFlagsE :> es
   => HasThings :> es
   => THNameToGHCName :> es
@@ -305,12 +328,10 @@ symCompare
   => Error (LookupError Name) :> es
   => Error (LookupError TH.Name) :> es
   => Context Reader CoreProgram :> es
-  => Context Reader FamInstEnv :> es
-  => Context Reader ModGuts :> es
-  => IOE :> es
+  => Provider_ Solver () :> es
   => Fail :> es
   => Display :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => HasDynFlagsE :> es
   => HasThings :> es
   => THNameToGHCName :> es

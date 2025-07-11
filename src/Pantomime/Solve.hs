@@ -1,25 +1,15 @@
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE DerivingVia #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE DeriveLift #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE StandaloneDeriving #-}
 -- TODO: I want to remove many of these pragmas, also for the other files. Most
 -- of them should just be included in the top-level flags. There also seems to
 -- be a lot of obsolete stuff. Perhaps its good to first find out which flags
--- are actually used.
+-- are actually used. I actually removed most of them here, but there's still
+-- way too many in other files. Isn't there an 'obsolete pragma warning' or
+-- something in GHC?
 
 -- TODO: I feel like the pantomime dependencies that are used solely by the
 -- final solver should go under Pantomime.Solve.X (e.g. Pantomime.Solve.Value).
 -- Right now, the hierarchy is a bit too flat, which makes the project structure
--- a lot less clear.
+-- a lot less clear. Alternatively, we can use Pantomime.Symbolic.X
 
 module Pantomime.Solve
   ( NonEq (..)
@@ -29,23 +19,11 @@ module Pantomime.Solve
 import GHC.Plugins
 import GHC.Platform (PlatformWordSize (..), Platform (..))
 import GHC.Core.TyCo.Rep (scaledThing)
-import GHC.Core.FamInstEnv (FamInstEnv)
 import GHC.Tc.Utils.TcType (eqType, tcSplitSigmaTy)
 
-import Grisette
-  ( GrisetteSMTConfig (..)
-  , SMTConfig (..)
-  , Timing (..)
-  , SolvingFailure (..)
-  , LogicalOp (..)
-  , z3
-  , solve
-  )
+import Grisette (LogicalOp (..))
 
 import Control.Monad (forM, unless)
-
-import Data.Functor ((<&>))
-import Data.Foldable (forM_)
 
 import Language.Haskell.TH qualified as TH
 
@@ -53,7 +31,7 @@ import Pantomime.WordSize
 import Pantomime.Evaluate
 import Pantomime.Environment
 import Pantomime.Value
-import Pantomime.Concrete
+import Pantomime.Concrete (Concrete, concretise)
 import Pantomime.Runtime
 import Pantomime.MonadEval
 
@@ -64,45 +42,41 @@ import Pantomime.Clash
 
 import Effectful
 import Effectful.Context
-import Effectful.Error.Static (Error, throwError_, runErrorNoCallStack, runErrorNoCallStackWith)
-import Effectful.Fail
+import Effectful.Error.Static
 import Effectful.GHC.DynFlags
-import Effectful.GHC.Display
 import Effectful.Grisette.Fresh
 import Effectful.GHC.TyThing
 import Effectful.GHC.TH
 import Effectful.GHC.External
+import Effectful.Grisette.Solver
+import Effectful.Provider
+import Effectful.Exception (ErrorCall (..), throwIO)
 
 -- TODO: We really want to remove this thing once we get rid of MonadEval in
 -- the entire codebase. This return is a horrible overapproximation!
 data NonEq
   -- TODO: It would be nice if the counterexample also included the final
   -- result. Even if just for checking whether the output is actually correct!
-  = Counterexample [Concrete]
+  = Counterexample [Concrete] Concrete Concrete
   | EvalError EvalError
-  -- TODO: Add in the actualy solver error. We don't want to directly copy the
-  -- solver result, as Unsat shows validity on our case.
-  | SolveError SolvingFailure
 
 instance Outputable NonEq where
   ppr = \case
-    Counterexample values -> vcat $ values <&> ppr
+    Counterexample bndrs _lhs _rhs -> vcat $ fmap ppr bndrs
     EvalError err -> text "eval-error: " <+> ppr err
-    SolveError err -> text "solver error: " <+> text (show err)
 
+-- TODO: adjust ExtFamInstEnv and ExtInstEnv to be their own effect instead of
+-- requiring the local environments.
 exprSymEq
   :: forall es
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
-  => Context Reader ModGuts :> es
-  => Context Reader FamInstEnv :> es
+  => Context Reader CoreProgram :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => ExtFamInstEnv :> es
-  => IOE :> es
-  => Fail :> es
-  => Display :> es
+  => HasFamInstEnvs :> es
+  => Provider_ Solver () :> es
   => HasDynFlagsE :> es
   => CoreExpr
   -> CoreExpr
@@ -122,14 +96,11 @@ exprSymEq'
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
-  => Context Reader ModGuts :> es
-  => Context Reader FamInstEnv :> es
+  => Context Reader CoreProgram :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => ExtFamInstEnv :> es
-  => IOE :> es
-  => Fail :> es
-  => Display :> es
+  => HasFamInstEnvs :> es
+  => Provider_ Solver () :> es
   => KnownWordSize ws
   => CoreExpr
   -> CoreExpr
@@ -140,6 +111,8 @@ exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
   unless (lty `eqType` rty) $ do
     throwError_ $ EvalError IllTyped
 
+  -- TODO: I really would like to get rid of this. Or actually, just to get rid
+  -- of the whole eval error thing as a whole.
   let runEvalErr = runErrorNoCallStackWith $ throwError_ . EvalError
 
   (bndrs, lres, rres, eq) <- runEvalErr do
@@ -149,7 +122,7 @@ exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
     clash <- clashInterp
     env <- extendManyEnv emptyEnv $ base ++ clash
 
-    prog <- gets @ModGuts mg_binds
+    prog <- get @CoreProgram
     let env' = extendLocalEnv env prog
 
     let saturate expr = do
@@ -161,34 +134,23 @@ exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
     eq <- weakEq lresult rresult
     pure (bndrs, lresult, rresult, eq)
 
-  -- TODO: We could let the user decide which solver no?
-  let z3' = z3
-        { sbvConfig = (sbvConfig z3)
-          { verbose = True
-          , timing = PrintTiming
-          }
-        }
-
-  -- TODO: This should be an effect. We really want to get rid of the IO effect.
-  result <- liftIO $ solve z3' (symNot eq)
+  result <- provide_ @Solver $ solve (symNot eq)
 
   case result of
-    Right model -> do
+    Satisfiable model -> do
       let concretise' = runEvalErr . concretise model
       bndrs' <- forM bndrs concretise'
       lres' <- concretise' lres
       rres' <- concretise' rres
-      debugS "-------------"
-      forM_ bndrs' debug
-      debugS "-------------"
-      debug lres'
-      debugS "=/=/=/=/=/=/="
-      debug rres'
-      _ <- fail "We crash on non-equal for now."
-
-      throwError_ $ Counterexample bndrs'
-    Left Unsat -> pure ()
-    Left err -> throwError_ $ SolveError err
+      -- debugS "-------------"
+      -- forM_ bndrs' debug
+      -- debugS "-------------"
+      -- debug lres'
+      -- debugS "=/=/=/=/=/=/="
+      -- debug rres'
+      throwError_ $ Counterexample bndrs' lres' rres'
+    Unsatisfiable -> pure ()
+    Unknown -> throwIO $ ErrorCall "checks are in decidable fragment"
 
 -- TODO: We have a function to create a fresh typed value now, together with
 -- types attached to function values. We should be able to saturate a value
@@ -196,11 +158,10 @@ exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
 symbolicBndrs
   :: forall ws es
    . Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => Type
   -> Eff es [Value (Eff es) ws]

@@ -17,7 +17,6 @@ module Pantomime.Evaluate
 
 import GHC.Plugins hiding (empty, (<>))
 import GHC.Core.TyCo.Rep (scaledThing)
-import GHC.Core.FamInstEnv (FamInstEnv)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
 
@@ -40,7 +39,6 @@ import Pantomime.Environment
 import Pantomime.MonadEval
 
 import Effectful
-import Effectful.Context
 import Effectful.Error.Static (Error, throwError_)
 import Effectful.GHC.TH
 import Effectful.GHC.TyThing
@@ -50,10 +48,9 @@ import Effectful.Grisette.Fresh
 -- | Evaluate an expression into a symbolic Value.
 evaluate
   :: forall es ws
-   . Context Reader FamInstEnv :> es
-  => Error EvalError :> es
+   . Error EvalError :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => HasThings :> es
   => THNameToGHCName :> es
   => KnownWordSize ws
@@ -147,10 +144,9 @@ evaluate env = \case
 -- environment.
 evalAlt
   :: forall es ws
-   . Context Reader FamInstEnv :> es
-  => Error EvalError :> es
+   . Error EvalError :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => HasThings :> es
   => THNameToGHCName :> es
   => KnownWordSize ws
@@ -244,12 +240,11 @@ onlyPrimEq = curry $ \case
 
 evalDataCon
   :: forall es ws
-   . Context Reader FamInstEnv :> es
-  => Error EvalError :> es
+   . Error EvalError :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => DataCon
   -> Eff es (Value (Eff es) ws)
@@ -278,12 +273,11 @@ evalDataCon dataCon = do
 -- should be those applied to the TyCon when constructing the final type.
 evalDataConInst
   :: forall es ws
-   . Context Reader FamInstEnv :> es
-  => Error EvalError :> es
+   . Error EvalError :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => KnownWordSize ws
   => DataCon
   -- ^ The DataCon for which we will create a symbolic instance.
@@ -349,11 +343,10 @@ evalLiteral = \case
 -- TODO: I want to add support for rem and quot.
 evalPrimOp
   :: forall es ws
-   . Context Reader FamInstEnv :> es
-  => Error EvalError :> es
+   . Error EvalError :> es
   => THNameToGHCName :> es
   => HasThings :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => Fresh :> es
   => KnownWordSize ws
   => PrimOp

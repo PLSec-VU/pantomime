@@ -9,7 +9,6 @@ module Pantomime.Base
 import GHC.Plugins hiding (thNameToGhcName)
 import GHC.Types.TyThing (lookupId)
 import GHC.Base (noinline)
-import GHC.Core.FamInstEnv (FamInstEnv)
 
 import GHC.Real (overflowError, divZeroError)
 import GHC.Num.Integer (integerToInt#, integerToWord#)
@@ -29,18 +28,16 @@ import Language.Haskell.TH qualified as TH
 import Effectful
 import Effectful.GHC.TyThing
 import Effectful.GHC.TH
-import Effectful.Error.Static (Error, throwError_)
-import Effectful.Context
-import Effectful.Grisette.Fresh
 import Effectful.GHC.External
+import Effectful.Error.Static (Error, throwError_)
+import Effectful.Grisette.Fresh
 
 baseValues
   :: forall es ws
    . Error EvalError :> es
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
-  => Context Reader FamInstEnv :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => THNameToGHCName :> es
   => HasThings :> es
   => Fresh :> es
@@ -326,10 +323,9 @@ overflowError'
    . Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => Fresh :> es
   => HasThings :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => THNameToGHCName :> es
   => KnownWordSize ws
   => Eff es (Var, Value (Eff es) ws)
@@ -348,10 +344,9 @@ divZeroError'
    . Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => Error EvalError :> es
-  => Context Reader FamInstEnv :> es
   => Fresh :> es
   => HasThings :> es
-  => ExtFamInstEnv :> es
+  => HasFamInstEnvs :> es
   => THNameToGHCName :> es
   => KnownWordSize ws
   => Eff es (Var, Value (Eff es) ws)

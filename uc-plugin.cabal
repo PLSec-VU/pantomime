@@ -27,10 +27,10 @@ library
   exposed-modules:
       Control.Error
       Effectful.Break
-      Effectful.Cont
       Effectful.Context
       Effectful.Context.Dynamic
       Effectful.Context.Static.Local
+      Effectful.GHC.Annotations
       Effectful.GHC.CoreE
       Effectful.GHC.Display
       Effectful.GHC.DynFlags
@@ -39,6 +39,7 @@ library
       Effectful.GHC.TH
       Effectful.GHC.TyThing
       Effectful.Grisette.Fresh
+      Effectful.Grisette.Solver
       Pantomime
       Pantomime.Annotation
       Pantomime.Base
@@ -97,20 +98,20 @@ library
       TypeApplications
       TypeFamilies
       TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module
   build-depends:
       base >=4.7 && <5
     , clash-prelude
     , composition
     , constraints >=0.14.2
     , containers
-    , effectful >=2.5.1.0
     , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , grisette >=0.11.0.0
     , microlens
     , mtl
     , template-haskell
+    , text
     , transformers
   default-language: Haskell2010
 
@@ -160,7 +161,7 @@ executable uc-plugin-exe
       TypeApplications
       TypeFamilies
       TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -fplugin Pantomime -fexpose-all-unfoldings
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module -threaded -rtsopts -with-rtsopts=-N -fplugin Pantomime -fexpose-all-unfoldings
   build-depends:
       QuickCheck
     , base >=4.7 && <5
@@ -168,13 +169,13 @@ executable uc-plugin-exe
     , composition
     , constraints >=0.14.2
     , containers
-    , effectful >=2.5.1.0
     , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , grisette >=0.11.0.0
     , microlens
     , mtl
     , template-haskell
+    , text
     , transformers
     , uc-plugin
   default-language: Haskell2010
@@ -213,7 +214,7 @@ test-suite uc-plugin-test
       TypeApplications
       TypeFamilies
       TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       HUnit
     , base >=4.7 && <5
@@ -222,7 +223,6 @@ test-suite uc-plugin-test
     , constraints >=0.14.2
     , containers
     , directory
-    , effectful >=2.5.1.0
     , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , ghc-paths
@@ -232,6 +232,7 @@ test-suite uc-plugin-test
     , mtl
     , silently
     , template-haskell
+    , text
     , transformers
     , uc-plugin
   default-language: Haskell2010

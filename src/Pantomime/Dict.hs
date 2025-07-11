@@ -1,3 +1,6 @@
+-- TODO: We redefine Dict here, but there is the 'constraints' package which has
+-- utils for manipulating it. I guess it's better to just import that!
+
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}

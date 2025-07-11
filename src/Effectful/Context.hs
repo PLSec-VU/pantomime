@@ -25,6 +25,9 @@ import Effectful.Dispatch.Dynamic
 import Effectful.State.Static.Local qualified as Local
 import Effectful.State.Static.Shared qualified as Shared
 
+-- TODO: We should also make static variants for both local and shared
+-- operations.
+
 -- | A state-like effect, which permits multiple modes to operate on the same
 -- underlying data.
 --

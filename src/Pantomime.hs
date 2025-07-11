@@ -8,7 +8,7 @@ module Pantomime
 
 import GHC.Plugins hiding (empty, (<>))
 
-import qualified Language.Haskell.TH.Syntax as TH
+import Language.Haskell.TH.Syntax qualified as TH
 
 import Pantomime.Annotation
 import Pantomime.Combinator

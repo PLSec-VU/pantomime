@@ -12,6 +12,8 @@ import GHC.Core.FamInstEnv (FamInstEnv)
 import GHC.Unit.Module.ModGuts (ModGuts (..))
 import GHC.Unit.Module.Deps (Dependencies)
 
+-- TODO: I think we should remove this whole module. We aren't actually using
+-- it anymore.
 type ModGutsEs es =
   ( Context Reader InstEnv :> es
   , Context Reader FamInstEnv :> es

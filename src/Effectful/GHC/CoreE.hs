@@ -13,11 +13,12 @@ module Effectful.GHC.CoreE
   , runCoreM'
 
   , runAllCoreE
-  , runExtPackages
+  , runHasExternalPackageState
   , runHasThings
   , runHasDynFlagsE
   , runDisplay
   , runThNameToGhcName
+  , runHasAnnotations
   ) where
 
 import Effectful
@@ -43,6 +44,7 @@ import Effectful.GHC.TyThing
 import Effectful.GHC.DynFlags
 import Effectful.GHC.Display
 import Effectful.GHC.TH (THNameToGHCName(..))
+import Effectful.GHC.Annotations (HasAnnotations (..))
 
 import GHC.Plugins
   ( CoreM
@@ -54,6 +56,7 @@ import GHC.Plugins
   , SrcSpan
   , SimplCount
   , DumpFlag (..)
+  , ModGuts
   , zeroSimplCount
   , plusSimplCount
   , addSimplCount
@@ -68,6 +71,7 @@ import GHC.Plugins
   , getDynFlags
   , msg
   , thNameToGhcName
+  , getAnnotations
   )
 import GHC.Utils.Logger (logHasDumpFlag)
 import GHC.Tc.Utils.Env (lookupGlobal_maybe)
@@ -204,26 +208,25 @@ runAllCoreE
     ( THNameToGHCName
     : Display
     : HasThings
-    : ExtInstEnv
-    : ExtFamInstEnv
-    : ExtPackages
+    : HasExternalPackageState
+    : HasDynFlagsE
     : es
     ) a
   -> Eff es a
 runAllCoreE
-  = runExtPackages
-  . runExtAll
+  = runHasDynFlagsE
+  . runHasExternalPackageState
   . runHasThings
   . runDisplay
   . runThNameToGhcName
 
 -- | Run the 'ExtPackages' effect through the 'CoreE' effect.
-runExtPackages
+runHasExternalPackageState
   :: IOE :> es
   => CoreE :> es
-  => Eff (ExtPackages : es) a
+  => Eff (HasExternalPackageState : es) a
   -> Eff es a
-runExtPackages = interpret_ $ \ExtPackages -> do
+runHasExternalPackageState = interpret_ \GetExternalPackageState -> do
   hscEnv <- liftCore getHscEnv
   liftIO $ hscEPS hscEnv
 
@@ -233,7 +236,7 @@ runHasThings
   => CoreE :> es
   => Eff (HasThings : es) a
   -> Eff es a
-runHasThings = interpret_ $ \(LookupThing name) -> do
+runHasThings = interpret_ \(LookupThing name) -> do
   env <- liftCore getHscEnv
   res <- liftIO $ lookupGlobal_maybe env name
   case res of
@@ -246,7 +249,7 @@ runHasDynFlagsE
   => CoreE :> es
   => Eff (HasDynFlagsE : es) a
   -> Eff es a
-runHasDynFlagsE = interpret_ $ \GetDynFlags -> do
+runHasDynFlagsE = interpret_ \GetDynFlags -> do
   liftCore getDynFlags
 
 -- | Run the 'Display' effect through the 'CoreE' effect.
@@ -255,7 +258,7 @@ runDisplay
   => CoreE :> es
   => Eff (Display : es) a
   -> Eff es a
-runDisplay = interpret_ $ \(Display cls doc) -> do
+runDisplay = interpret_ \(Display cls doc) -> do
   liftCore $ msg cls doc
 
 -- | Run the 'THNameToGHCName' effect through the 'CoreE' effect.
@@ -264,5 +267,14 @@ runThNameToGhcName
   => CoreE :> es
   => Eff (THNameToGHCName : es) a
   -> Eff es a
-runThNameToGhcName = interpret_ $ \(THNameToGHCName name) -> do
+runThNameToGhcName = interpret_ \(THNameToGHCName name) -> do
   liftCore $ thNameToGhcName name
+
+runHasAnnotations
+  :: IOE :> es
+  => CoreE :> es
+  => ModGuts
+  -> Eff (HasAnnotations : es) a
+  -> Eff es a
+runHasAnnotations guts = interpret_ \(GetAnnotations deserialise) -> do
+  liftCore $ getAnnotations deserialise guts
