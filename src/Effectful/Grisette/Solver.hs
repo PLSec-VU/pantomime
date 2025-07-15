@@ -11,20 +11,31 @@ import Effectful.Error.Static
 import Effectful.Dispatch.Dynamic
 import Effectful.Exception (ErrorCall (..), bracket, throwIO)
 
-import Grisette (SymBool, ConfigurableSolver (..), solverTerminate, solverSolve, SolvingFailure (..), Model)
+import Grisette
+  ( SymBool
+  , ConfigurableSolver (..)
+  , SolvingFailure (..)
+  , Model
+  , solverTerminate
+  , solverSolve
+  )
 
-import Data.Text
+import Data.Text (Text)
 
 -- | Allows access to an SMT solver to check satisfiability.
 data Solver :: Effect where
   -- TODO: I guess we could make this work for non-symbolic values? Of course,
   -- the solution is trivial there and doesn't require the solver.
-  Solve :: SymBool -> Solver m SolverResult
+  Solve :: Error SolverError :> es => SymBool -> Solver (Eff es) SolverResult
 
 type instance DispatchOf Solver = Dynamic
 
 -- | Check satisfiability of the given formula.
-solve :: Solver :> es => SymBool -> Eff es SolverResult
+solve
+  :: Solver :> es
+  => Error SolverError :> es
+  => SymBool
+  -> Eff es SolverResult
 solve = send . Solve
 
 -- | Result of checking satisfiability using an SMT solver.
@@ -47,7 +58,6 @@ data SolverError where
 runSolver
   :: HasCallStack
   => IOE :> es
-  => Error SolverError :> es
   => ConfigurableSolver config handle
   => config
   -> Eff (Solver : es) a
@@ -55,13 +65,13 @@ runSolver
 runSolver cfg eff = bracket
   (liftIO $ newSolver cfg)
   (liftIO . solverTerminate)
-  (\handle -> interpretWith_ eff \(Solve formula) -> do
+  (\handle -> interpretWith eff \env (Solve formula) -> localSeqUnlift env \unlift -> do
     result <- liftIO $ solverSolve handle formula
     case result of
       Right model -> pure $ Satisfiable model
       Left Unsat -> pure Unsatisfiable
       Left Unk -> pure Unknown
-      Left (SolvingError message) -> throwError $ SolverError message
+      Left (SolvingError message) -> unlift $ throwError (SolverError message)
       -- The following cases should be unreachable:
       Left ResultNumLimitReached -> do
         throwIO $ ErrorCall "single solver call cannot reach a result limit"

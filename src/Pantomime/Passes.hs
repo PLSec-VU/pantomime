@@ -132,8 +132,8 @@ runSymbolic
     , Error (LookupError Name)
     , Error OversaturatedError
     , Error UnificationError
-    , Provider_ Solver ()
     , Error SolverError
+    , Provider_ Solver ()
     , HasAnnotations
     , THNameToGHCName
     , HasThings
@@ -160,8 +160,8 @@ runSymbolic guts
   . runHasThings
   . runThNameToGhcName
   . runHasAnnotations guts
-  . runErrorWith @SolverError propagateErrorShow
   . runProvider_ (const $ runSolver z3')
+  . runErrorWith @SolverError propagateErrorShow
   . runErrorWith @UnificationError propagateError
   . runErrorWith @OversaturatedError propagateError
   . runErrorWith @(LookupError Name) propagateError
@@ -280,6 +280,7 @@ checkSpec
   :: HasCallStack
   => Error (LookupError Name) :> es
   => Error (LookupError TH.Name) :> es
+  => Error SolverError :> es
   => Error UnificationError :> es
   => Error OversaturatedError :> es
   => Context Reader CoreProgram :> es
@@ -327,6 +328,7 @@ symCompare
   :: HasCallStack
   => Error (LookupError Name) :> es
   => Error (LookupError TH.Name) :> es
+  => Error SolverError :> es
   => Context Reader CoreProgram :> es
   => Provider_ Solver () :> es
   => Fail :> es

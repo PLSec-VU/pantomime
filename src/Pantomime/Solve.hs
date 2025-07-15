@@ -91,6 +91,7 @@ exprSymEq
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
+  => Error SolverError :> es
   => Context Reader CoreProgram :> es
   => HasThings :> es
   => THNameToGHCName :> es
@@ -115,6 +116,7 @@ exprSymEq'
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
+  => Error SolverError :> es
   => Context Reader CoreProgram :> es
   => HasThings :> es
   => THNameToGHCName :> es
