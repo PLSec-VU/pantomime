@@ -32,7 +32,8 @@ type instance DispatchOf Solver = Dynamic
 
 -- | Check satisfiability of the given formula.
 solve
-  :: Solver :> es
+  :: HasCallStack
+  => Solver :> es
   => Error SolverError :> es
   => SymBool
   -> Eff es SolverResult

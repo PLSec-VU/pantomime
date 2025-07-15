@@ -28,7 +28,7 @@ import Grisette
   , Mergeable (..)
   , SymEq (..)
   , SymOrd (..)
-  , PlainUnion (..)
+  , UnionView (..)
   , SignConversion (..)
   , true
   , symAnd

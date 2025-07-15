@@ -56,7 +56,7 @@ dependencies:
 - template-haskell
 - mtl
 - microlens
-- grisette >= 0.11.0.0
+- grisette >= 0.13.0.0
 - clash-prelude
 - effectful-core >= 2.5.1.0
 - text

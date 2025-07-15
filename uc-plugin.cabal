@@ -108,7 +108,7 @@ library
     , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , ghc-prim
-    , grisette >=0.11.0.0
+    , grisette >=0.13.0.0
     , microlens
     , mtl
     , template-haskell
@@ -121,6 +121,7 @@ executable uc-plugin-exe
   other-modules:
       ClassInline
       Core
+      Core2
       LocalClass
       Processor
       ProcessorControl
@@ -173,7 +174,7 @@ executable uc-plugin-exe
     , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , ghc-prim
-    , grisette >=0.11.0.0
+    , grisette >=0.13.0.0
     , microlens
     , mtl
     , template-haskell
@@ -229,7 +230,7 @@ test-suite uc-plugin-test
     , ghc >=9.6.4
     , ghc-paths
     , ghc-prim
-    , grisette >=0.11.0.0
+    , grisette >=0.13.0.0
     , hspec
     , microlens
     , mtl

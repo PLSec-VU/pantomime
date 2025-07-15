@@ -16,7 +16,8 @@ import Grisette
   , SimpleMergeable (..)
   , SimpleMergeable1 (..)
   , SymBranching (..)
-  , PlainUnion (..)
+  , UnionView (..)
+  , IfViewResult (..)
   , TryMerge (..)
   , EvalSym (..)
   , EvalSym1 (..)
@@ -111,11 +112,11 @@ instance (forall a. Mergeable a => SimpleMergeable (Union S a))=> SymBranching (
   mrgIfPropagatedStrategy cond (Union tr) (Union fl) = do
     Union $ mrgIfPropagatedStrategy cond tr fl
 
-instance PlainUnion (Union S) where
+instance UnionView (Union S) where
   singleView = singleView . unUnion
 
   ifView = do
-    let wrap (cond, tr, fl) = (cond, Union tr, Union fl)
+    let wrap (IfViewResult cond tr fl) = IfViewResult cond (Union tr) (Union fl)
     fmap wrap . ifView . unUnion
 
 instance (DecideEvalMode mode, EvalSym a) => EvalSym (Union mode a) where
