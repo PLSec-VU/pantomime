@@ -1,11 +1,5 @@
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE TypeAbstractions #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 
 module Pantomime.Primitive
@@ -20,6 +14,12 @@ import GHC.Platform (PlatformWordSize)
 import GHC.TypeLits (KnownNat)
 
 import Grisette.SymPrim
+  ( SymFP
+  , SymFP32
+  , SymFP64
+  , ValidFP
+  , SymInteger
+  )
 import Grisette.Unified (DecideEvalMode (..), EvalModeTag (..))
 import Grisette
   ( LogicalOp (..)
@@ -36,53 +36,41 @@ import Effectful.Error.Static (Error, throwError_)
 import Pantomime.WordSize
 import Pantomime.Runtime
 import Pantomime.MonadEval
-import Pantomime.Grisette.BitVector qualified as Pantomime
+import Pantomime.Grisette.BitVector
 
 -- | Primitive values supported by the symbolic solver.
 data Primitive (mode :: EvalModeTag) (ws :: PlatformWordSize) where
-  -- TODO: Use our new sized word primitive, which supports zero sized values.
-  -- This way, we don't have to carry the extra word size constraint around.
   -- TODO: Add support for Char
-  -- TODO: Add support for symbolic (higher order) functions.
   -- Char :: RuntimeValue (SymWordN 31) -> Value m n
   -- BigNat :: RuntimeValue SymInteger -> Value m n
-  -- TODO: Shouldn't we be using the newtype SymInt we created here? We don't
-  -- need to wrap just solvables in RuntimeValue. In fact, RuntimeValue itself
-  -- wraps Either, which is non-solvable. I really think it would be best to use
-  -- the newtype wrapper here, it is a lot more clear! The same goes for Word
-  -- and for the size field of a ByteArray btw.
-  Int :: RuntimeValue mode (SymIntN (WordBits ws)) -> Primitive mode ws
-  Int8 :: RuntimeValue mode SymIntN8 -> Primitive mode ws
-  Int16 :: RuntimeValue mode SymIntN16 -> Primitive mode ws
-  Int32 :: RuntimeValue mode SymIntN32 -> Primitive mode ws
-  Int64 :: RuntimeValue mode SymIntN64 -> Primitive mode ws
-  Word :: RuntimeValue mode (SymWordN (WordBits ws)) -> Primitive mode ws
-  Word8 :: RuntimeValue mode SymWordN8 -> Primitive mode ws
-  Word16 :: RuntimeValue mode SymWordN16 -> Primitive mode ws
-  Word32 :: RuntimeValue mode SymWordN32 -> Primitive mode ws
-  Word64 :: RuntimeValue mode SymWordN64 -> Primitive mode ws
+  Int :: RuntimeValue mode (IntPW mode ws) -> Primitive mode ws
+  Int8 :: RuntimeValue mode (IntN mode 8) -> Primitive mode ws
+  Int16 :: RuntimeValue mode (IntN mode 16) -> Primitive mode ws
+  Int32 :: RuntimeValue mode (IntN mode 32) -> Primitive mode ws
+  Int64 :: RuntimeValue mode (IntN mode 64) -> Primitive mode ws
+  Word :: RuntimeValue mode (WordPW mode ws) -> Primitive mode ws
+  Word8 :: RuntimeValue mode (WordN mode 8) -> Primitive mode ws
+  Word16 :: RuntimeValue mode (WordN mode 16) -> Primitive mode ws
+  Word32 :: RuntimeValue mode (WordN mode 32) -> Primitive mode ws
+  Word64 :: RuntimeValue mode (WordN mode 64) -> Primitive mode ws
+  -- TODO: Some of the primitives still need to get the proper wrapper. That is,
+  -- this data type is not yet fully parametric on the eval mode, and we wrap
+  -- the values different so we don't need to carry around all the dictionaries.
   Float :: RuntimeValue mode SymFP32 -> Primitive mode ws
   Double :: RuntimeValue mode SymFP64 -> Primitive mode ws
   -- ByteArray'
   --   :: RuntimeValue S (ByteArray ws)
   --   -> Primitive ws
   -- TODO: This is a really poor implementation of ByteArrays. We should change
-  -- it!
+  -- it! What might be good is an SMT solver like array with load store
+  -- semantics. I.e. just remember the last x stores and loads. Not sure what to
+  -- do about out-of-bounds accesses. I don't think they can be modeled well...
   ByteArray
-    :: RuntimeValue mode (SymIntN (WordBits ws))
+    :: RuntimeValue mode (IntPW mode ws)
     -> RuntimeValue mode SymInteger
     -> Primitive mode ws
 
--- data ByteArray ws = ByteArray2
---   { baSize :: SymIntN (WordBits ws)
---   , baArray :: SymIntN (WordBits ws) --> SymIntN8
---   }
---   deriving Generic
-
--- deriving via Default (ByteArray ws)
---   instance KnownWordSize ws => Mergeable (ByteArray ws)
-
-instance KnownWordSize ws => Outputable (Primitive mode ws) where
+instance Outputable (Primitive mode ws) where
   ppr = \case
     Int _ -> "Int#"
     Int8 _ -> "Int8#"
@@ -196,20 +184,19 @@ instance (Error EvalError :> es, KnownWordSize ws) => EvalIte (Eff es) (Primitiv
 class
   ( GenSymSimple spec (RuntimeValue S SymInteger)
   , forall eb sb. ValidFP eb sb => GenSymSimple spec (RuntimeValue S (SymFP eb sb))
-  -- TODO: Replace these instances once we only use pantomime bitvectors.
-  , forall n. KnownPos n => GenSymSimple spec (RuntimeValue S (SymIntN n))
-  , forall n. KnownPos n => GenSymSimple spec (RuntimeValue S (SymWordN n))
-  , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (Pantomime.IntN S n))
-  , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (Pantomime.WordN S n))
+  , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (IntN S n))
+  , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (WordN S n))
+  , forall pw. KnownWordSize pw => GenSymSimple spec (RuntimeValue S (IntPW S pw))
+  , forall pw. KnownWordSize pw => GenSymSimple spec (RuntimeValue S (WordPW S pw))
   ) => RuntimeGenSymSimple spec
 
 instance
   ( GenSymSimple spec (RuntimeValue S SymInteger)
   , forall eb sb. ValidFP eb sb => GenSymSimple spec (RuntimeValue S (SymFP eb sb))
-  , forall n. KnownPos n => GenSymSimple spec (RuntimeValue S (SymIntN n))
-  , forall n. KnownPos n => GenSymSimple spec (RuntimeValue S (SymWordN n))
-  , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (Pantomime.IntN S n))
-  , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (Pantomime.WordN S n))
+  , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (IntN S n))
+  , forall n. KnownNat n => GenSymSimple spec (RuntimeValue S (WordN S n))
+  , forall pw. KnownWordSize pw => GenSymSimple spec (RuntimeValue S (IntPW S pw))
+  , forall pw. KnownWordSize pw => GenSymSimple spec (RuntimeValue S (WordPW S pw))
   ) => RuntimeGenSymSimple spec
 
 instance

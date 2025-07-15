@@ -1,19 +1,20 @@
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE ExplicitNamespaces #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE InstanceSigs #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
 
 module Pantomime.Grisette.BitVector
   ( IntN (..)
+  , binaryI
+  , unaryI
+  , withSizeI
+
   , WordN (..)
+  , binaryW
+  , unaryW
+  , withSizeW
   ) where
 
 import GHC.TypeNats (type (<=), type (+), Natural, KnownNat, natVal)
+import GHC.Prim.Exception (raiseDivZero)
 
 import Grisette qualified (SizedBV (..))
 import Grisette
@@ -38,6 +39,7 @@ import Grisette
   , SymWordN
   , SymIntN
   , SymInteger
+  , BitCast (..)
   , true
   , false
   )
@@ -51,6 +53,7 @@ import Grisette.Unified
 
 import Data.Bits (Bits (..), FiniteBits (..))
 import Data.Data (Proxy(..))
+import Data.Bifunctor (Bifunctor(..))
 
 import Pantomime.Dict (withSize, Dict (..), unsafeDict)
 import Pantomime.Grisette.SizedBV
@@ -247,7 +250,7 @@ instance (DecideEvalMode mode, KnownNat n, KnownNat n')
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymWordN n) (IntN S n') where
   symFromIntegral value = withSizeI $ symFromIntegral value
 
-instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (IntN S n') (SymWordN n) where
+instance (KnownNat n, 1 <= n', KnownNat n') => SymFromIntegral (IntN S n) (SymWordN n') where
   symFromIntegral = \case
     IntZ -> 0
     IntP value -> symFromIntegral value
@@ -255,7 +258,7 @@ instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (IntN S n') (SymWo
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymIntN n) (IntN S n') where
   symFromIntegral value = withSizeI $ symFromIntegral value
 
-instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (IntN S n') (SymIntN n) where
+instance (KnownNat n, 1 <= n', KnownNat n') => SymFromIntegral (IntN S n) (SymIntN n') where
   symFromIntegral = \case
     IntZ -> 0
     IntP value -> symFromIntegral value
@@ -376,6 +379,36 @@ instance KnownNat n => GenSymSimple () (IntN S n) where
   simpleFresh spec = withSize @n
     (pure IntZ)
     (IntP <$> simpleFresh spec)
+
+instance KnownNat n => Enum (IntN C n) where
+  fromEnum = \case
+    IntZ -> 0
+    IntP value -> fromEnum value
+  toEnum value = withSizeI $ toEnum value
+
+instance KnownNat n => Real (IntN C n) where
+  toRational = \case
+    IntZ -> 0
+    IntP value -> toRational value
+
+instance KnownNat n => Integral (IntN C n) where
+  quotRem = \cases
+    IntZ IntZ -> raiseDivZero
+    (IntP lhs) (IntP rhs) -> bimap IntP IntP $ quotRem lhs rhs
+
+  toInteger = \case
+    IntZ -> 0
+    IntP value -> toInteger value
+
+instance (DecideEvalMode mode, KnownNat n) => BitCast (WordN mode n) (IntN mode n) where
+  bitCast = \case
+    WordZ -> IntZ
+    WordP value -> do
+      let op = withMode @mode bitCast bitCast
+      IntP $ op value
+
+instance BitCast (IntN mode n) (IntN mode n) where
+  bitCast = id
 
 -- | Sized word primitive.
 --
@@ -566,7 +599,7 @@ instance (DecideEvalMode mode, KnownNat n, KnownNat n') => SymFromIntegral (IntN
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymWordN n) (WordN S n') where
   symFromIntegral value = withSizeW $ symFromIntegral value
 
-instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (WordN S n') (SymWordN n) where
+instance (KnownNat n, 1 <= n', KnownNat n') => SymFromIntegral (WordN S n) (SymWordN n') where
   symFromIntegral = \case
     WordZ -> 0
     WordP value -> symFromIntegral value
@@ -574,7 +607,7 @@ instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (WordN S n') (SymW
 instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (SymIntN n) (WordN S n') where
   symFromIntegral value = withSizeW $ symFromIntegral value
 
-instance (KnownNat n, 1 <= n, KnownNat n') => SymFromIntegral (WordN S n') (SymIntN n) where
+instance (KnownNat n, 1 <= n', KnownNat n') => SymFromIntegral (WordN S n) (SymIntN n') where
   symFromIntegral = \case
     WordZ -> 0
     WordP value -> symFromIntegral value
@@ -695,6 +728,36 @@ instance KnownNat n => GenSymSimple () (WordN S n) where
   simpleFresh spec = withSize @n
     (pure WordZ)
     (WordP <$> simpleFresh spec)
+
+instance KnownNat n => Enum (WordN C n) where
+  fromEnum = \case
+    WordZ -> 0
+    WordP value -> fromEnum value
+  toEnum value = withSizeW $ toEnum value
+
+instance KnownNat n => Real (WordN C n) where
+  toRational = \case
+    WordZ -> 0
+    WordP value -> toRational value
+
+instance KnownNat n => Integral (WordN C n) where
+  quotRem = \cases
+    WordZ WordZ -> raiseDivZero
+    (WordP lhs) (WordP rhs) -> bimap WordP WordP $ quotRem lhs rhs
+
+  toInteger = \case
+    WordZ -> 0
+    WordP value -> toInteger value
+
+instance (DecideEvalMode mode, KnownNat n) => BitCast (IntN mode n) (WordN mode n) where
+  bitCast = \case
+    IntZ -> WordZ
+    IntP value -> do
+      let op = withMode @mode bitCast bitCast
+      WordP $ op value
+
+instance BitCast (WordN mode n) (WordN mode n) where
+  bitCast = id
 
 instance (DecideEvalMode mode, KnownNat n) => SignConversion (WordN mode n) (IntN mode n) where
   toSigned = \case

@@ -1,7 +1,5 @@
 {-# LANGUAGE MagicHash #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE TypeAbstractions #-}
+
 module Pantomime.Clash.Unsigned
   ( clashInterp
   ) where
@@ -40,10 +38,17 @@ import Control.Monad.Except (MonadError(..))
 
 import Data.Typeable (cast)
 
-import Data.Bits (Bits (..))
+import Data.Bits (Bits (complement, xor, (.&.), (.|.)))
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
+  ( SymBool
+  , SymEq (..)
+  , SymOrd (..)
+  , SymFromIntegral (..)
+  , mrgLiftA2
+  , mrgIte
+  )
 
 import Pantomime.Value
 import Pantomime.MonadEval
@@ -51,7 +56,7 @@ import Pantomime.Runtime
 import Pantomime.Util
 import Pantomime.WordSize
 import Pantomime.Clash.Util
-import Pantomime.Grisette.BitVector qualified as Pantomime
+import Pantomime.Grisette.BitVector
 import Pantomime.Dict (normNumLitTy)
 
 import Language.Haskell.TH qualified as TH
@@ -101,7 +106,7 @@ unBinary
   :: forall es ws
    . Error EvalError :> es
   => KnownWordSize ws
-  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n -> Pantomime.WordN S n)
+  => (forall n. KnownNat n => WordN S n -> WordN S n -> WordN S n)
   -> TyCon
   -> Value (Eff es) ws
 -- TODO: It is insanely ugly and error prone to define interpretations like
@@ -111,11 +116,11 @@ unBinary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
     Cast' _ (Data nat) -> pure . Fun (mkTyConApp unTyCon [sizeTy]) $ \case
       Opaque' lty lhs -> pure . Fun (mkTyConApp unTyCon [sizeTy]) $ \case
         Opaque' _rty rhs -> do
-          size <- whyFail' IllTyped $ concreteNat nat
+          size <- whyFail IllTyped $ concreteNat nat
           SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          lhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
-          rhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) rhs
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S n)) lhs
+          rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S n)) rhs
 
           let result = mrgLiftA2 op lhs' rhs'
           pure $ Opaque' lty result
@@ -133,17 +138,17 @@ unUnary
   :: forall es ws
    . Error EvalError :> es
   => KnownWordSize ws
-  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n)
+  => (forall n. KnownNat n => WordN S n -> WordN S n)
   -> TyCon
   -> Value (Eff es) ws
 unUnary op unTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
   Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ (Data nat) -> pure . Fun (mkTyConApp unTyCon [sizeTy]) $ \case
       Opaque' ty value -> do
-        size <- whyFail' IllTyped $ concreteNat nat
+        size <- whyFail IllTyped $ concreteNat nat
         SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-        value' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S n)) value
 
         let result = op <$> value'
         pure $ Opaque' ty result
@@ -156,24 +161,24 @@ unEquality
   :: forall es ws
    . Error EvalError :> es
   => KnownWordSize ws
-  => (forall n. KnownNat n => Pantomime.WordN S n -> Pantomime.WordN S n -> SymBool)
+  => (forall n. KnownNat n => WordN S n -> WordN S n -> SymBool)
   -> TyCon
   -> Value (Eff es) ws
 unEquality cmp bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
   Ty size -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
     Opaque' _ lhs -> pure . Fun (mkTyConApp bvTyCon [size]) $ \case
       Opaque' _ rhs -> do
-        SomeNat @n _ <- whyFail' UnsupportedExpr $ do
+        SomeNat @n _ <- whyFail UnsupportedExpr $ do
           size' <- normNumLitTy size
           someNatVal size'
 
-        lhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
-        rhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) rhs
+        lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S n)) lhs
+        rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S n)) rhs
 
         let conditional = mrgLiftA2 cmp lhs' rhs'
         let tr = dataConToTag trueDataCon
         let fl = dataConToTag falseDataCon
-        let tag = (\c -> symIte c tr fl) <$> conditional
+        let tag = (\c -> mrgIte c tr fl) <$> conditional
         pure $ Data ADT
           { adtTyCon = boolTyCon
           , adtTyArgs = []
@@ -188,7 +193,7 @@ unShift
   :: forall es ws
    . Error EvalError :> es
   => KnownWordSize ws
-  => (forall n. KnownNat n => Pantomime.WordN S n -> SymInt ws -> Pantomime.WordN S n)
+  => (forall n. KnownNat n => WordN S n -> IntPW S ws -> WordN S n)
   -> TyCon
   -> Value (Eff es) ws
 unShift op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
@@ -196,13 +201,13 @@ unShift op bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \case
     Cast' _ (Data nat) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
       Opaque' ty lhs -> pure . Fun intTy $ \case
         Data adt -> do
-          size <- whyFail' IllTyped $ concreteNat nat
+          size <- whyFail IllTyped $ concreteNat nat
           SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
-          lhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) lhs
-          fields <- whyFail' IllTyped $ adtDataConFields adt intDataCon
+          lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S n)) lhs
+          fields <- whyFail IllTyped $ adtDataConFields adt intDataCon
           rhs <- case fields of
-            [Primitive (Int rhs)] -> pure $ SymInt <$> rhs
+            [Primitive (Int rhs)] -> pure rhs
             _ -> throwError_ IllTyped
 
           let result = liftA2 op lhs' rhs
@@ -436,7 +441,7 @@ interpShiftL
 interpShiftL = do
   var <- lookupThId 'shiftL#
   bvTyCon <- lookupThTyCon ''BitVector
-  let value = unShift symShiftL' bvTyCon
+  let value = unShift shiftL bvTyCon
   pure (var, value)
 
 interpShiftR
@@ -451,7 +456,7 @@ interpShiftR
 interpShiftR = do
   var <- lookupThId 'shiftR#
   bvTyCon <- lookupThTyCon ''BitVector
-  let value = unShift symShiftRL' bvTyCon
+  let value = unShift shiftRL bvTyCon
   pure (var, value)
 
 interpFromInteger
@@ -479,7 +484,7 @@ fromIntegerValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \
   Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ (Data nat) ->  pure . Fun integerTy $ \case
       Data adt -> do
-        size <- whyFail' IllTyped $ concreteNat nat
+        size <- whyFail IllTyped $ concreteNat nat
         SomeNat @n _ <- pure $ TypeNats.someNatVal size
 
         let condIS = adtIsDataCon adt integerISDataCon
@@ -503,7 +508,7 @@ fromIntegerValue bvTyCon = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \
               , (condIN, valueIN)
               ]
 
-        let invalid :: RuntimeValue S (Pantomime.WordN S n)
+        let invalid :: RuntimeValue S (WordN S n)
             invalid = throwError Invalid
 
         let foldl'' acc xs f = foldl' f acc xs
@@ -604,7 +609,7 @@ sizeValue unTyCon = Fun (mkNatTyVarTy alphaTyVar) $ \case
   Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ (Data adt) -> pure . Fun (mkTyConApp unTyCon [sizeTy]) $ \case
       Opaque' _ _ -> do
-        size <- whyFail' UnsupportedExpr $ concreteNat adt
+        size <- whyFail UnsupportedExpr $ concreteNat adt
         let size' = pure $ fromIntegral size
 
         pure $ Data ADT

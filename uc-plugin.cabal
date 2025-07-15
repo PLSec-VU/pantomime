@@ -107,6 +107,7 @@ library
     , containers
     , effectful-core >=2.5.1.0
     , ghc >=9.6.4
+    , ghc-prim
     , grisette >=0.11.0.0
     , microlens
     , mtl
@@ -171,6 +172,7 @@ executable uc-plugin-exe
     , containers
     , effectful-core >=2.5.1.0
     , ghc >=9.6.4
+    , ghc-prim
     , grisette >=0.11.0.0
     , microlens
     , mtl
@@ -226,6 +228,7 @@ test-suite uc-plugin-test
     , effectful-core >=2.5.1.0
     , ghc >=9.6.4
     , ghc-paths
+    , ghc-prim
     , grisette >=0.11.0.0
     , hspec
     , microlens

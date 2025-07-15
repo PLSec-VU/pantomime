@@ -1,15 +1,10 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DeriveLift #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE StandaloneDeriving #-}
 
 module Pantomime.Evaluate
   ( evaluate
@@ -20,15 +15,25 @@ import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
 
+import GHC.TypeLits (KnownNat)
 import GHC.Data.Maybe (rightToMaybe, catMaybes)
 
 import Control.Monad (forM)
 
-import Data.Functor ((<&>))
-import Data.Bits (Bits(..), (.^.))
+import Data.Bits (Bits((.&.), (.|.), complement), (.^.))
 import Data.Composition ((.:))
 
-import Grisette hiding (Fresh, Rec, (<+>))
+import Grisette
+  ( SymBool
+  , Mergeable (..)
+  , SymEq (..)
+  , SymOrd (..)
+  , PlainUnion (..)
+  , SignConversion (..)
+  , true
+  , symAnd
+  , mrgLiftA2, ITEOp (..)
+  )
 import Grisette.Unified (EvalModeTag (..))
 
 import Pantomime.Util
@@ -37,6 +42,8 @@ import Pantomime.Runtime
 import Pantomime.Value
 import Pantomime.Environment
 import Pantomime.MonadEval
+import Pantomime.Grisette.BitVector
+import Pantomime.Grisette.SizedBV
 
 import Effectful
 import Effectful.Error.Static (Error, throwError_)
@@ -165,7 +172,7 @@ evalAlt env scrut = \case
     let conditional = onlyBool $ adtIsDataCon scrut' dataCon
 
     -- Extend the environment with the field for each binder.
-    fields <- whyFail' IllTyped $ adtDataConFields scrut' dataCon
+    fields <- whyFail IllTyped $ adtDataConFields scrut' dataCon
     env' <- extendManyEnv env $ zip bndrs fields
 
     -- Evaluate the right-hand side with the extended environment.
@@ -361,216 +368,216 @@ evalPrimOp = \case
   OrdOp -> throwError_ UnsupportedExpr
   Int8ToIntOp -> unary $ toIntArch @8
   IntToInt8Op -> unary $ toIntSized @8
-  Int8NegOp -> unary $ negate @SymIntN8
-  Int8AddOp -> binary $ (+) @SymIntN8
-  Int8SubOp -> binary $ (-) @SymIntN8
-  Int8MulOp -> binary $ (*) @SymIntN8
+  Int8NegOp -> unary $ negate @(IntN S 8)
+  Int8AddOp -> binary $ (+) @(IntN S 8)
+  Int8SubOp -> binary $ (-) @(IntN S 8)
+  Int8MulOp -> binary $ (*) @(IntN S 8)
   Int8QuotOp -> throwError_ UnsupportedExpr
   Int8RemOp -> throwError_ UnsupportedExpr
   Int8QuotRemOp -> throwError_ UnsupportedExpr
-  Int8SllOp -> binary $ symShiftL' @SymIntN8
-  Int8SraOp -> binary $ symShiftRA' @SymIntN8
-  Int8SrlOp -> binary $ symShiftRL' @SymIntN8
-  Int8ToWord8Op -> unary $ toUnsigned @SymWordN8 @SymIntN8
-  Int8EqOp -> binary $ symEq @SymIntN8
-  Int8GeOp -> binary $ symGe @SymIntN8
-  Int8GtOp -> binary $ symGt @SymIntN8
-  Int8LeOp -> binary $ symLe @SymIntN8
-  Int8LtOp -> binary $ symLt @SymIntN8
-  Int8NeOp -> binary $ symNe @SymIntN8
+  Int8SllOp -> binary $ shiftL' @(IntN S 8)
+  Int8SraOp -> binary $ shiftRA' @(IntN S 8)
+  Int8SrlOp -> binary $ shiftRL' @(IntN S 8)
+  Int8ToWord8Op -> unary $ toUnsigned @(WordN S 8) @(IntN S 8)
+  Int8EqOp -> binary $ symEq @(IntN S 8)
+  Int8GeOp -> binary $ symGe @(IntN S 8)
+  Int8GtOp -> binary $ symGt @(IntN S 8)
+  Int8LeOp -> binary $ symLe @(IntN S 8)
+  Int8LtOp -> binary $ symLt @(IntN S 8)
+  Int8NeOp -> binary $ symNe @(IntN S 8)
   Word8ToWordOp -> unary $ toWordArch @8
   WordToWord8Op -> unary $ toWordSized @8
-  Word8AddOp -> binary $ (+) @SymWordN8
-  Word8SubOp -> binary $ (-) @SymWordN8
-  Word8MulOp -> binary $ (*) @SymWordN8
+  Word8AddOp -> binary $ (+) @(WordN S 8)
+  Word8SubOp -> binary $ (-) @(WordN S 8)
+  Word8MulOp -> binary $ (*) @(WordN S 8)
   Word8QuotOp -> throwError_ UnsupportedExpr
   Word8RemOp -> throwError_ UnsupportedExpr
   Word8QuotRemOp -> throwError_ UnsupportedExpr
-  Word8AndOp -> binary $ (.&.) @SymWordN8
-  Word8OrOp -> binary $ (.|.) @SymWordN8
-  Word8XorOp -> binary $ (.^.) @SymWordN8
-  Word8NotOp -> unary $ complement @SymWordN8
-  Word8SllOp -> binary $ symShiftL' @SymWordN8
-  Word8SrlOp -> binary $ symShiftRL' @SymWordN8
-  Word8ToInt8Op -> unary $ toSigned @SymWordN8 @SymIntN8
-  Word8EqOp -> binary $ symEq @SymWordN8
-  Word8GeOp -> binary $ symGe @SymWordN8
-  Word8GtOp -> binary $ symGt @SymWordN8
-  Word8LeOp -> binary $ symLe @SymWordN8
-  Word8LtOp -> binary $ symLt @SymWordN8
-  Word8NeOp -> binary $ symNe @SymWordN8
+  Word8AndOp -> binary $ (.&.) @(WordN S 8)
+  Word8OrOp -> binary $ (.|.) @(WordN S 8)
+  Word8XorOp -> binary $ (.^.) @(WordN S 8)
+  Word8NotOp -> unary $ complement @(WordN S 8)
+  Word8SllOp -> binary $ shiftL' @(WordN S 8)
+  Word8SrlOp -> binary $ shiftRL' @(WordN S 8)
+  Word8ToInt8Op -> unary $ toSigned @(WordN S 8) @(IntN S 8)
+  Word8EqOp -> binary $ symEq @(WordN S 8)
+  Word8GeOp -> binary $ symGe @(WordN S 8)
+  Word8GtOp -> binary $ symGt @(WordN S 8)
+  Word8LeOp -> binary $ symLe @(WordN S 8)
+  Word8LtOp -> binary $ symLt @(WordN S 8)
+  Word8NeOp -> binary $ symNe @(WordN S 8)
   Int16ToIntOp -> unary $ toIntArch @16
   IntToInt16Op -> unary $ toIntSized @16
-  Int16NegOp -> unary $ negate @SymIntN16
-  Int16AddOp -> binary $ (+) @SymIntN16
-  Int16SubOp -> binary $ (-) @SymIntN16
-  Int16MulOp -> binary $ (*) @SymIntN16
+  Int16NegOp -> unary $ negate @(IntN S 16)
+  Int16AddOp -> binary $ (+) @(IntN S 16)
+  Int16SubOp -> binary $ (-) @(IntN S 16)
+  Int16MulOp -> binary $ (*) @(IntN S 16)
   Int16QuotOp -> throwError_ UnsupportedExpr
   Int16RemOp -> throwError_ UnsupportedExpr
   Int16QuotRemOp -> throwError_ UnsupportedExpr
-  Int16SllOp -> binary $ symShiftL' @SymIntN16
-  Int16SraOp -> binary $ symShiftRA' @SymIntN16
-  Int16SrlOp -> binary $ symShiftRL' @SymIntN16
-  Int16ToWord16Op -> unary $ toUnsigned @SymWordN16 @SymIntN16
-  Int16EqOp -> binary $ symEq @SymIntN16
-  Int16GeOp -> binary $ symGe @SymIntN16
-  Int16GtOp -> binary $ symGt @SymIntN16
-  Int16LeOp -> binary $ symLe @SymIntN16
-  Int16LtOp -> binary $ symLt @SymIntN16
-  Int16NeOp -> binary $ symNe @SymIntN16
+  Int16SllOp -> binary $ shiftL' @(IntN S 16)
+  Int16SraOp -> binary $ shiftRA' @(IntN S 16)
+  Int16SrlOp -> binary $ shiftRL' @(IntN S 16)
+  Int16ToWord16Op -> unary $ toUnsigned @(WordN S 16) @(IntN S 16)
+  Int16EqOp -> binary $ symEq @(IntN S 16)
+  Int16GeOp -> binary $ symGe @(IntN S 16)
+  Int16GtOp -> binary $ symGt @(IntN S 16)
+  Int16LeOp -> binary $ symLe @(IntN S 16)
+  Int16LtOp -> binary $ symLt @(IntN S 16)
+  Int16NeOp -> binary $ symNe @(IntN S 16)
   Word16ToWordOp -> unary $ toWordArch @16
   WordToWord16Op -> unary $ toWordSized @16
-  Word16AddOp -> binary $ (+) @SymWordN16
-  Word16SubOp -> binary $ (-) @SymWordN16
-  Word16MulOp -> binary $ (*) @SymWordN16
+  Word16AddOp -> binary $ (+) @(WordN S 16)
+  Word16SubOp -> binary $ (-) @(WordN S 16)
+  Word16MulOp -> binary $ (*) @(WordN S 16)
   Word16QuotOp -> throwError_ UnsupportedExpr
   Word16RemOp -> throwError_ UnsupportedExpr
   Word16QuotRemOp -> throwError_ UnsupportedExpr
-  Word16AndOp -> binary $ (.&.) @SymWordN16
-  Word16OrOp -> binary $ (.|.) @SymWordN16
-  Word16XorOp -> binary $ (.^.) @SymWordN16
-  Word16NotOp -> unary $ complement @SymWordN16
-  Word16SllOp -> binary $ symShiftL' @SymWordN16
-  Word16SrlOp -> binary $ symShiftRL' @SymWordN16
-  Word16ToInt16Op -> unary $ toSigned @SymWordN16 @SymIntN16
-  Word16EqOp -> binary $ symEq @SymWordN16
-  Word16GeOp -> binary $ symGe @SymWordN16
-  Word16GtOp -> binary $ symGt @SymWordN16
-  Word16LeOp -> binary $ symLe @SymWordN16
-  Word16LtOp -> binary $ symLt @SymWordN16
-  Word16NeOp -> binary $ symNe @SymWordN16
+  Word16AndOp -> binary $ (.&.) @(WordN S 16)
+  Word16OrOp -> binary $ (.|.) @(WordN S 16)
+  Word16XorOp -> binary $ (.^.) @(WordN S 16)
+  Word16NotOp -> unary $ complement @(WordN S 16)
+  Word16SllOp -> binary $ shiftL' @(WordN S 16)
+  Word16SrlOp -> binary $ shiftRL' @(WordN S 16)
+  Word16ToInt16Op -> unary $ toSigned @(WordN S 16) @(IntN S 16)
+  Word16EqOp -> binary $ symEq @(WordN S 16)
+  Word16GeOp -> binary $ symGe @(WordN S 16)
+  Word16GtOp -> binary $ symGt @(WordN S 16)
+  Word16LeOp -> binary $ symLe @(WordN S 16)
+  Word16LtOp -> binary $ symLt @(WordN S 16)
+  Word16NeOp -> binary $ symNe @(WordN S 16)
   Int32ToIntOp -> unary $ toIntArch @32
   IntToInt32Op -> unary $ toIntSized @32
-  Int32NegOp -> unary $ negate @SymIntN32
-  Int32AddOp -> binary $ (+) @SymIntN32
-  Int32SubOp -> binary $ (-) @SymIntN32
-  Int32MulOp -> binary $ (*) @SymIntN32
+  Int32NegOp -> unary $ negate @(IntN S 32)
+  Int32AddOp -> binary $ (+) @(IntN S 32)
+  Int32SubOp -> binary $ (-) @(IntN S 32)
+  Int32MulOp -> binary $ (*) @(IntN S 32)
   Int32QuotOp -> throwError_ UnsupportedExpr
   Int32RemOp -> throwError_ UnsupportedExpr
   Int32QuotRemOp -> throwError_ UnsupportedExpr
-  Int32SllOp -> binary $ symShiftL' @SymIntN32
-  Int32SraOp -> binary $ symShiftRA' @SymIntN32
-  Int32SrlOp -> binary $ symShiftRL' @SymIntN32
-  Int32ToWord32Op -> unary $ toUnsigned @SymWordN32 @SymIntN32
-  Int32EqOp -> binary $ symEq @SymIntN32
-  Int32GeOp -> binary $ symGe @SymIntN32
-  Int32GtOp -> binary $ symGt @SymIntN32
-  Int32LeOp -> binary $ symLe @SymIntN32
-  Int32LtOp -> binary $ symLt @SymIntN32
-  Int32NeOp -> binary $ symNe @SymIntN32
+  Int32SllOp -> binary $ shiftL' @(IntN S 32)
+  Int32SraOp -> binary $ shiftRA' @(IntN S 32)
+  Int32SrlOp -> binary $ shiftRL' @(IntN S 32)
+  Int32ToWord32Op -> unary $ toUnsigned @(WordN S 32) @(IntN S 32)
+  Int32EqOp -> binary $ symEq @(IntN S 32)
+  Int32GeOp -> binary $ symGe @(IntN S 32)
+  Int32GtOp -> binary $ symGt @(IntN S 32)
+  Int32LeOp -> binary $ symLe @(IntN S 32)
+  Int32LtOp -> binary $ symLt @(IntN S 32)
+  Int32NeOp -> binary $ symNe @(IntN S 32)
   Word32ToWordOp -> unary $ toWordArch @32
   WordToWord32Op -> unary $ toWordSized @32
-  Word32AddOp -> binary $ (+) @SymWordN32
-  Word32SubOp -> binary $ (-) @SymWordN32
-  Word32MulOp -> binary $ (*) @SymWordN32
+  Word32AddOp -> binary $ (+) @(WordN S 32)
+  Word32SubOp -> binary $ (-) @(WordN S 32)
+  Word32MulOp -> binary $ (*) @(WordN S 32)
   Word32QuotOp -> throwError_ UnsupportedExpr
   Word32RemOp -> throwError_ UnsupportedExpr
   Word32QuotRemOp -> throwError_ UnsupportedExpr
-  Word32AndOp -> binary $ (.&.) @SymWordN32
-  Word32OrOp -> binary $ (.|.) @SymWordN32
-  Word32XorOp -> binary $ (.^.) @SymWordN32
-  Word32NotOp -> unary $ complement @SymWordN32
-  Word32SllOp -> binary $ symShiftL' @SymWordN32
-  Word32SrlOp -> binary $ symShiftRL' @SymWordN32
-  Word32ToInt32Op -> unary $ toSigned @SymWordN32 @SymIntN32
-  Word32EqOp -> binary $ symEq @SymWordN32
-  Word32GeOp -> binary $ symGe @SymWordN32
-  Word32GtOp -> binary $ symGt @SymWordN32
-  Word32LeOp -> binary $ symLe @SymWordN32
-  Word32LtOp -> binary $ symLt @SymWordN32
-  Word32NeOp -> binary $ symNe @SymWordN32
+  Word32AndOp -> binary $ (.&.) @(WordN S 32)
+  Word32OrOp -> binary $ (.|.) @(WordN S 32)
+  Word32XorOp -> binary $ (.^.) @(WordN S 32)
+  Word32NotOp -> unary $ complement @(WordN S 32)
+  Word32SllOp -> binary $ shiftL' @(WordN S 32)
+  Word32SrlOp -> binary $ shiftRL' @(WordN S 32)
+  Word32ToInt32Op -> unary $ toSigned @(WordN S 32) @(IntN S 32)
+  Word32EqOp -> binary $ symEq @(WordN S 32)
+  Word32GeOp -> binary $ symGe @(WordN S 32)
+  Word32GtOp -> binary $ symGt @(WordN S 32)
+  Word32LeOp -> binary $ symLe @(WordN S 32)
+  Word32LtOp -> binary $ symLt @(WordN S 32)
+  Word32NeOp -> binary $ symNe @(WordN S 32)
   Int64ToIntOp -> unary $ toIntArch @64
   IntToInt64Op -> unary $ toIntSized @64
-  Int64NegOp -> unary $ negate @SymIntN64
-  Int64AddOp -> binary $ (+) @SymIntN64
-  Int64SubOp -> binary $ (-) @SymIntN64
-  Int64MulOp -> binary $ (*) @SymIntN64
+  Int64NegOp -> unary $ negate @(IntN S 64)
+  Int64AddOp -> binary $ (+) @(IntN S 64)
+  Int64SubOp -> binary $ (-) @(IntN S 64)
+  Int64MulOp -> binary $ (*) @(IntN S 64)
   Int64QuotOp -> throwError_ UnsupportedExpr
   Int64RemOp -> throwError_ UnsupportedExpr
-  Int64SllOp -> binary $ symShiftL' @SymIntN64
-  Int64SraOp -> binary $ symShiftRA' @SymIntN64
-  Int64SrlOp -> binary $ symShiftRL' @SymIntN64
-  Int64ToWord64Op -> unary $ toUnsigned @SymWordN64 @SymIntN64
-  Int64EqOp -> binary $ symEq @SymIntN64
-  Int64GeOp -> binary $ symGe @SymIntN64
-  Int64GtOp -> binary $ symGt @SymIntN64
-  Int64LeOp -> binary $ symLe @SymIntN64
-  Int64LtOp -> binary $ symLt @SymIntN64
-  Int64NeOp -> binary $ symNe @SymIntN64
+  Int64SllOp -> binary $ shiftL' @(IntN S 64)
+  Int64SraOp -> binary $ shiftRA' @(IntN S 64)
+  Int64SrlOp -> binary $ shiftRL' @(IntN S 64)
+  Int64ToWord64Op -> unary $ toUnsigned @(WordN S 64) @(IntN S 64)
+  Int64EqOp -> binary $ symEq @(IntN S 64)
+  Int64GeOp -> binary $ symGe @(IntN S 64)
+  Int64GtOp -> binary $ symGt @(IntN S 64)
+  Int64LeOp -> binary $ symLe @(IntN S 64)
+  Int64LtOp -> binary $ symLt @(IntN S 64)
+  Int64NeOp -> binary $ symNe @(IntN S 64)
   Word64ToWordOp -> unary $ toWordArch @64
   WordToWord64Op -> unary $ toWordSized @64
-  Word64AddOp -> binary $ (+) @SymWordN64
-  Word64SubOp -> binary $ (-) @SymWordN64
-  Word64MulOp -> binary $ (*) @SymWordN64
+  Word64AddOp -> binary $ (+) @(WordN S 64)
+  Word64SubOp -> binary $ (-) @(WordN S 64)
+  Word64MulOp -> binary $ (*) @(WordN S 64)
   Word64QuotOp -> throwError_ UnsupportedExpr
   Word64RemOp -> throwError_ UnsupportedExpr
-  Word64AndOp -> binary $ (.&.) @SymWordN64
-  Word64OrOp -> binary $ (.|.) @SymWordN64
-  Word64XorOp -> binary $ (.^.) @SymWordN64
-  Word64NotOp -> unary $ complement @SymWordN64
-  Word64SllOp -> binary $ symShiftL' @SymWordN64
-  Word64SrlOp -> binary $ symShiftRL' @SymWordN64
-  Word64ToInt64Op -> unary $ toSigned @SymWordN64 @SymIntN64
-  Word64EqOp -> binary $ symEq @SymWordN64
-  Word64GeOp -> binary $ symGe @SymWordN64
-  Word64GtOp -> binary $ symGt @SymWordN64
-  Word64LeOp -> binary $ symLe @SymWordN64
-  Word64LtOp -> binary $ symLt @SymWordN64
-  Word64NeOp -> binary $ symNe @SymWordN64
-  IntAddOp -> binary $ (+) @(SymInt ws)
-  IntSubOp -> binary $ (-) @(SymInt ws)
-  IntMulOp -> binary $ (*) @(SymInt ws)
+  Word64AndOp -> binary $ (.&.) @(WordN S 64)
+  Word64OrOp -> binary $ (.|.) @(WordN S 64)
+  Word64XorOp -> binary $ (.^.) @(WordN S 64)
+  Word64NotOp -> unary $ complement @(WordN S 64)
+  Word64SllOp -> binary $ shiftL' @(WordN S 64)
+  Word64SrlOp -> binary $ shiftRL' @(WordN S 64)
+  Word64ToInt64Op -> unary $ toSigned @(WordN S 64) @(IntN S 64)
+  Word64EqOp -> binary $ symEq @(WordN S 64)
+  Word64GeOp -> binary $ symGe @(WordN S 64)
+  Word64GtOp -> binary $ symGt @(WordN S 64)
+  Word64LeOp -> binary $ symLe @(WordN S 64)
+  Word64LtOp -> binary $ symLt @(WordN S 64)
+  Word64NeOp -> binary $ symNe @(WordN S 64)
+  IntAddOp -> binary $ (+) @(IntPW S ws)
+  IntSubOp -> binary $ (-) @(IntPW S ws)
+  IntMulOp -> binary $ (*) @(IntPW S ws)
   IntMul2Op -> throwError_ UnsupportedExpr
   IntMulMayOfloOp -> throwError_ UnsupportedExpr
   IntQuotOp -> throwError_ UnsupportedExpr
   IntRemOp -> throwError_ UnsupportedExpr
   IntQuotRemOp -> throwError_ UnsupportedExpr
-  IntAndOp -> binary $ (.&.) @(SymInt ws)
-  IntOrOp -> binary $ (.|.) @(SymInt ws)
-  IntXorOp -> binary $ (.^.) @(SymInt ws)
-  IntNotOp -> unary $ complement @(SymInt ws)
-  IntNegOp -> unary $ negate @(SymInt ws)
+  IntAndOp -> binary $ (.&.) @(IntPW S ws)
+  IntOrOp -> binary $ (.|.) @(IntPW S ws)
+  IntXorOp -> binary $ (.^.) @(IntPW S ws)
+  IntNotOp -> unary $ complement @(IntPW S ws)
+  IntNegOp -> unary $ negate @(IntPW S ws)
   IntAddCOp -> throwError_ UnsupportedExpr
   IntSubCOp -> throwError_ UnsupportedExpr
-  IntGtOp -> binary $ symGt @(SymInt ws)
-  IntGeOp -> binary $ symGe @(SymInt ws)
-  IntEqOp -> binary $ symEq @(SymInt ws)
-  IntNeOp -> binary $ symNe @(SymInt ws)
-  IntLtOp -> binary $ symLt @(SymInt ws)
-  IntLeOp -> binary $ symLe @(SymInt ws)
+  IntGtOp -> binary $ symGt @(IntPW S ws)
+  IntGeOp -> binary $ symGe @(IntPW S ws)
+  IntEqOp -> binary $ symEq @(IntPW S ws)
+  IntNeOp -> binary $ symNe @(IntPW S ws)
+  IntLtOp -> binary $ symLt @(IntPW S ws)
+  IntLeOp -> binary $ symLe @(IntPW S ws)
   ChrOp -> throwError_ UnsupportedExpr
-  IntToWordOp -> unary $ toUnsigned @(SymWord ws) @(SymInt ws)
+  IntToWordOp -> unary $ toUnsigned @(WordPW S ws) @(IntPW S ws)
   IntToFloatOp -> throwError_ UnsupportedExpr
   IntToDoubleOp -> throwError_ UnsupportedExpr
   WordToFloatOp -> throwError_ UnsupportedExpr
   WordToDoubleOp -> throwError_ UnsupportedExpr
-  IntSllOp -> binary $ symShiftL' @(SymInt ws)
-  IntSraOp -> binary $ symShiftRA' @(SymInt ws)
-  IntSrlOp -> binary $ symShiftRL' @(SymInt ws)
-  WordAddOp -> binary $ (+) @(SymWord ws)
+  IntSllOp -> binary $ shiftL' @(IntPW S ws)
+  IntSraOp -> binary $ shiftRA' @(IntPW S ws)
+  IntSrlOp -> binary $ shiftRL' @(IntPW S ws)
+  WordAddOp -> binary $ (+) @(WordPW S ws)
   WordAddCOp -> throwError_ UnsupportedExpr
   WordSubCOp -> throwError_ UnsupportedExpr
   WordAdd2Op -> throwError_ UnsupportedExpr
-  WordSubOp -> binary $ (-) @(SymWord ws)
-  WordMulOp -> binary $ (*) @(SymWord ws)
+  WordSubOp -> binary $ (-) @(WordPW S ws)
+  WordMulOp -> binary $ (*) @(WordPW S ws)
   WordMul2Op -> throwError_ UnsupportedExpr
   WordQuotOp -> throwError_ UnsupportedExpr
   WordRemOp -> throwError_ UnsupportedExpr
   WordQuotRemOp -> throwError_ UnsupportedExpr
   WordQuotRem2Op -> throwError_ UnsupportedExpr
-  WordAndOp -> binary $ (.&.) @(SymWord ws)
-  WordOrOp -> binary $ (.|.) @(SymWord ws)
-  WordXorOp -> binary $ (.^.) @(SymWord ws)
-  WordNotOp -> unary $ complement @(SymWord ws)
-  WordSllOp -> binary $ symShiftL' @(SymWord ws)
-  WordSrlOp -> binary $ symShiftRL' @(SymWord ws)
-  WordToIntOp -> unary $ toSigned @(SymWord ws) @(SymInt ws)
-  WordGtOp -> binary $ symGt @(SymWord ws)
-  WordGeOp -> binary $ symGe @(SymWord ws)
-  WordEqOp -> binary $ symEq @(SymWord ws)
-  WordNeOp -> binary $ symNe @(SymWord ws)
-  WordLtOp -> binary $ symLt @(SymWord ws)
-  WordLeOp -> binary $ symLe @(SymWord ws)
+  WordAndOp -> binary $ (.&.) @(WordPW S ws)
+  WordOrOp -> binary $ (.|.) @(WordPW S ws)
+  WordXorOp -> binary $ (.^.) @(WordPW S ws)
+  WordNotOp -> unary $ complement @(WordPW S ws)
+  WordSllOp -> binary $ shiftL' @(WordPW S ws)
+  WordSrlOp -> binary $ shiftRL' @(WordPW S ws)
+  WordToIntOp -> unary $ toSigned @(WordPW S ws) @(IntPW S ws)
+  WordGtOp -> binary $ symGt @(WordPW S ws)
+  WordGeOp -> binary $ symGe @(WordPW S ws)
+  WordEqOp -> binary $ symEq @(WordPW S ws)
+  WordNeOp -> binary $ symNe @(WordPW S ws)
+  WordLtOp -> binary $ symLt @(WordPW S ws)
+  WordLeOp -> binary $ symLe @(WordPW S ws)
   TagToEnumOp -> pure . Fun (tyVarKind alphaTyVar) $ \case
     Ty ty -> pure . Fun intPrimTy $ \case
       Primitive (Int tag) -> do
@@ -605,64 +612,62 @@ evalPrimOp = \case
         _ -> throwError_ IllTyped
       _ -> throwError_ IllTyped
 
-    symShiftRA'
+    shiftRA'
       :: forall bv
-       . KnownBitSize bv
-      => SymFromIntegral bv (SymIntN (BitSize bv))
-      => SymFromIntegral (SymIntN (BitSize bv)) bv
+       . Shift bv
+      => EvalMode bv ~ S
       => bv
-      -> SymInt ws
+      -> IntPW S ws
       -> bv
-    symShiftRA' = symShiftRA
+    shiftRA' = shiftRA
 
-    symShiftRL'
+    shiftRL'
       :: forall bv
-       . KnownBitSize bv
-      => SymFromIntegral bv (SymWordN (BitSize bv))
-      => SymFromIntegral (SymWordN (BitSize bv)) bv
+       . Shift bv
+      => EvalMode bv ~ S
       => bv
-      -> SymInt ws
+      -> IntPW S ws
       -> bv
-    symShiftRL' = symShiftRL
+    shiftRL' = shiftRL
 
-    symShiftL'
+    shiftL'
       :: forall bv
-       . SymFromIntegral (SymInt ws) bv
-      => SymShift bv
+       . Shift bv
+      => EvalMode bv ~ S
       => bv
-      -> SymInt ws
+      -> IntPW S ws
       -> bv
-    symShiftL' = symShiftL @bv @ws
+    shiftL' = shiftL
 
-    toIntArch :: KnownPos i => SymIntN i -> SymInt ws
-    toIntArch = SymInt . sizedBVResize
+    toIntArch :: KnownNat i => IntN S i -> IntPW S ws
+    toIntArch = IntPW . sizedBVResize
 
-    toIntSized :: KnownPos i => SymInt ws -> SymIntN i
-    toIntSized = sizedBVResize . unSymInt
+    toIntSized :: KnownNat i => IntPW S ws -> IntN S i
+    toIntSized = sizedBVResize . unIntPW
 
-    toWordArch :: KnownPos i => SymWordN i -> SymWord ws
-    toWordArch = SymWord . sizedBVResize
+    toWordArch :: KnownNat i => WordN S i -> WordPW S ws
+    toWordArch = WordPW . sizedBVResize
 
-    toWordSized :: KnownPos i => SymWord ws -> SymWordN i
-    toWordSized = sizedBVResize . unSymWord
+    toWordSized :: KnownNat i => WordPW S ws -> WordN S i
+    toWordSized = sizedBVResize . unWordPW
 
-    symGe :: SymOrd a => a -> a -> SymInt ws
-    symGe lhs rhs = SymInt $ symIte (lhs .>= rhs) 1 0
+    symGe :: SymOrd a => a -> a -> IntPW S ws
+    symGe lhs rhs = IntPW $ symIte (lhs .>= rhs) 1 0
 
-    symGt :: SymOrd a => a -> a -> SymInt ws
-    symGt lhs rhs = SymInt $ symIte (lhs .> rhs) 1 0
+    symGt :: SymOrd a => a -> a -> IntPW S ws
+    symGt lhs rhs = IntPW $ symIte (lhs .> rhs) 1 0
 
-    symEq :: SymEq a => a -> a -> SymInt ws
-    symEq lhs rhs = SymInt $ symIte (lhs .== rhs) 1 0
+    symEq :: SymEq a => a -> a -> IntPW S ws
+    symEq lhs rhs = IntPW $ symIte (lhs .== rhs) 1 0
 
-    symNe :: SymEq a => a -> a -> SymInt ws
-    symNe lhs rhs = SymInt $ symIte (lhs ./= rhs) 1 0
+    symNe :: SymEq a => a -> a -> IntPW S ws
+    symNe lhs rhs = IntPW $ symIte (lhs ./= rhs) 1 0
 
-    symLt :: SymOrd a => a -> a -> SymInt ws
-    symLt lhs rhs = SymInt $ symIte (lhs .< rhs) 1 0
+    symLt :: SymOrd a => a -> a -> IntPW S ws
+    symLt lhs rhs = IntPW $ symIte (lhs .< rhs) 1 0
 
-    symLe :: SymOrd a => a -> a -> SymInt ws
-    symLe lhs rhs = SymInt $ symIte (lhs .<= rhs) 1 0
+    symLe :: SymOrd a => a -> a -> IntPW S ws
+    symLe lhs rhs = IntPW $ symIte (lhs .<= rhs) 1 0
 
 binary
   :: Error EvalError :> es
@@ -681,82 +686,82 @@ unary = pure . wrap . fmap @(RuntimeValue S)
 class Wrap ws a where
   wrap :: Error EvalError :> es => a -> Value (Eff es) ws
 
-instance Wrap ws (RuntimeValue S (SymInt ws)) where
-  wrap = Primitive . Int . fmap unSymInt
+instance Wrap ws (RuntimeValue S (IntPW S ws)) where
+  wrap = Primitive . Int
 
-instance Wrap ws (RuntimeValue S SymIntN8) where
+instance Wrap ws (RuntimeValue S (IntN S 8)) where
   wrap = Primitive . Int8
 
-instance Wrap ws (RuntimeValue S SymIntN16) where
+instance Wrap ws (RuntimeValue S (IntN S 16)) where
   wrap = Primitive . Int16
 
-instance Wrap ws (RuntimeValue S SymIntN32) where
+instance Wrap ws (RuntimeValue S (IntN S 32)) where
   wrap = Primitive . Int32
 
-instance Wrap ws (RuntimeValue S SymIntN64) where
+instance Wrap ws (RuntimeValue S (IntN S 64)) where
   wrap = Primitive . Int64
 
-instance KnownWordSize ws => Wrap ws (RuntimeValue S (SymWord ws)) where
-  wrap = Primitive . Word . fmap unSymWord
+instance Wrap ws (RuntimeValue S (WordPW S ws)) where
+  wrap = Primitive . Word
 
-instance Wrap ws (RuntimeValue S SymWordN8) where
+instance Wrap ws (RuntimeValue S (WordN S 8)) where
   wrap = Primitive . Word8
 
-instance Wrap ws (RuntimeValue S SymWordN16) where
+instance Wrap ws (RuntimeValue S (WordN S 16)) where
   wrap = Primitive . Word16
 
-instance Wrap ws (RuntimeValue S SymWordN32) where
+instance Wrap ws (RuntimeValue S (WordN S 32)) where
   wrap = Primitive . Word32
 
-instance Wrap ws (RuntimeValue S SymWordN64) where
+instance Wrap ws (RuntimeValue S (WordN S 64)) where
   wrap = Primitive . Word64
 
-instance Wrap ws b => Wrap ws (RuntimeValue S (SymInt ws) -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (IntPW S ws) -> b) where
   wrap f = Fun intPrimTy $ \case
-    Primitive (Int arg) -> pure $ wrap @ws (f $ arg <&> SymInt)
+    Primitive (Int arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S SymIntN8 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (IntN S 8) -> b) where
   wrap f = Fun int8PrimTy $ \case
     Primitive (Int8 arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S SymIntN16 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (IntN S 16) -> b) where
   wrap f = Fun int16PrimTy $ \case
     Primitive (Int16 arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S SymIntN32 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (IntN S 32) -> b) where
   wrap f = Fun int32PrimTy $ \case
     Primitive (Int32 arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S SymIntN64 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (IntN S 64) -> b) where
   wrap f = Fun int64PrimTy $ \case
     Primitive (Int64 arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S (SymWord ws) -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (WordPW S ws) -> b) where
   wrap f = Fun wordPrimTy $ \case
-    Primitive (Word arg) -> pure $ wrap @ws (f $ arg <&> SymWord)
+    Primitive (Word arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S SymWordN8 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (WordN S 8) -> b) where
   wrap f = Fun word8PrimTy $ \case
     Primitive (Word8 arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S SymWordN16 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (WordN S 16) -> b) where
   wrap f = Fun word16PrimTy $ \case
     Primitive (Word16 arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S SymWordN32 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (WordN S 32) -> b) where
   wrap f = Fun word32PrimTy $ \case
     Primitive (Word32 arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped
 
-instance Wrap ws b => Wrap ws (RuntimeValue S SymWordN64 -> b) where
+instance Wrap ws b => Wrap ws (RuntimeValue S (WordN S 64) -> b) where
   wrap f = Fun word64PrimTy $ \case
     Primitive (Word64 arg) -> pure $ wrap @ws (f arg)
     _ -> throwError_ IllTyped

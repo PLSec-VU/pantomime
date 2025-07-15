@@ -22,7 +22,7 @@ import Clash.Sized.Internal.BitVector
   )
 
 import Grisette.Unified (EvalModeTag (..))
-import Grisette hiding (SizedBV (..))
+import Grisette (SymBool, SymEq (..), mrgLiftA2, mrgIte)
 
 import Data.Typeable (cast)
 
@@ -33,7 +33,7 @@ import Pantomime.Runtime
 import Pantomime.Util
 import Pantomime.Clash.Util
 import Pantomime.Dict
-import Pantomime.Grisette.BitVector qualified as Pantomime
+import Pantomime.Grisette.BitVector
 import Pantomime.Grisette.SizedBV
 
 import Language.Haskell.TH qualified as TH
@@ -64,19 +64,19 @@ bitEquality
   :: forall es ws
    . Error EvalError :> es
   => KnownWordSize ws
-  => (Pantomime.WordN S 1 -> Pantomime.WordN S 1 -> SymBool)
+  => (WordN S 1 -> WordN S 1 -> SymBool)
   -> Type
   -> Value (Eff es) ws
 bitEquality cmp bitTy = Fun bitTy $ \case
   Opaque' _ lhs -> pure . Fun bitTy $ \case
     Opaque' _ rhs -> do
-      lhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) lhs
-      rhs' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S 1)) rhs
+      lhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S 1)) lhs
+      rhs' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S 1)) rhs
 
       let conditional = mrgLiftA2 cmp lhs' rhs'
       let tr = dataConToTag trueDataCon
       let fl = dataConToTag falseDataCon
-      let tag = (\c -> symIte c tr fl) <$> conditional
+      let tag = (\c -> mrgIte c tr fl) <$> conditional
       pure $ Data ADT
         { adtTyCon = boolTyCon
         , adtTyArgs = []
@@ -138,7 +138,7 @@ highValue
    . Type
   -> Value m ws
 highValue bitTy = do
-  let value :: Pantomime.WordN S 1
+  let value :: WordN S 1
       value = 1
   Opaque' bitTy $ pure value
 
@@ -161,7 +161,7 @@ lowValue
    . Type
   -> Value m ws
 lowValue bitTy = do
-  let value :: Pantomime.WordN S 1
+  let value :: WordN S 1
       value = 0
   Opaque' bitTy $ pure value
 
@@ -193,14 +193,14 @@ msbValue bvTyCon bitTy = Fun (mkTyVarTy $ setVarType alphaTyVar naturalTy) $ \ca
   Ty sizeTy -> pure . Fun cONSTRAINTKind $ \case
     Cast' _ (Data adt) -> pure . Fun (mkTyConApp bvTyCon [sizeTy]) $ \case
       Opaque' _ value -> do
-        size <- whyFail' UnsupportedExpr $ concreteNat adt
+        size <- whyFail UnsupportedExpr $ concreteNat adt
         SomeNat @n _ <- pure $ someNatVal size
 
-        value' <- whyFail' IllTyped $ cast @_ @(RuntimeValue S (Pantomime.WordN S n)) value
+        value' <- whyFail IllTyped $ cast @_ @(RuntimeValue S (WordN S n)) value
 
         SomeNat @idx _ <- pure . someNatVal $ size - 1
         Dict <- pure $ unsafeDict @(idx + 1 <= n)
-        let sliced :: RuntimeValue S (Pantomime.WordN S 1)
+        let sliced :: RuntimeValue S (WordN S 1)
             sliced = sizedBVSelect @_ @idx @1 @n <$> value'
 
         pure $ Opaque' bitTy sliced

@@ -259,7 +259,7 @@ unifyTypes
 unifyTypes tys = do
   let err = UnificationError tys
   let (lhs, rhs) = unzip tys
-  subst <- whyFail' err $ tcUnifyTys alwaysBindFun lhs rhs
+  subst <- whyFail err $ tcUnifyTys alwaysBindFun lhs rhs
   pure $ Unification subst emptyTM emptyDVarSet
 
 -- | Applies the unification map the the expression.
@@ -383,19 +383,17 @@ lookupClassInst
   => Type
   -> Eff es CoreExpr
 lookupClassInst ty = do
-  -- TODO: Maybe this should be called whyFail', once we get rid of the original
-  -- whyFail in this package.
-  let note :: Maybe a -> Eff es a
-      note = whyFail' $ LookupError ty
+  let whyFail' :: Maybe a -> Eff es a
+      whyFail' = whyFail $ LookupError ty
 
   -- Get the typeclass constructor of this type, if possible.
-  (tyCon, tyArgs) <- note $ splitTyConApp_maybe ty
-  tyClass <- note $ tyConClass_maybe tyCon
+  (tyCon, tyArgs) <- whyFail' $ splitTyConApp_maybe ty
+  tyClass <- whyFail' $ tyConClass_maybe tyCon
 
   -- Get the instance for this typeclass with supplied types, if possible.
   env <- getInstEnvs
   let eitherInst = lookupUniqueInstEnv env tyClass tyArgs
-  (clsInst, tys) <- note $ rightToMaybe eitherInst
+  (clsInst, tys) <- whyFail' $ rightToMaybe eitherInst
 
   -- Create an expression for the instance.
   let dict = Var $ instanceDFunId clsInst

@@ -47,8 +47,8 @@ import GHC.Tc.Utils.TcType (hasTyVarHead, isTyFamFree)
 import GHC.Types.TyThing (MonadThings(..))
 import GHC.TypeLits (SomeNat (..), someNatVal)
 
-import Grisette.SymPrim
-import Grisette.Unified (DecideEvalMode (..), EvalModeTag (..), GetIntN, GetWordN)
+import Grisette.SymPrim (SymBool)
+import Grisette.Unified (DecideEvalMode (..), EvalModeTag (..))
 import Grisette.Lib.Control.Monad.Except (mrgThrowError)
 import Grisette
   ( Solvable (..)
@@ -77,7 +77,7 @@ import Pantomime.Runtime
 import Pantomime.MonadEval
 import Pantomime.Dict
 import Pantomime.Primitive
-import Pantomime.Grisette.BitVector qualified as Pantomime
+import Pantomime.Grisette.BitVector
 
 import Effectful
 import Effectful.Error.Static (Error, throwError_, runErrorNoCallStackWith, catchError)
@@ -258,7 +258,7 @@ instance
       pure $ Co lco
     (Opaque' @_ @_ @l lty lhs, Opaque' @_ @_ @r rty rhs) -> do
       unless (lty `eqType` rty) $ throwError_ IllTyped
-      Typeable.Refl <- whyFail' IllTyped $ Typeable.eqT @l @r
+      Typeable.Refl <- whyFail IllTyped $ Typeable.eqT @l @r
       Opaque' lty <$> evalIte cond lhs rhs
     _ -> throwError_ IllTyped
 
@@ -290,7 +290,7 @@ instance
 
     (Opaque' @_ @_ @l lty lhs, Opaque' @_ @_ @r rty rhs) -> do
       unless (lty `eqType` rty) $ throwError_ IllTyped
-      Typeable.Refl <- whyFail' IllTyped $ Typeable.eqT @l @r
+      Typeable.Refl <- whyFail IllTyped $ Typeable.eqT @l @r
       weakEq lhs rhs
 
     (Poly lty lhs, Poly rty rhs) -> do
@@ -350,7 +350,7 @@ mkCast' c v = case (optimiseCo c, v) of
     unless (tyCon == adtTyCon adt) $ throwError_ IllTyped
 
     -- Gather all DataCons in the ADT.
-    dataCons <- whyFail' IllTyped $ tyConDataCons_maybe tyCon
+    dataCons <- whyFail IllTyped $ tyConDataCons_maybe tyCon
 
     -- Cast the fields of every DataCon.
     fields <- forM dataCons $ \dataCon -> do
@@ -364,7 +364,7 @@ mkCast' c v = case (optimiseCo c, v) of
       let coercions = liftCoSubstWith role tyVars coArgs <$> tyArgs
 
       -- Cast the fields of the ADT for the current DataCon.
-      fields <- whyFail' IllTyped $ adtDataConFields adt dataCon
+      fields <- whyFail IllTyped $ adtDataConFields adt dataCon
       forM (zip coercions fields) $ uncurry mkCast'
 
     -- The type arguments are now simply the result type of the coercions.
@@ -406,7 +406,7 @@ optimiseCo = optCoercion (OptCoercionOpts True) emptySubst
 -- | Unintepreted identifier.
 --
 -- This may represent any abstract value, such as a function pointer.
-type Ident mode = GetWordN mode 64
+type Ident mode = WordN mode 64
 
 -- TODO: Maybe move this somewhere else? This is more of a utility function.
 eqTyConRole :: TyCon -> Maybe Role
@@ -498,7 +498,7 @@ freshBitVector (ty, spec) = do
   unless (tyCon == bvTyCon) do
     throwError_ UnsupportedExpr
 
-  bv :: RuntimeValue S (Pantomime.WordN S n) <- simpleFresh spec
+  bv :: RuntimeValue S (WordN S n) <- simpleFresh spec
   pure $ Opaque' ty bv
 
 -- TODO: This is a lot of code duplication. Can't we squash this one with
@@ -529,7 +529,7 @@ freshUnsigned (ty, spec) = do
   unless (tyCon == bvTyCon) do
     throwError_ UnsupportedExpr
 
-  bv :: RuntimeValue S (Pantomime.WordN S n) <- simpleFresh spec
+  bv :: RuntimeValue S (WordN S n) <- simpleFresh spec
   pure $ Opaque' ty bv
 
 freshSigned
@@ -558,7 +558,7 @@ freshSigned (ty, spec) = do
   unless (tyCon == bvTyCon) do
     throwError_ UnsupportedExpr
 
-  bv :: RuntimeValue S (Pantomime.IntN S n) <- simpleFresh spec
+  bv :: RuntimeValue S (IntN S n) <- simpleFresh spec
   pure $ Opaque' ty bv
 
 freshBit
@@ -584,7 +584,7 @@ freshBit (ty, spec) = do
   unless (tyCon == bvTyCon) do
     throwError_ UnsupportedExpr
 
-  bv :: RuntimeValue S (Pantomime.WordN S 1) <- simpleFresh spec
+  bv :: RuntimeValue S (WordN S 1) <- simpleFresh spec
   pure $ Opaque' ty bv
 
 freshTyFamInst
@@ -631,8 +631,8 @@ freshNewtype
   => (Type, spec)
   -> Eff es (Value (Eff es) ws)
 freshNewtype (ty, spec) = do
-  (tyCon, tys) <- whyFail' UnsupportedExpr $ tcSplitTyConApp_maybe ty
-  (ty', co) <- whyFail' UnsupportedExpr $ instNewTyCon_maybe tyCon tys
+  (tyCon, tys) <- whyFail UnsupportedExpr $ tcSplitTyConApp_maybe ty
+  (ty', co) <- whyFail UnsupportedExpr $ instNewTyCon_maybe tyCon tys
   value' <- evalFresh (ty', spec)
   let co' = mkSymCo co
   mkCast' co' value'
@@ -653,7 +653,7 @@ freshLambda
   => (Type, spec)
   -> Eff es (Value (Eff es) ws)
 freshLambda (ty, spec) = do
-  (_, _, argTy, resTy) <- whyFail' UnsupportedExpr $ splitFunTy_maybe ty
+  (_, _, argTy, resTy) <- whyFail UnsupportedExpr $ splitFunTy_maybe ty
   pure . Fun argTy $ \_ -> do
     evalFresh (resTy, spec)
 
@@ -669,7 +669,7 @@ freshForall
   => (Type, spec)
   -> Eff es (Value (Eff es) ws)
 freshForall (ty, spec) = do
-  (tyCoVar, resTy) <- whyFail' UnsupportedExpr $ splitForAllTyCoVar_maybe ty
+  (tyCoVar, resTy) <- whyFail UnsupportedExpr $ splitForAllTyCoVar_maybe ty
   let vars = shallowTyCoVarsOfType ty
   let subst = mkEmptySubst $ InScope vars
 
@@ -700,7 +700,7 @@ freshCoercion ty = do
   (tyCon, a, b) <- case tcSplitTyConApp_maybe ty of
     Just (tyCon, [_, _, a, b]) -> pure (tyCon, a, b)
     _ -> throwError_ UnsupportedExpr
-  role <- whyFail' UnsupportedExpr $ eqTyConRole tyCon
+  role <- whyFail UnsupportedExpr $ eqTyConRole tyCon
 
   -- TODO: In reality, shouldn't we only be able to construct valid coercions
   -- here. I guess otherwise, we would need to return Invalid. The problem is,
@@ -808,7 +808,7 @@ data ADT m ws where
     , adtFields :: [[Value m ws]]
     } -> ADT m ws
 
-instance KnownWordSize ws => Outputable (ADT m ws) where
+instance Outputable (ADT m ws) where
   ppr = ppr . adtType
 
 instance (Functor m, KnownWordSize ws) => EvalSym (ADT m ws) where
@@ -874,8 +874,8 @@ instance
       -- Both tags match the DataCon. We check for both, as we might collapse
       -- some branches if one of them does not match.
       isTag <- do
-        l <- weakEq (adtTag lhs) $ pure (con tag)
-        r <- weakEq (adtTag rhs) $ pure (con tag)
+        l <- weakEq (adtTag lhs) $ pure (fromInteger tag)
+        r <- weakEq (adtTag rhs) $ pure (fromInteger tag)
         pure $ l .&& r
 
       -- All fields are equal.
@@ -899,14 +899,14 @@ instance
   ) => EvalGenSym (Eff es) (Type, spec) (ADT (Eff es) ws) where
   evalFresh (ty, spec) = do
     -- Ensure this is a ADT we can construct
-    (tyCon, tyArgs) <- whyFail' UnsupportedExpr $ tcSplitTyConApp_maybe ty
+    (tyCon, tyArgs) <- whyFail UnsupportedExpr $ tcSplitTyConApp_maybe ty
     let isADT = or
           [ isDataTyCon tyCon
           , isUnboxedTupleTyCon tyCon
           , isUnboxedSumTyCon tyCon
           ]
     unless isADT $ throwError_ UnsupportedExpr
-    dataCons <- whyFail' UnsupportedExpr $ tyConDataCons_maybe tyCon
+    dataCons <- whyFail UnsupportedExpr $ tyConDataCons_maybe tyCon
     -- TODO: This will loop infinitely for recursive types. We need to resolve
     -- that somehow.
 
@@ -968,7 +968,7 @@ adtFromDataCon dataCon tyArgs fields = do
   let tyCon = dataConTyCon dataCon
 
   -- Gather all DataCons for populating the ADT.
-  dataCons <- whyFail' IllTyped $ tyConDataCons_maybe tyCon
+  dataCons <- whyFail IllTyped $ tyConDataCons_maybe tyCon
 
   -- Populate the remaining fields with fresh values.
   fields' <- forM dataCons \dataCon' -> if
@@ -1003,8 +1003,8 @@ adtIsDataCon
   -> DataCon
   -> RuntimeValue S SymBool
 adtIsDataCon adt dataCon = do
-  let tag = dataConToTag dataCon
-  (.== con tag) <$> adtTag adt
+  let tag = dataConToTag @S dataCon
+  (.== tag) <$> adtTag adt
 
 -- | Get the fields of the ADT that match the DataCon.
 --
@@ -1020,22 +1020,23 @@ adtDataConFields adt dataCon = do
   let tag = dataConToTag @C @ws dataCon
   adtFields adt !? fromIntegral tag
 
-type Tag mode ws = RuntimeValue mode (GetIntN mode (WordBits ws))
+type Tag mode ws = RuntimeValue mode (IntPW mode ws)
 
 -- | Convert a DataCon into an SMT solvable Tag.
 dataConToTag
-  :: Num (GetIntN mode (WordBits ws))
+  :: DecideEvalMode mode
+  => KnownWordSize ws
   => DataCon
   -- TODO: I really want to return a Tag here, but it is a bit ugly... That is,
   -- the tag doesn't need to be in the monad in this instance.
-  -> GetIntN mode (WordBits ws)
+  -> IntPW mode ws
 dataConToTag = fromIntegral . dataConTagZ
 
 -- | Get the DataCon from a Tag and the Type that should match the .
 tagToDataCon
   :: forall ws
    . KnownWordSize ws
-  => IntN (WordBits ws)
+  => IntPW C ws
   -> TyCon
   -> Maybe DataCon
 tagToDataCon tag tyCon = do
@@ -1048,7 +1049,7 @@ freshTag
   :: forall es ws spec
    . KnownWordSize ws
   => Fresh :> es
-  => GenSymSimple spec (RuntimeValue S (SymIntN (WordBits ws)))
+  => GenSymSimple spec (Tag S ws)
   => (TyCon, spec)
   -> Eff es (Tag S ws)
 freshTag (tyCon, spec) = do

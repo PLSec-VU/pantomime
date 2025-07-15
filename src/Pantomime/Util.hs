@@ -5,10 +5,6 @@ module Pantomime.Util
   , foldlBy
 
   , whyFail
-  , whyFail'
-  , maybeM
-  , unwrap
-  , (??=)
 
   , accumL
   , (%~~)
@@ -22,10 +18,7 @@ import GHC.Core.Multiplicity (Scaled(..))
 
 import Data.Foldable (foldrM)
 
-import Control.Applicative
 import Control.Monad (foldM, foldM_)
-import Control.Monad.Except (MonadError (..))
-import Control.Monad.Trans.Maybe
 import Control.Monad.State (state, runState)
 
 import Lens.Micro (Lens)
@@ -74,28 +67,8 @@ foldlBy :: Foldable t => b -> t a -> (b -> a -> b) -> b
 foldlBy acc xs f = foldl' f acc xs
 
 -- | Annotate why there was no result.
-whyFail :: MonadError e m => e -> Maybe a -> m a
-whyFail err = maybe (throwError err) pure
-
--- | Annotate why there was no result.
-whyFail' :: HasCallStack => Error e :> es => e -> Maybe a -> Eff es a
-whyFail' err = maybe (throwError_ err) pure
-
--- | Convert the given maybe into an alternative.
-maybeM :: Alternative m => Maybe a -> m a
-maybeM = maybe empty pure
-
--- | Unwrap the given monad, calling fail if the computation failed.
-unwrap :: MonadFail m => MaybeT m a -> String -> m a
-unwrap m str = runMaybeT m >>= \case
-  Just a -> return a
-  Nothing -> fail str
-
-infixl 0 ??=
-
--- | An infix version of [`unwrap`].
-(??=) :: MonadFail m => MaybeT m a -> String -> m a
-(??=) = unwrap
+whyFail :: HasCallStack => Error e :> es => e -> Maybe a -> Eff es a
+whyFail err = maybe (throwError_ err) pure
 
 -- | Accumulate a stateful function over a traversable input.
 accumL :: Traversable f => (a -> s -> (b, s)) -> f a -> s -> (f b, s)
@@ -120,7 +93,6 @@ infixr 4 %~~
 -- ```
 (%~~) :: Lens s t a b -> (a -> (c, b)) -> s -> (c, t)
 (%~~) = ($)
-
 
 -- | Create a fresh variable.
 --

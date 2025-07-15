@@ -6,9 +6,6 @@ module Pantomime.Clash.Util
   , lookupThTyCon
   , concreteNat
   , mkNatTyVarTy
-  , symShiftL'
-  , symShiftRL'
-  , symShiftRA'
   ) where
 
 import GHC.Plugins hiding (empty, thNameToGhcName)
@@ -19,7 +16,7 @@ import GHC.Core.TyCo.Compare (eqType)
 
 import Language.Haskell.TH qualified as TH
 
-import Grisette (ToCon(..), WordN, SymIntN, SymShift (..), SymFromIntegral (..))
+import Grisette (ToCon(..))
 import Grisette.Unified (EvalModeTag (..))
 
 import Control.Monad (guard)
@@ -29,7 +26,6 @@ import Control.Error
 import Pantomime.Value
 import Pantomime.WordSize
 import Pantomime.Runtime
-import Pantomime.Grisette.BitVector qualified as Pantomime
 
 import Effectful
 import Effectful.GHC.TH
@@ -73,7 +69,7 @@ concreteNat adt = do
   fields <- adtDataConFields adt dataCon
   case fields of
     [Primitive (Word value)] | dataCon == naturalNSDataCon -> do
-      rvalue <- toCon @_ @(RuntimeValue C (WordN (WordBits ws))) value
+      rvalue <- toCon @_ @(RuntimeValue C (WordPW C ws)) value
       value' <- rightToMaybe $ unRuntimeC rvalue
       pure $ fromIntegral value'
     [Primitive (ByteArray _ value)] | dataCon == naturalNBDataCon -> do
@@ -85,48 +81,3 @@ concreteNat adt = do
 -- | Create a type-variable type with the natural kind.
 mkNatTyVarTy :: TyVar -> Type
 mkNatTyVarTy tyVar = mkTyVarTy $ setVarType tyVar naturalTy
-
-symShiftL'
-  :: forall bv ws (n :: Natural)
-   . SymFromIntegral (SymIntN (WordBits ws)) (bv n)
-  => SymShift (bv n)
-  => bv n
-  -> SymInt ws
-  -> bv n
-symShiftL' value (SymInt idx) = do
-  let idx' = symFromIntegral idx
-  symShift value idx'
-
-symShiftRL'
-  :: forall bv ws n
-   . KnownNat n
-  => KnownWordSize ws
-  => SymFromIntegral (Pantomime.WordN S n) (bv n)
-  => SymFromIntegral (bv n) (Pantomime.WordN S n)
-  => bv n
-  -> SymInt ws
-  -> bv n
-symShiftRL' value (SymInt idx) = do
-  let idx' = symFromIntegral idx
-
-  let value' = symFromIntegral value :: Pantomime.WordN S n
-  -- TODO: Same thing as with 'symShiftL' (i.e. non-total function)
-  let result = symShiftNegated value' idx'
-  symFromIntegral result
-
-symShiftRA'
-  :: forall bv ws n
-   . KnownNat n
-  => KnownWordSize ws
-  => SymFromIntegral (Pantomime.IntN S n) (bv n)
-  => SymFromIntegral (bv n) (Pantomime.IntN S n)
-  => bv n
-  -> SymInt ws
-  -> bv n
-symShiftRA' value (SymInt idx) = do
-  let idx' = symFromIntegral idx
-
-  let value' = symFromIntegral value :: Pantomime.IntN S n
-  -- TODO: Same thing as with 'symShiftL' (i.e. non-total function)
-  let result = symShiftNegated value' idx'
-  symFromIntegral result

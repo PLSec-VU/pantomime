@@ -4,62 +4,64 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuantifiedConstraints #-}
 
 module Pantomime.WordSize
   ( KnownWordSize
   , WordBits
-  , KnownPos
-  , KnownBitSize (..)
 
-  , IntArch (..)
-  , unIntArch
+  , IntPW (..)
+  , unIntPW
 
-  , WordArch (..)
-  , unWordArch
+  , WordPW (..)
+  , unWordPW
 
-  , SymInt (..)
-  , SymWord (..)
-
-  , symShiftRA
-  , symShiftRL
-  , symShiftL
-  , sizedBVResize
+  , BitSize
+  , EvalMode
+  , Shift (..)
   ) where
 
 import Grisette
-  ( SymIntN
-  , SymWordN
-  , SymOrd
+  ( SymOrd (..)
   , SymEq
   , SymShift (..)
+  , LogicalOp (..)
   , SymFromIntegral (..)
-  , SizedBV (..)
   , SignConversion (..)
   , EvalSym
   , Mergeable
-  , SimpleMergeable
+  , SimpleMergeable (..)
   , GenSym (..)
   , GenSymSimple (..)
-  , unsafeAxiom
+  , SExpr (..)
+  , BitCast (..)
+  , ToCon (..)
+  , ToSym (..)
+  , ConRep (..)
+  , SymInteger
+  , Identifier
+  , withMetadata
+  , genSymSimple
   )
 
-import GHC.TypeLits (KnownNat, type (<=), Nat, OrderingI (..), cmpNat)
+import GHC.TypeLits (KnownNat, Nat, natVal)
 import GHC.Platform
 
 import Data.Bits (Bits)
-import Data.Data (type (:~:) (..), Proxy (..))
-import Data.Type.Ord (Compare)
 
-import Grisette.Unified (DecideEvalMode (..), EvalModeTag (..))
+import Grisette.Unified (DecideEvalMode (..), EvalModeTag (..), withMode)
 
 import Pantomime.Grisette.BitVector
+import Data.Data (Proxy(..))
 
+-- TODO: Perhaps KnownPW is better? Idk, I dislike the current name.
 -- | Constraint to ensure that the WordBits are non-zero.
 --
 -- Note that technically we shouldn't really need this, as WordBits can never be
 -- zero. Still, Haskell cannot prove this and as such we tag around this
 -- typeclass constraint.
-type KnownWordSize ws = KnownPos (WordBits ws)
+type KnownWordSize ws = KnownNat (WordBits ws)
 
 -- | Type family to get a type natural corresponding to the number of bits in
 -- the given platform word size.
@@ -68,434 +70,373 @@ type family WordBits ws = n | n -> ws where
   WordBits PW4 = 32
   WordBits PW8 = 64
 
--- | Constraint required by most bit-operations on grisette bitvectors.
-type KnownPos n = (KnownNat n, 1 <= n)
-
 -- | Wrapper to allow alternative typeclass instances for word-sized ints.
--- TODO: Maybe IntWS is better? Or IntPW?
-newtype IntArch mode ws where
-  IntArch :: IntN mode (WordBits ws) -> IntArch mode ws
+newtype IntPW mode ws where
+  IntPW :: IntN mode (WordBits ws) -> IntPW mode ws
 
-unIntArch :: IntArch mode ws -> IntN mode (WordBits ws)
-unIntArch (IntArch value) = value
-
-deriving via IntN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws)
-  => Show (IntArch mode ws)
+unIntPW :: IntPW mode ws -> IntN mode (WordBits ws)
+unIntPW (IntPW value) = value
 
 deriving via IntN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => Num (IntArch mode ws)
+  => Show (IntPW mode ws)
 
 deriving via IntN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => Eq (IntArch mode ws)
+  => Num (IntPW mode ws)
+
+deriving via IntN C (WordBits ws)
+  instance KnownWordSize ws
+  => Enum (IntPW C ws)
+
+deriving via IntN C (WordBits ws)
+  instance KnownWordSize ws
+  => Real (IntPW C ws)
+
+deriving via IntN C (WordBits ws)
+  instance KnownWordSize ws
+  => Integral (IntPW C ws)
 
 deriving via IntN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => Bits (IntArch mode ws)
+  => Eq (IntPW mode ws)
+
+deriving via IntN C (WordBits ws)
+  instance KnownWordSize ws
+  => Ord (IntPW C ws)
 
 deriving via IntN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => SymOrd (IntArch mode ws)
+  => Bits (IntPW mode ws)
 
 deriving via IntN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => SymEq (IntArch mode ws)
+  => SymOrd (IntPW mode ws)
 
 deriving via IntN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => SymShift (IntArch mode ws)
+  => SymEq (IntPW mode ws)
 
 deriving via IntN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (IntN mode n) (IntArch mode ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => SymShift (IntPW mode ws)
+
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownNat n)
+  => SymFromIntegral (IntN mode n) (IntPW mode ws)
 
 deriving via IntN mode n
-  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (IntArch mode ws) (IntN mode n)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownNat n)
+  => SymFromIntegral (IntPW mode ws) (IntN mode n)
 
 deriving via IntN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (WordN mode n) (IntArch mode ws)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownNat n)
+  => SymFromIntegral (WordN mode n) (IntPW mode ws)
 
 deriving via IntN mode n
-  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (WordArch mode ws) (IntN mode n)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownNat n)
+  => SymFromIntegral (WordPW mode ws) (IntN mode n)
 
 deriving via IntN mode (WordBits ws')
   instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
-  => SymFromIntegral (IntArch mode ws) (IntArch mode ws')
+  => SymFromIntegral (IntPW mode ws) (IntPW mode ws')
 
 deriving via IntN mode (WordBits ws')
   instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
-  => SymFromIntegral (WordArch mode ws) (IntArch mode ws')
-
-deriving via IntN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws)
-  => EvalSym (IntArch mode ws)
-
-deriving via IntN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws)
-  => Mergeable (IntArch mode ws)
+  => SymFromIntegral (WordPW mode ws) (IntPW mode ws')
 
 deriving via IntN S (WordBits ws)
   instance KnownWordSize ws
-  => SimpleMergeable (IntArch S ws)
+  => SymFromIntegral SymInteger (IntPW S ws)
 
-instance (DecideEvalMode mode, KnownWordSize ws) => GenSym (IntArch mode ws) (IntArch mode ws)
+deriving via SymInteger
+  instance KnownWordSize ws
+  => SymFromIntegral (IntPW S ws) SymInteger
 
-instance KnownWordSize ws => GenSym () (IntArch S ws)
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => EvalSym (IntPW mode ws)
 
-instance GenSymSimple (IntArch mode ws) (IntArch mode ws) where
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Mergeable (IntPW mode ws)
+
+deriving via IntN S (WordBits ws)
+  instance KnownWordSize ws
+  => SimpleMergeable (IntPW S ws)
+
+instance (DecideEvalMode mode, KnownWordSize ws) => ToCon (IntPW mode ws) (IntPW C ws) where
+  toCon = fmap IntPW . toCon . unIntPW
+
+instance (DecideEvalMode mode, KnownWordSize ws) => ToSym (IntPW mode ws) (IntPW S ws) where
+  toSym = IntPW . toSym . unIntPW
+
+instance (DecideEvalMode mode, KnownWordSize ws) => GenSym (IntPW mode ws) (IntPW mode ws)
+
+instance KnownWordSize ws => GenSym () (IntPW S ws)
+
+instance GenSymSimple (IntPW mode ws) (IntPW mode ws) where
   simpleFresh = pure
 
-instance KnownWordSize ws => GenSymSimple () (IntArch S ws) where
-  simpleFresh = fmap IntArch . simpleFresh
+instance KnownWordSize ws => GenSymSimple () (IntPW S ws) where
+  simpleFresh = fmap IntPW . simpleFresh
+
+instance ConRep (IntPW S ws) where
+  type ConType (IntPW S ws) = IntPW C ws
 
 -- | Wrapper to allow alternative typeclass instances for word-sized words.
-newtype WordArch mode ws where
-  WordArch :: WordN mode (WordBits ws) -> WordArch mode ws
+newtype WordPW mode ws where
+  WordPW :: WordN mode (WordBits ws) -> WordPW mode ws
 
-unWordArch :: WordArch mode ws -> WordN mode (WordBits ws)
-unWordArch (WordArch value) = value
-
-deriving via WordN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws)
-  => Show (WordArch mode ws)
+unWordPW :: WordPW mode ws -> WordN mode (WordBits ws)
+unWordPW (WordPW value) = value
 
 deriving via WordN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => Num (WordArch mode ws)
+  => Show (WordPW mode ws)
 
 deriving via WordN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => Eq (WordArch mode ws)
+  => Num (WordPW mode ws)
+
+deriving via WordN C (WordBits ws)
+  instance KnownWordSize ws
+  => Enum (WordPW C ws)
+
+deriving via WordN C (WordBits ws)
+  instance KnownWordSize ws
+  => Real (WordPW C ws)
+
+deriving via WordN C (WordBits ws)
+  instance KnownWordSize ws
+  => Integral (WordPW C ws)
 
 deriving via WordN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => Bits (WordArch mode ws)
+  => Eq (WordPW mode ws)
+
+deriving via WordN C (WordBits ws)
+  instance KnownWordSize ws
+  => Ord (WordPW C ws)
 
 deriving via WordN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => SymOrd (WordArch mode ws)
+  => Bits (WordPW mode ws)
 
 deriving via WordN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => SymEq (WordArch mode ws)
+  => SymOrd (WordPW mode ws)
 
 deriving via WordN mode (WordBits ws)
   instance (DecideEvalMode mode, KnownWordSize ws)
-  => SymShift (WordArch mode ws)
+  => SymEq (WordPW mode ws)
 
 deriving via WordN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (IntN mode n) (WordArch mode ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => SymShift (WordPW mode ws)
+
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownNat n)
+  => SymFromIntegral (IntN mode n) (WordPW mode ws)
 
 deriving via WordN mode n
-  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (IntArch mode ws) (WordN mode n)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownNat n)
+  => SymFromIntegral (IntPW mode ws) (WordN mode n)
 
 deriving via WordN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (WordN mode n) (WordArch mode ws)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownNat n)
+  => SymFromIntegral (WordN mode n) (WordPW mode ws)
 
 deriving via WordN mode n
-  instance (DecideEvalMode mode, KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (WordArch mode ws) (WordN mode n)
+  instance (DecideEvalMode mode, KnownWordSize ws, KnownNat n)
+  => SymFromIntegral (WordPW mode ws) (WordN mode n)
 
 deriving via WordN mode (WordBits ws')
   instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
-  => SymFromIntegral (WordArch mode ws) (WordArch mode ws')
+  => SymFromIntegral (WordPW mode ws) (WordPW mode ws')
 
 deriving via WordN mode (WordBits ws')
   instance (DecideEvalMode mode, KnownWordSize ws, KnownWordSize ws')
-  => SymFromIntegral (IntArch mode ws) (WordArch mode ws')
-
-deriving via WordN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws)
-  => EvalSym (WordArch mode ws)
-
-deriving via WordN mode (WordBits ws)
-  instance (DecideEvalMode mode, KnownWordSize ws)
-  => Mergeable (WordArch mode ws)
+  => SymFromIntegral (IntPW mode ws) (WordPW mode ws')
 
 deriving via WordN S (WordBits ws)
   instance KnownWordSize ws
-  => SimpleMergeable (WordArch S ws)
+  => SymFromIntegral SymInteger (WordPW S ws)
 
-instance (DecideEvalMode mode, KnownWordSize ws) => GenSym (WordArch mode ws) (WordArch mode ws)
+deriving via SymInteger
+  instance KnownWordSize ws
+  => SymFromIntegral (WordPW S ws) SymInteger
 
-instance KnownWordSize ws => GenSym () (WordArch S ws)
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => EvalSym (WordPW mode ws)
 
-instance GenSymSimple (WordArch mode ws) (WordArch mode ws) where
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Mergeable (WordPW mode ws)
+
+deriving via WordN S (WordBits ws)
+  instance KnownWordSize ws
+  => SimpleMergeable (WordPW S ws)
+
+instance (DecideEvalMode mode, KnownWordSize ws) => ToCon (WordPW mode ws) (WordPW C ws) where
+  toCon = fmap WordPW . toCon . unWordPW
+
+instance (DecideEvalMode mode, KnownWordSize ws) => ToSym (WordPW mode ws) (WordPW S ws) where
+  toSym = WordPW . toSym . unWordPW
+
+instance (DecideEvalMode mode, KnownWordSize ws) => GenSym (WordPW mode ws) (WordPW mode ws)
+
+instance KnownWordSize ws => GenSym () (WordPW S ws)
+
+instance GenSymSimple (WordPW mode ws) (WordPW mode ws) where
   simpleFresh = pure
 
-instance KnownWordSize ws => GenSymSimple () (WordArch S ws) where
-  simpleFresh = fmap WordArch . simpleFresh
+instance KnownWordSize ws => GenSymSimple () (WordPW S ws) where
+  simpleFresh = fmap WordPW . simpleFresh
 
 instance (DecideEvalMode mode, KnownWordSize ws)
-  => SignConversion (WordArch mode ws) (IntArch mode ws) where
-  toSigned = IntArch . toSigned . unWordArch
-  toUnsigned = WordArch . toUnsigned . unIntArch
+  => SignConversion (WordPW mode ws) (IntPW mode ws) where
+  toSigned = IntPW . toSigned . unWordPW
+  toUnsigned = WordPW . toUnsigned . unIntPW
 
--- | Wrapper to allow alternative typeclass instances for word-sized ints.
+instance ConRep (WordPW S ws) where
+  type ConType (WordPW S ws) = WordPW C ws
+
+-- | Type family to statically lookup the size of a bitvector.
 --
--- Note that in order to solve for this word-sized int, one needs to unwrap it.
--- This is due to the functional dependency between symbolic and non-symbolic
--- values in Grisette.
--- TODO: We should really adjust SymInt to get a EvalModeTag which makes it
--- select either the concrete or symbolic int (with of course the correct word
--- size). I guess we don't need to create a new type family here, as we can just
--- us GetIntN (and GetWordN respectively for the word size stuff). Maybe the
--- new name for this would need to be PlatformInt (and PlatformWord). I'll have
--- to think about it...
-newtype SymInt ws where
-  SymInt :: { unSymInt :: SymIntN (WordBits ws) } -> SymInt ws
+-- This may be used to determine the size of bitvectors whose size does not
+-- necessarily depend on a type-level natural.
+type family BitSize a :: Nat
 
-deriving via SymIntN (WordBits ws)
-  instance KnownWordSize ws
-  => Num (SymInt ws)
+type instance BitSize (IntN mode n) = n
+type instance BitSize (WordN mode n) = n
+type instance BitSize (IntPW mode ws) = WordBits ws
+type instance BitSize (WordPW mode ws) = WordBits ws
 
-deriving via SymIntN (WordBits ws)
-  instance KnownWordSize ws
-  => Eq (SymInt ws)
+-- | Type family to look up the evaluation mode of a type.
+-- TODO: This type family should go somewhere in the Pantomime.Grisette.X
+-- corner. Same for the BitSize type family btw!
+type family EvalMode a :: EvalModeTag
 
-deriving via SymIntN (WordBits ws)
-  instance KnownWordSize ws
-  => Bits (SymInt ws)
+type instance EvalMode (IntN mode n) = mode
+type instance EvalMode (WordN mode n) = mode
+type instance EvalMode (IntPW mode ws) = mode
+type instance EvalMode (WordPW mode ws) = mode
 
-deriving via SymIntN (WordBits ws)
-  instance KnownWordSize ws
-  => SymOrd (SymInt ws)
+-- | Haskell-like shift functions.
+class Shift a where
+  -- | Shift right arithmetic.
+  shiftRA :: KnownWordSize ws => a -> IntPW (EvalMode a) ws -> a
+  -- | Shift right logical.
+  shiftRL :: KnownWordSize ws => a -> IntPW (EvalMode a) ws -> a
+  -- | Shift left.
+  shiftL :: KnownWordSize ws => a -> IntPW (EvalMode a) ws -> a
 
-deriving via SymIntN (WordBits ws)
-  instance KnownWordSize ws
-  => SymEq (SymInt ws)
+instance (DecideEvalMode mode, KnownNat n) => Shift (IntN mode n) where
+  shiftRA = shiftRA'
+  shiftRL value idx = bitCast $ shiftRL' @_ @n (bitCast value) idx
+  shiftL = shiftL'
 
-deriving via SymIntN (WordBits ws)
-  instance KnownWordSize ws
-  => SymShift (SymInt ws)
+instance (DecideEvalMode mode, KnownNat n) => Shift (WordN mode n) where
+  shiftRA value idx = bitCast $ shiftRA' @_ @n (bitCast value) idx
+  shiftRL = shiftRL'
+  shiftL value idx = bitCast $ shiftL' @_ @n (bitCast value) idx
 
-deriving via SymIntN (WordBits ws)
-  instance (KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (SymIntN n) (SymInt ws)
+deriving via IntN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Shift (IntPW mode ws)
 
-deriving via SymIntN (WordBits ws)
-  instance (KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (SymWordN n) (SymInt ws)
+deriving via WordN mode (WordBits ws)
+  instance (DecideEvalMode mode, KnownWordSize ws)
+  => Shift (WordPW mode ws)
 
-instance (KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (SymInt ws) (SymIntN n) where
-  symFromIntegral = symFromIntegral . unSymInt
-
-instance (KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (SymInt ws) (SymWordN n) where
-  symFromIntegral = symFromIntegral . unSymInt
-
-deriving via SymIntN (WordBits ws)
-  instance KnownWordSize ws
-  => SymFromIntegral (SymWord ws) (SymInt ws)
-
-deriving via SymIntN (WordBits ws)
-  instance KnownWordSize ws
-  => SymFromIntegral (SymInt ws) (SymInt ws)
-
--- | Wrapper to allow alternative typeclass instances for word-sized word.
---
--- Note that in order to solve for this word-sized word, one needs to unwrap it.
--- This is due to the functional dependency between symbolic and non-symbolic
--- values in Grisette.
-newtype SymWord ws where
-  SymWord :: { unSymWord :: SymWordN (WordBits ws) } -> SymWord ws
-
-deriving via SymWordN (WordBits ws)
-  instance KnownWordSize ws
-  => Num (SymWord ws)
-
-deriving via SymWordN (WordBits ws)
-  instance KnownWordSize ws
-  => Eq (SymWord ws)
-
-deriving via SymWordN (WordBits ws)
-  instance KnownWordSize ws
-  => Bits (SymWord ws)
-
-deriving via SymWordN (WordBits ws)
-  instance KnownWordSize ws
-  => SymOrd (SymWord ws)
-
-deriving via SymWordN (WordBits ws)
-  instance KnownWordSize ws
-  => SymEq (SymWord ws)
-
-deriving via SymWordN (WordBits ws)
-  instance KnownWordSize ws
-  => SymShift (SymWord ws)
-
-deriving via SymWordN (WordBits ws)
-  instance (KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (SymIntN n) (SymWord ws)
-
-deriving via SymWordN (WordBits ws)
-  instance (KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (SymWordN n) (SymWord ws)
-
-instance (KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (SymWord ws) (SymIntN n) where
-  symFromIntegral = symFromIntegral . unSymWord
-
-instance (KnownWordSize ws, KnownPos n)
-  => SymFromIntegral (SymWord ws) (SymWordN n) where
-  symFromIntegral = symFromIntegral . unSymWord
-
-deriving via SymWordN (WordBits ws)
-  instance KnownWordSize ws
-  => SymFromIntegral (SymInt ws) (SymWord ws)
-
-deriving via SymWordN (WordBits ws)
-  instance KnownWordSize ws
-  => SymFromIntegral (SymWord ws) (SymWord ws)
-
-instance KnownWordSize ws => SignConversion (SymWord ws) (SymInt ws) where
-  toSigned = SymInt . toSigned . unSymWord
-  toUnsigned = SymWord . toUnsigned . unSymInt
-
--- TODO: Adjust code to use this instance! Same for the shiftRA, which should
--- work both for symbolic and non-symbolic shifts btw.
--- | Class to statically lookup the size of a bitvector.
---
--- This may be used to add constraints on bitvector conversion, without
--- necessarily requiring the size to be determined by a type natural as
--- argument.
-class HasBitSize bv where
-  type BitSize' bv :: Nat
-
-instance HasBitSize (IntN mode n) where
-  type BitSize' (IntN mode n) = n
-
-instance HasBitSize (WordN mode n) where
-  type BitSize' (WordN mode n) = n
-
-instance HasBitSize (IntArch mode ws) where
-  type BitSize' (IntArch mode ws) = WordBits ws
-
-instance HasBitSize (WordArch mode ws) where
-  type BitSize' (WordArch mode ws) = WordBits ws
-
-class KnownPos (BitSize bv) => KnownBitSize bv where
-  type BitSize bv :: Nat
-
-instance KnownPos n => KnownBitSize (SymIntN n) where
-  type BitSize (SymIntN n) = n
-
-instance KnownPos n => KnownBitSize (SymWordN n) where
-  type BitSize (SymWordN n) = n
-
-instance KnownWordSize ws => KnownBitSize (SymWord ws) where
-  type BitSize (SymWord ws) = WordBits ws
-
-instance KnownWordSize ws => KnownBitSize (SymInt ws) where
-  type BitSize (SymInt ws) = WordBits ws
-
--- | Symbolic Shift Right Arithmetic.
---
--- This will use a conversion into a signed bitvector, as the symbolic executor
--- does not distinguish between arithmetic and logical shift per type.
-symShiftRA
-  :: forall bv ws
-   . KnownBitSize bv
-  => SymFromIntegral bv (SymIntN (BitSize bv))
-  => SymFromIntegral (SymIntN (BitSize bv)) bv
+-- | Shift right arithmetic helper.
+shiftRA'
+  :: forall mode n ws
+   . DecideEvalMode mode
+  => KnownNat n
   => KnownWordSize ws
-  => bv
-  -> SymInt ws
-  -> bv
-symShiftRA val (SymInt idx) = do
-  let idx' = symFromIntegral idx
+  => IntN mode n
+  -> IntPW mode ws
+  -> IntN mode n
+shiftRA' = do
+  let ident = withMetadata "shiftRA" (Atom "Pantomime.UB")
+  shift' ident symShiftNegated
 
-  let val' = symFromIntegral val :: SymIntN (BitSize bv)
-  -- TODO: Same thing as with 'symShiftL' (i.e. non-total function)
-  let result = symShiftNegated val' idx'
-  symFromIntegral result
-
--- | Symbolic Shift Right Logical.
---
--- This will use a conversion into a signed bitvector, as the symbolic executor
--- does not distinguish between arithmetic and logical shift per type.
-symShiftRL
-  :: forall bv ws
-   . KnownBitSize bv
-  => SymFromIntegral bv (SymWordN (BitSize bv))
-  => SymFromIntegral (SymWordN (BitSize bv)) bv
+-- | Shift right logical helper.
+shiftRL'
+  :: forall mode n ws
+   . DecideEvalMode mode
+  => KnownNat n
   => KnownWordSize ws
-  => bv
-  -> SymInt ws
+  => WordN mode n
+  -> IntPW mode ws
+  -> WordN mode n
+shiftRL' = do
+  let ident = withMetadata "shiftRL" (Atom "Pantomime.UB")
+  shift' ident symShiftNegated
+
+-- | Shift left helper.
+shiftL'
+  :: forall mode n ws
+   . DecideEvalMode mode
+  => KnownNat n
+  => KnownWordSize ws
+  => IntN mode n
+  -> IntPW mode ws
+  -> IntN mode n
+shiftL' = do
+  -- TODO: How do we ensure that this uninterpreted function is truly
+  -- unique? Perhaps the best we can do is put all constant values in one
+  -- place. The alternative is perhaps to use 'withLocation' from pantomime.
+  -- I guess it is also still technically something that can be recreated.
+  -- Same problem for the other shifts btw.
+  let ident = withMetadata "shiftL" (Atom "Pantomime.UB")
+  shift' ident symShift
+
+-- | Generalised Haskell shift operation.
+--
+-- Haskell shifts have undefined behaviour for indices outside of the range
+-- '0 <= idx < n'.  In the symbolic instance, we model undefined behaviour via
+-- an uninterpreted function call. The concrete shift will apply Grisette shift
+-- semantics; any behaviour will do as its result is undefined.
+shift'
+  :: forall mode bv ws
+   . DecideEvalMode mode
+  => KnownWordSize ws
+  => KnownNat (BitSize bv)
+  => SymFromIntegral (IntPW mode ws) bv
+  => (mode ~ S => GenSymSimple () bv)
+  => (mode ~ S => SimpleMergeable bv)
+  => Identifier
+  -- ^ Identifier for uninterpreted function when shift is out of bounds. This
+  -- is to model undefined behaviour.
+  -> (bv -> bv -> bv)
+  -- ^ The shift function.
   -> bv
-symShiftRL val (SymInt idx) = do
+  -- ^ Bitvector to shift.
+  -> IntPW mode ws
+  -- ^ Index; how much to shift by.
+  -> bv
+shift' ident f value idx = do
+  -- The normal result of the computation
   let idx' = symFromIntegral idx
+  let result = f value idx'
 
-  let val' = symFromIntegral val :: SymWordN (BitSize bv)
-  -- TODO: Same thing as with 'symShiftL' (i.e. non-total function)
-  let result = symShiftNegated val' idx'
-  symFromIntegral result
+  -- An implementation is allowed to do whatever for undefined behaviour.
+  -- As such, for concrete evaluation we just return whatever Grisette
+  -- computes for out-of-bounds shifts.
+  withMode @mode result do
+    -- The bit-size of platform words.
+    let size = fromInteger $ natVal (Proxy @(BitSize bv))
 
--- | Symbolic Shift Left
---
--- Symbolic shifts in Haskell all use the platform-sized int for the index (i.e.
--- the amount to shift by). This function performs the necessary conversions in
--- order to be compatible with the symbolic shift.
-symShiftL
-  :: forall bv ws
-   . SymFromIntegral (SymInt ws) bv
-  => SymShift bv
-  => bv
-  -> SymInt ws
-  -> bv
-symShiftL val idx = do
-  -- TODO: Haskell doesn't really define what to do with the shift if the index
-  -- is larger than the word size. It is considered unsafe/undefined behaviour.
-  -- We should model this as a special runtime value "UndefinedBehaviour".
-  -- Similar to how "Invalid" allows us to declare unreachable states, UB would
-  -- allow us to show that we cannot conclude the outcome for a particular
-  -- range of values. Comparing againt UB is always considered non-equal
-  -- (and maybe should throw a warning).
-  --
-  -- Alternatively, we could create a fresh symbolic value for anything that is
-  -- UB. The benefit of the other approach would be that we can know whether
-  -- something is unconstraint due to UB. It might be a bit harder to go back
-  -- to non-UB though.
-  --
-  -- Any safe usage of UB would mean that it is unreachable. An example would be
-  -- masking all bits to zero when we shift larger than the word size. We should
-  -- add something like this! In any case, having UB is bad as our symbolic
-  -- execute may or may not find terms to be equal according to its own
-  -- semantic. This semantic may very well not match what the machine actually
-  -- does.
-  --
-  -- We should implement this sometime. We probably need to change the interface
-  -- on this to use RuntimeValue instead. Don't forget that the same applies to
-  -- both right shift operations. We can also use this for other UB, if there
-  -- exists any.
-  symShift val $ symFromIntegral idx
+    -- The bounds within which a shift is defined.
+    let isBound = 0 .<= idx .&& idx .< size
 
--- | Resize the given bitvector.
---
--- Whether the bitvector is sign extended or not depends on its implementation
--- of 'sizedBVExt'.
-sizedBVResize
-  :: forall bv l r
-   . SizedBV bv
-  => KnownPos l
-  => KnownPos r
-  => bv l
-  -> bv r
-sizedBVResize = case cmpNat @l @r Proxy Proxy of
-  LTI -> sizedBVExt $ Proxy @r
-  EQI -> id
-  -- SAFETY: The unsafe coerce is just to have 'r <= l' as Haskell cannot figure
-  -- this out given the 'l >= r' that is already in context. Theoretically we
-  -- should be able to do this without unsafeCoerce, but I'm not sure how.
-  -- I'm not keen on importing the type level nat plugin for just one function.
-  GTI -> case unsafeAxiom @(Compare r l) @LT  of
-    Refl -> sizedBVSelect (Proxy @0) (Proxy @r)
+    -- In the symbolic instance, we model undefined behaviour via an
+    -- uninterpreted function.
+    let ub = genSymSimple () ident
+
+    -- The final result.
+    mrgIte isBound result ub

@@ -25,6 +25,8 @@ import Grisette (LogicalOp (..))
 
 import Control.Monad (forM, unless)
 
+import Data.List (intersperse)
+
 import Language.Haskell.TH qualified as TH
 
 import Pantomime.WordSize
@@ -62,11 +64,28 @@ data NonEq
 
 instance Outputable NonEq where
   ppr = \case
-    Counterexample bndrs _lhs _rhs -> vcat $ fmap ppr bndrs
-    EvalError err -> text "eval-error: " <+> ppr err
+    Counterexample bndrs lhs rhs -> do
+      -- Vertically concatenate using ($+$).
+      let vcat' = foldl' @[] ($+$) empty
 
--- TODO: adjust ExtFamInstEnv and ExtInstEnv to be their own effect instead of
--- requiring the local environments.
+      -- Vertically separate with newlines in between.
+      let vsep' = vcat' . intersperse ""
+
+      -- Hang that always aligns vertically.
+      let hang' d1 n d2 = vcat' [d1, nest n d2]
+
+      -- The actual pretty print.
+      vsep'
+        [ hang' "Diverging results given the following arguments" 2 do
+          vsep' $ fmap ppr bndrs
+        , hang' "Result left-hand side" 2 do
+          ppr lhs
+        , hang' "Result right-hand side" 2 do
+          ppr rhs
+        ]
+
+    EvalError err -> text "eval-error:" <+> ppr err
+
 exprSymEq
   :: forall es
    . HasCallStack
@@ -142,12 +161,6 @@ exprSymEq' lhs rhs = runErrorNoCallStack @NonEq $ runFresh "fresh" do
       bndrs' <- forM bndrs concretise'
       lres' <- concretise' lres
       rres' <- concretise' rres
-      -- debugS "-------------"
-      -- forM_ bndrs' debug
-      -- debugS "-------------"
-      -- debug lres'
-      -- debugS "=/=/=/=/=/=/="
-      -- debug rres'
       throwError_ $ Counterexample bndrs' lres' rres'
     Unsatisfiable -> pure ()
     Unknown -> throwIO $ ErrorCall "checks are in decidable fragment"

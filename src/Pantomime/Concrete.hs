@@ -158,8 +158,8 @@ concretise model = \case
   Cast' co value' -> go value' $ coercionRKind co
     where
       go value ty | not $ ty `eqType` coercionLKind co = do
-        (tyCon, tys) <- whyFail' IllTyped $ splitTyConApp_maybe ty
-        dataCon <- whyFail' IllTyped $ tyConSingleDataCon_maybe tyCon
+        (tyCon, tys) <- whyFail IllTyped $ splitTyConApp_maybe ty
+        dataCon <- whyFail IllTyped $ tyConSingleDataCon_maybe tyCon
         argTy <- case dataConInstArgTys dataCon tys of
           [argTy] -> pure $ scaledThing argTy
           _ -> throwError_ IllTyped
@@ -256,3 +256,30 @@ primCon model value = do
   case unRuntimeC concrete of
     Right value' -> Value $ value'
     Left err -> Error err
+
+-- TODO: We really want to concretise back to GHC CoreExpr!
+-- primToExpr
+--   :: Primitive C ws
+--   -> CoreExpr
+-- primToExpr = \case
+--   -- Int value -> undefined
+--   Int8 value -> runtimeToExpr value do
+--     Lit . LitNumber LitNumInt8 . toInteger
+--   _ -> undefined
+
+-- runtimeToExpr
+--   :: RuntimeValue C a
+--   -> (a -> CoreExpr)
+--   -> CoreExpr
+-- runtimeToExpr value convert = do
+--   let primOpId = Var . primOpWrapperId
+--   case unRuntimeC value of
+--     Right value' -> convert value'
+--     Left Overflow -> primOpId RaiseOverflowOp `App` unboxedUnitExpr
+--     Left Underflow -> primOpId RaiseUnderflowOp `App` unboxedUnitExpr
+--     Left DivideByZero -> primOpId RaiseDivZeroOp `App` unboxedUnitExpr
+--     Left Invalid -> mkApps (primOpId RaiseOp)
+--       [ Type liftedRepTy
+--       , Type unitTy
+--       , unitExpr
+--       ]

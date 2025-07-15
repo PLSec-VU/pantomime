@@ -61,7 +61,7 @@ lookupIdEnv
   => Environment es ws
   -> Var
   -> Eff es (Value (Eff es) ws)
-lookupIdEnv env var = whyFail' UnboundVariable $ if
+lookupIdEnv env var = whyFail UnboundVariable $ if
   | isTyVar var -> Ty <$> lookupVarEnv (tvSubst env) var
   | isCoVar var -> Co <$> lookupVarEnv (cvSubst env) var
   | isNonCoVarId var -> lookupVarEnv (idSubst env) var
