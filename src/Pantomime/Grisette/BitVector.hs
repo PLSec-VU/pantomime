@@ -1,5 +1,4 @@
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE InstanceSigs #-}
 
 module Pantomime.Grisette.BitVector
   ( IntN (..)
@@ -285,14 +284,7 @@ instance ConRep (IntN S n) where
   type ConType (IntN S n) = IntN C n
 
 instance DecideEvalMode mode => SizedBV (IntN mode) where
-  sizedBVConcat
-    :: forall l r
-     . KnownNat l
-    => KnownNat r
-    => IntN mode l
-    -> IntN mode r
-    -> IntN mode (l + r)
-  sizedBVConcat = curry $ \case
+  sizedBVConcat @l @r = curry $ \case
     (IntZ, IntZ) -> IntZ
     (IntZ, rhs) -> rhs
     (lhs, IntZ) -> lhs
@@ -304,14 +296,7 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
       case unsafeDict @(1 <= l + r) of
         Dict -> IntP $ op lhs rhs
 
-  sizedBVZext
-    :: forall l r
-     . KnownNat l
-    => KnownNat r
-    => l <= r
-    => IntN mode l
-    -> IntN mode r
-  sizedBVZext = \case
+  sizedBVZext @l @r = \case
     IntZ -> do
       let op :: 1 <= r => GetIntN mode r
           op = withMode @mode
@@ -325,14 +310,7 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
             (Grisette.sizedBVZext @_ @l @r Proxy)
       withSizeI $ op value
 
-  sizedBVSext
-    :: forall l r
-     . KnownNat l
-    => KnownNat r
-    => l <= r
-    => IntN mode l
-    -> IntN mode r
-  sizedBVSext = \case
+  sizedBVSext @l @r = \case
     IntZ -> do
       let op :: 1 <= r => GetIntN mode r
           op = withMode @mode
@@ -348,17 +326,7 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
 
   sizedBVExt = sizedBVSext
 
-  sizedBVSelect'
-    :: forall idx width n
-     . KnownNat idx
-    => KnownNat width
-    => KnownNat n
-    => idx + width <= n
-    => Proxy idx
-    -> Proxy width
-    -> IntN mode n
-    -> IntN mode width
-  sizedBVSelect' _ _ = \case
+  sizedBVSelect @idx @width @n = \case
     IntZ -> case unsafeDict @(width ~ 0) of
       Dict -> IntZ
     IntP value -> do
@@ -634,14 +602,7 @@ instance ConRep (WordN S n) where
   type ConType (WordN S n) = WordN C n
 
 instance DecideEvalMode mode => SizedBV (WordN mode) where
-  sizedBVConcat
-    :: forall l r
-     . KnownNat l
-    => KnownNat r
-    => WordN mode l
-    -> WordN mode r
-    -> WordN mode (l + r)
-  sizedBVConcat = curry $ \case
+  sizedBVConcat @l @r = curry $ \case
     (WordZ, WordZ) -> WordZ
     (WordZ, rhs) -> rhs
     (lhs, WordZ) -> lhs
@@ -653,14 +614,7 @@ instance DecideEvalMode mode => SizedBV (WordN mode) where
       case unsafeDict @(1 <= l + r) of
         Dict -> WordP $ op lhs rhs
 
-  sizedBVZext
-    :: forall l r
-     . KnownNat l
-    => KnownNat r
-    => l <= r
-    => WordN mode l
-    -> WordN mode r
-  sizedBVZext = \case
+  sizedBVZext @l @r = \case
     WordZ -> do
       let op :: 1 <= r => GetWordN mode r
           op = withMode @mode
@@ -674,14 +628,7 @@ instance DecideEvalMode mode => SizedBV (WordN mode) where
             (Grisette.sizedBVZext @_ @l @r Proxy)
       withSizeW $ op value
 
-  sizedBVSext
-    :: forall l r
-     . KnownNat l
-    => KnownNat r
-    => l <= r
-    => WordN mode l
-    -> WordN mode r
-  sizedBVSext = \case
+  sizedBVSext @l @r = \case
     WordZ -> do
       let op :: 1 <= r => GetWordN mode r
           op = withMode @mode
@@ -697,17 +644,7 @@ instance DecideEvalMode mode => SizedBV (WordN mode) where
 
   sizedBVExt = sizedBVZext
 
-  sizedBVSelect'
-    :: forall idx width n
-     . KnownNat idx
-    => KnownNat width
-    => KnownNat n
-    => idx + width <= n
-    => Proxy idx
-    -> Proxy width
-    -> WordN mode n
-    -> WordN mode width
-  sizedBVSelect' _ _ = \case
+  sizedBVSelect @idx @width @n = \case
     WordZ -> case unsafeDict @(width ~ 0) of
       Dict -> WordZ
     WordP value -> do

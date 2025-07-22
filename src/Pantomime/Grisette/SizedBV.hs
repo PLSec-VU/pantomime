@@ -7,14 +7,12 @@
 
 module Pantomime.Grisette.SizedBV
   ( SizedBV (..)
-  , sizedBVSelect
   , sizedBVExtract
   , sizedBVResize
   ) where
 
 import GHC.TypeNats (type (<=), type (+), type (-), KnownNat)
 
-import Data.Data (Proxy(..))
 import Data.Type.Ord (OrderingI (..))
 
 import Control.Monad.Identity (runIdentity)
@@ -67,33 +65,15 @@ class SizedBV bv where
   -- | Slicing out a smaller bit vector from a larger one, selecting a slice
   -- with width @width@ starting from index @idx@.
   --
-  -- The least significant bit is indexed as 0. Prefer using 'sizedBVSelect', as
-  -- it doesn't require the proxy.
-  sizedBVSelect'
+  -- The least significant bit is indexed as 0.
+  sizedBVSelect
     :: forall idx width n
      . KnownNat idx
     => KnownNat width
     => KnownNat n
     => idx + width <= n
-    => Proxy idx
-    -> Proxy width
-    -> bv n
+    => bv n
     -> bv width
-
--- | Slicing out a smaller bit vector from a larger one, selecting a slice
--- with width @width@ starting from index @idx@.
---
--- The least significant bit is indexed as 0.
-sizedBVSelect
-  :: forall bv idx width n
-   . SizedBV bv
-  => KnownNat idx
-  => KnownNat width
-  => KnownNat n
-  => idx + width <= n
-  => bv n
-  -> bv width
-sizedBVSelect = sizedBVSelect' @_ @idx Proxy Proxy
 
 -- | Slicing out a smaller bit vector from a larger one, extract a slice from
 -- bit i down to j.
@@ -109,7 +89,7 @@ sizedBVExtract
   => bv n
   -> bv (end - start)
 sizedBVExtract = runIdentity $ do
-  -- This is always true as we know: end <= n
+  -- SAFETY: This is always true as we know: end <= n
   Dict <- pure $ unsafeDict @(start + (end - start) ~ end)
   SomeNat' @width <- pure $ typeSub @end @start
 
