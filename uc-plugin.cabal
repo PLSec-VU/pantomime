@@ -51,7 +51,9 @@ library
       Pantomime.Clash.Util
       Pantomime.Combinator
       Pantomime.Concrete
+      Pantomime.Concrete.GrisetteOps
       Pantomime.Dict
+      Pantomime.DictMap
       Pantomime.Environment
       Pantomime.Evaluate
       Pantomime.Grisette.BitVector
@@ -114,6 +116,7 @@ library
     , template-haskell
     , text
     , transformers
+    , unordered-containers
   default-language: Haskell2010
 
 executable uc-plugin-exe
@@ -181,6 +184,7 @@ executable uc-plugin-exe
     , text
     , transformers
     , uc-plugin
+    , unordered-containers
   default-language: Haskell2010
 
 test-suite uc-plugin-test
@@ -239,4 +243,5 @@ test-suite uc-plugin-test
     , text
     , transformers
     , uc-plugin
+    , unordered-containers
   default-language: Haskell2010

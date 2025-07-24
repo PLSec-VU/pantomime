@@ -51,6 +51,7 @@ dependencies:
 - ghc-prim
 - composition
 - containers
+- unordered-containers
 - constraints >= 0.14.2
 - transformers
 - template-haskell
