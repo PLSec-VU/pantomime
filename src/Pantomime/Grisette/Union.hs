@@ -1,12 +1,14 @@
-{-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Pantomime.Grisette.Union
   ( Union (..)
   , unUnion
+
+  , UnionView (..)
+  , pattern Single
+  , pattern If
   ) where
 
 import Grisette.Unified (EvalModeTag (..), BaseMonad, DecideEvalMode, withMode)
@@ -37,9 +39,14 @@ import Grisette
   , symEq1
   , toSym1
   , toCon1
+  , pattern Single
+  , pattern If
   )
 
 import Data.Functor.Classes
+
+import Control.Monad.Identity (Identity(..))
+import Control.Applicative (Alternative (..))
 
 -- | A wrapper around the Grisette 'Union' type.
 --
@@ -112,12 +119,15 @@ instance (forall a. Mergeable a => SimpleMergeable (Union S a))=> SymBranching (
   mrgIfPropagatedStrategy cond (Union tr) (Union fl) = do
     Union $ mrgIfPropagatedStrategy cond tr fl
 
-instance UnionView (Union S) where
-  singleView = singleView . unUnion
+instance DecideEvalMode mode => UnionView (Union mode) where
+  singleView = do
+    let op = withMode @mode (pure . runIdentity) singleView
+    op . unUnion
 
   ifView = do
     let wrap (IfViewResult cond tr fl) = IfViewResult cond (Union tr) (Union fl)
-    fmap wrap . ifView . unUnion
+    let op = withMode @mode (const empty) (fmap wrap . ifView)
+    op . unUnion
 
 instance (DecideEvalMode mode, EvalSym a) => EvalSym (Union mode a) where
   evalSym = evalSym1
