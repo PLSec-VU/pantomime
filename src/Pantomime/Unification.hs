@@ -15,7 +15,7 @@ import GHC.Plugins hiding ((<>))
 import GHC.Core.Unify (tcUnifyTys, alwaysBindFun)
 import GHC.Core.Map.Type (TypeMap)
 import GHC.Core.Predicate (isDictId)
-import GHC.Core.InstEnv (lookupUniqueInstEnv, instanceDFunId)
+import GHC.Core.InstEnv (instanceDFunId)
 import GHC.Core.TyCo.Rep (Type (..), Scaled (..), scaledThing)
 import GHC.Data.TrieMap (TrieMap (..), insertTM)
 import GHC.Data.Maybe (rightToMaybe, whenIsJust)
@@ -36,7 +36,8 @@ import Effectful
 import Effectful.Error.Static
 import Effectful.Break
 import Effectful.Context
-import Effectful.GHC.External (HasInstEnvs, getInstEnvs)
+import Effectful.GHC.External (HasInstEnvs, lookupUniqueInst)
+import GHC.Core.Class (Class)
 
 -- | Error to indicate unification failure.
 --
@@ -391,9 +392,9 @@ lookupClassInst ty = do
   tyClass <- whyFail' $ tyConClass_maybe tyCon
 
   -- Get the instance for this typeclass with supplied types, if possible.
-  env <- getInstEnvs
-  let eitherInst = lookupUniqueInstEnv env tyClass tyArgs
-  (clsInst, tys) <- whyFail' $ rightToMaybe eitherInst
+  let adjustError = runErrorWith @(LookupError (Class, [Type])) \_ _ -> do
+        throwError_ (LookupError ty)
+  (clsInst, tys) <- adjustError $ lookupUniqueInst tyClass tyArgs
 
   -- Create an expression for the instance.
   let dict = Var $ instanceDFunId clsInst

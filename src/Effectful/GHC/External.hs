@@ -8,6 +8,7 @@ module Effectful.GHC.External
 
   , HasInstEnvs (..)
   , getInstEnvs
+  , lookupUniqueInst
   , runHasInstEnvs
   , runHasInstEnvs'
 
@@ -18,10 +19,14 @@ module Effectful.GHC.External
 
 import Effectful
 import Effectful.Dispatch.Dynamic (send, interpret_)
+import Effectful.Error.Static (Error, throwError_)
+
+import Control.Error (LookupError(..))
 
 import GHC.Plugins
 import GHC.Core.FamInstEnv (FamInstEnv, FamInstEnvs)
-import GHC.Core.InstEnv (InstEnv, InstEnvs (..))
+import GHC.Core.InstEnv (InstEnv, InstEnvs (..), lookupUniqueInstEnv, ClsInst)
+import GHC.Core.Class (Class)
 import GHC.Unit.External (ExternalPackageState (..))
 import GHC.Unit.Module.Deps (Dependencies (..))
 
@@ -44,8 +49,36 @@ data HasInstEnvs :: Effect where
 type instance DispatchOf HasInstEnvs = Dynamic
 
 -- | Get the complete type class instance environments.
-getInstEnvs :: HasInstEnvs :> es => Eff es InstEnvs
+getInstEnvs
+  :: HasCallStack
+  => HasInstEnvs :> es
+  => Eff es InstEnvs
 getInstEnvs = send GetInstEnvs
+
+-- TODO: I don't like the error on this one. There's actually a few reasons
+-- why this may go wrong:
+-- 1. The number of type arguments doesn't match the expected number for the
+--    typeclass.
+-- 2. There exists no instance for the given class-type pair.
+-- 3. There is no unique instance (i.e. more than one instance can be picked).
+--
+-- I feel like we should perhaps return these errors explicitly.
+-- | Look up an instance in the given instance environment.
+--
+-- The given class application must match exactly one instance and the match may
+-- not contain any flexi type variables.
+lookupUniqueInst
+  :: HasCallStack
+  => HasInstEnvs :> es
+  => Error (LookupError (Class, [Type])) :> es
+  => Class
+  -> [Type]
+  -> Eff es (ClsInst, [Type])
+lookupUniqueInst tyClass tyArgs = do
+  env <- getInstEnvs
+  let result = lookupUniqueInstEnv env tyClass tyArgs
+  let err _ = throwError_ $ LookupError (tyClass, tyArgs)
+  either err pure result
 
 -- | Run the 'HasInstEnvs' effect.
 --
@@ -90,7 +123,10 @@ data HasFamInstEnvs :: Effect where
 type instance DispatchOf HasFamInstEnvs = Dynamic
 
 -- | Get the complete type family instance environments.
-getFamInstEnvs :: HasFamInstEnvs :> es => Eff es FamInstEnvs
+getFamInstEnvs
+  :: HasCallStack
+  => HasFamInstEnvs :> es
+  => Eff es FamInstEnvs
 getFamInstEnvs = send GetFamInstEnvs
 
 -- | Run the 'HasFamInstEnvs' effect.
