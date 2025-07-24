@@ -9,7 +9,6 @@ module Pantomime.Clash.Util
   ) where
 
 import GHC.Plugins hiding (empty, thNameToGhcName)
-import GHC.Types.TyThing (MonadThings (..))
 import GHC.TypeNats
 import GHC.Data.Maybe (rightToMaybe)
 import GHC.Core.TyCo.Compare (eqType)

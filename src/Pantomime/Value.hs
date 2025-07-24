@@ -44,7 +44,6 @@ import GHC.Core.Reduction (Reduction (..))
 import GHC.Core.FamInstEnv (normaliseType)
 import GHC.Builtin.Types.Prim
 import GHC.Tc.Utils.TcType (hasTyVarHead, isTyFamFree)
-import GHC.Types.TyThing (MonadThings(..))
 import GHC.TypeLits (SomeNat (..), someNatVal)
 
 import Grisette.SymPrim (SymBool)

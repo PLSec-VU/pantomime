@@ -7,7 +7,6 @@ module Pantomime.Base
   ) where
 
 import GHC.Plugins hiding (thNameToGhcName)
-import GHC.Types.TyThing (lookupId)
 import GHC.Base (noinline)
 
 import GHC.Real (overflowError, divZeroError)

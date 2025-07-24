@@ -10,6 +10,8 @@
 module Effectful.GHC.TyThing
   ( HasThings (..)
   , LookupError (..)
+  , MonadThings (..)
+  , TyThing (..)
   , lookupIdLocal
   , lookupIdAll
   ) where
@@ -21,8 +23,9 @@ import Effectful.Dispatch.Dynamic (send)
 import Effectful.Error.Static (HasCallStack, Error, throwError_, runError)
 import Effectful.Break
 
-import GHC.Plugins (CoreProgram, Id, Bind (..), varName)
-import GHC.Types.TyThing (TyThing, MonadThings (..))
+import GHC.Plugins (CoreProgram, Id, Bind (..), varName, dataConWrapId)
+import GHC.Core.ConLike (ConLike(..))
+import GHC.Types.TyThing (TyThing (..), MonadThings (..))
 import GHC.Types.Name (Name)
 
 import Data.Foldable (find, asum)
@@ -44,6 +47,30 @@ instance (Error (LookupError Name) :> es, HasThings :> es) => MonadThings (Eff e
     let err = throwError_ $ LookupError name
     result <- send $ LookupThing name
     maybe err pure result
+
+  -- TODO: These functions are not great. I want to throw a different error for
+  -- when the TyThing just doesn't match the required type. The problem is that
+  -- I don't want 'lookupThing' to have a constraint to this kind of error.
+  -- We should just make separate functions for these outside of the typeclass
+  -- and have the actual error as part of the interface!
+  lookupId name = do
+    thing <- lookupThing name
+    case thing of
+      AnId ident -> pure ident
+      AConLike (RealDataCon dataCon) -> pure $ dataConWrapId dataCon
+      _ -> throwError_ $ LookupError name
+
+  lookupDataCon name = do
+    thing <- lookupThing name
+    case thing of
+      AConLike (RealDataCon dataCon) -> pure dataCon
+      _ -> throwError_ $ LookupError name
+
+  lookupTyCon name = do
+    thing <- lookupThing name
+    case thing of
+      ATyCon tyCon -> pure tyCon
+      _ -> throwError_ $ LookupError name
 
 -- | Lookup a local identifier.
 lookupIdLocal
