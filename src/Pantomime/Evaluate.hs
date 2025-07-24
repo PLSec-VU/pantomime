@@ -1,11 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE DerivingVia #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveLift #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE UndecidableInstances #-}
-
 module Pantomime.Evaluate
   ( evaluate
   ) where
@@ -26,13 +18,14 @@ import Data.Composition ((.:))
 import Grisette
   ( SymBool
   , Mergeable (..)
+  , SimpleMergeable (..)
   , SymEq (..)
   , SymOrd (..)
   , UnionView (..)
   , SignConversion (..)
   , true
   , symAnd
-  , mrgLiftA2, ITEOp (..)
+  , mrgLiftA2
   )
 import Grisette.Unified (EvalModeTag (..))
 
@@ -652,22 +645,22 @@ evalPrimOp = \case
     toWordSized = sizedBVResize . unWordPW
 
     symGe :: SymOrd a => a -> a -> IntPW S ws
-    symGe lhs rhs = IntPW $ symIte (lhs .>= rhs) 1 0
+    symGe lhs rhs = IntPW $ mrgIte (lhs .>= rhs) 1 0
 
     symGt :: SymOrd a => a -> a -> IntPW S ws
-    symGt lhs rhs = IntPW $ symIte (lhs .> rhs) 1 0
+    symGt lhs rhs = IntPW $ mrgIte (lhs .> rhs) 1 0
 
     symEq :: SymEq a => a -> a -> IntPW S ws
-    symEq lhs rhs = IntPW $ symIte (lhs .== rhs) 1 0
+    symEq lhs rhs = IntPW $ mrgIte (lhs .== rhs) 1 0
 
     symNe :: SymEq a => a -> a -> IntPW S ws
-    symNe lhs rhs = IntPW $ symIte (lhs ./= rhs) 1 0
+    symNe lhs rhs = IntPW $ mrgIte (lhs ./= rhs) 1 0
 
     symLt :: SymOrd a => a -> a -> IntPW S ws
-    symLt lhs rhs = IntPW $ symIte (lhs .< rhs) 1 0
+    symLt lhs rhs = IntPW $ mrgIte (lhs .< rhs) 1 0
 
     symLe :: SymOrd a => a -> a -> IntPW S ws
-    symLe lhs rhs = IntPW $ symIte (lhs .<= rhs) 1 0
+    symLe lhs rhs = IntPW $ mrgIte (lhs .<= rhs) 1 0
 
 binary
   :: Error EvalError :> es

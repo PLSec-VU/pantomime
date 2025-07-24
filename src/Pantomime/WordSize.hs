@@ -392,6 +392,13 @@ shiftL' = do
   -- place. The alternative is perhaps to use 'withLocation' from pantomime.
   -- I guess it is also still technically something that can be recreated.
   -- Same problem for the other shifts btw.
+  --
+  -- One reasonable approach would be to make some conversion function between
+  -- Var and Symbol. Value should then only expose stuff to work with Var. At
+  -- that point, we know that once we have the Id for the corresponding shift
+  -- operation, it will always be unique. At least, I think it is a good idea
+  -- to tightly couple Var and Symbol. If we can interchange them, that would
+  -- be great for a lot of things.
   let ident = withMetadata "shiftL" (Atom "Pantomime.UB")
   shift' ident symShift
 
@@ -402,13 +409,13 @@ shiftL' = do
 -- an uninterpreted function call. The concrete shift will apply Grisette shift
 -- semantics; any behaviour will do as its result is undefined.
 shift'
-  :: forall mode bv ws
-   . DecideEvalMode mode
+  :: forall bv ws
+   . DecideEvalMode (EvalMode bv)
   => KnownWordSize ws
   => KnownNat (BitSize bv)
-  => SymFromIntegral (IntPW mode ws) bv
-  => (mode ~ S => GenSymSimple () bv)
-  => (mode ~ S => SimpleMergeable bv)
+  => SymFromIntegral (IntPW (EvalMode bv) ws) bv
+  => (EvalMode bv ~ S => GenSymSimple () bv)
+  => (EvalMode bv ~ S => SimpleMergeable bv)
   => Identifier
   -- ^ Identifier for uninterpreted function when shift is out of bounds. This
   -- is to model undefined behaviour.
@@ -416,7 +423,7 @@ shift'
   -- ^ The shift function.
   -> bv
   -- ^ Bitvector to shift.
-  -> IntPW mode ws
+  -> IntPW (EvalMode bv) ws
   -- ^ Index; how much to shift by.
   -> bv
 shift' ident f value idx = do
@@ -427,13 +434,18 @@ shift' ident f value idx = do
   -- An implementation is allowed to do whatever for undefined behaviour.
   -- As such, for concrete evaluation we just return whatever Grisette
   -- computes for out-of-bounds shifts.
-  withMode @mode result do
+  withMode @(EvalMode bv) result do
     -- The bit-size of platform words.
     let size = fromInteger $ natVal (Proxy @(BitSize bv))
 
     -- The bounds within which a shift is defined.
     let isBound = 0 .<= idx .&& idx .< size
 
+    -- FIXME: This isn't an uninterpreted function! It's just a single value,
+    -- which may give false positives. Once I have an interface for creating
+    -- symbolic values that depend on some set of arguments, I should use it
+    -- here! This is something that I need to do anyway for symbolic function
+    -- support.
     -- In the symbolic instance, we model undefined behaviour via an
     -- uninterpreted function.
     let ub = genSymSimple () ident
