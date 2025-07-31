@@ -43,9 +43,8 @@ import Grisette
   , pattern If
   )
 
-import Data.Functor.Classes
+import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1)
 
-import Control.Monad.Identity (Identity(..))
 import Control.Applicative (Alternative (..))
 
 -- | A wrapper around the Grisette 'Union' type.
@@ -82,6 +81,25 @@ instance DecideEvalMode mode => Monad (Union mode) where
     let bind = withMode @mode (>>=) (>>=)
     let f' = unUnion . f
     Union $ bind m f'
+
+instance DecideEvalMode mode => Foldable (Union mode) where
+  foldr f = go
+    where
+      go acc m = if
+        | Just x <- singleView m -> f x acc
+        | Just (IfViewResult _ tr fl) <- ifView m -> go (go acc fl) tr
+        -- TODO: This is aweful. Shouldn't Grisette just change the interface on
+        -- this or something?...
+        | otherwise -> error "BUG: union should always be either Single or If"
+
+instance DecideEvalMode mode => Traversable (Union mode) where
+  traverse f m = if
+    | Just x <- singleView m -> pure <$> f x
+    | Just (IfViewResult cond tr fl) <- ifView m -> do
+      mrgIfPropagatedStrategy cond <$> traverse f tr <*> traverse f fl
+    -- TODO: This is aweful. Shouldn't Grisette just change the interface on
+    -- this or something?...
+    | otherwise -> error "BUG: union should always be either Single or If"
 
 instance DecideEvalMode mode => TryMerge (Union mode) where
   tryMergeWithStrategy strategy (Union m) = do
@@ -121,13 +139,12 @@ instance (forall a. Mergeable a => SimpleMergeable (Union S a))=> SymBranching (
 
 instance DecideEvalMode mode => UnionView (Union mode) where
   singleView = do
-    let op = withMode @mode (pure . runIdentity) singleView
+    let op = withMode @mode singleView singleView
     op . unUnion
 
-  ifView = do
+  ifView (Union value) = withMode @mode empty do
     let wrap (IfViewResult cond tr fl) = IfViewResult cond (Union tr) (Union fl)
-    let op = withMode @mode (const empty) (fmap wrap . ifView)
-    op . unUnion
+    wrap <$> ifView value
 
 instance (DecideEvalMode mode, EvalSym a) => EvalSym (Union mode a) where
   evalSym = evalSym1
