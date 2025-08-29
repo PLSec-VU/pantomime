@@ -7,7 +7,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE PatternSynonyms #-}
 
-module Pantomime.Expr4
+module Pantomime.Expr
   ( Eval
   , EvalError (..)
   , Expr (..)
@@ -42,6 +42,7 @@ module Pantomime.Expr4
   , saturate
 
   , throwError'
+  , whyFail'
 
   , Subst
   , emptySubst
@@ -51,8 +52,6 @@ module Pantomime.Expr4
   , substTy
   , substCo
   ) where
-
-import Prelude hiding (Semigroup (..))
 
 import GHC.Plugins qualified as GHC
 import GHC.Core.Type qualified as GHC
@@ -65,6 +64,15 @@ import GHC.Core.Opt.Arity
   , pushCoValArg
   )
 import GHC.Builtin.Types.Prim
+  ( int8PrimTy
+  , int16PrimTy
+  , int32PrimTy
+  , int64PrimTy
+  , word8PrimTy
+  , word16PrimTy
+  , word32PrimTy
+  , word64PrimTy
+  )
 import GHC.Core.FamInstEnv
   ( FamInstEnvs
   , topNormaliseType_maybe
@@ -138,12 +146,32 @@ import GHC.Plugins
   , dataConInstArgTys
   , splitForAllTyVars
   , mkTyVarTy
-  , splitFunTys, splitTyConApp_maybe, dataConExTyCoVars, splitAtList, dropList, dataConUnivTyVars, decomposeCo, tyConArity, tyConRolesRepresentational, liftCoSubstWithEx, dataConRepArgTys
+  , splitFunTys
+  , splitTyConApp_maybe
+  , dataConExTyCoVars
+  , splitAtList
+  , dropList
+  , dataConUnivTyVars
+  , decomposeCo
+  , tyConArity
+  , tyConRolesRepresentational
+  , liftCoSubstWithEx
+  , dataConRepArgTys
   )
 
-import GHC.TypeNats (KnownNat, SomeNat (..))
-import GHC.Generics (Generic, Generic1)
-import GHC.Stack (CallStack, callStack, prettyCallStack)
+import GHC.TypeNats
+  ( KnownNat
+  , SomeNat (..)
+  )
+import GHC.Generics
+  ( Generic
+  , Generic1
+  )
+import GHC.Stack
+  ( CallStack
+  , callStack
+  , prettyCallStack
+  )
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -187,12 +215,15 @@ import Data.Either (isLeft)
 import Data.String (IsString(..))
 import Data.List ((!?))
 import Data.Functor ((<&>))
+import Data.Traversable (for)
 import Data.Typeable
   ( type (:~:) (..)
   , Proxy (..)
   , eqT
   )
 
+import Control.Arrow (Arrow(..))
+import Control.Applicative (Alternative(..))
 import Control.Monad.Except
   ( MonadError (..)
   , ExceptT (..)
@@ -203,9 +234,6 @@ import Control.Monad
   , unless
   , join
   )
-import Data.Traversable (for)
-import Control.Arrow (Arrow(..))
-import Clash.Explicit.Prelude (Alternative(..))
 
 -- TODO: I want to add plucky error values to Eval. Note that I also want to
 -- get rid of the MonadError there.
@@ -456,8 +484,8 @@ pprExpr
   -> SDoc
 pprExpr addParens = \case
   Lit lit -> ppr lit
-  Type ty -> "@" <> ppr ty
-  Coercion co -> "@~" <> ppr co
+  Type ty -> "@" GHC.<> ppr ty
+  Coercion co -> "@~" GHC.<> ppr co
   Cast expr co -> addParens $ sep
     [ pprUnion parens pprExpr expr
     , "`cast`" <+> pprOptCo co
@@ -524,7 +552,7 @@ instance Outputable Literal where
       , Just dc <- tyConDataCons tc !? fromIntegral tag' -> ppr dc
       -- TODO: Technically this print is wrong as the type application should be
       -- the whole type, not just the TyCon.
-      | isEnumerationTyCon tc -> "tagToEnum#" <+> "@" <> ppr tc <+> ppr (SomeBV tag)
+      | isEnumerationTyCon tc -> "tagToEnum#" <+> "@" GHC.<> ppr tc <+> ppr (SomeBV tag)
       | otherwise -> "INVALID DATACON"
     Int value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
     Word value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
@@ -786,11 +814,13 @@ concreteDataCon tag tc = do
   tag' <- toCon @_ @(IntN C n) tag 
   dcs !? fromIntegral tag'
 
+-- | Collect the arguments of an application.
 collectArgs
   :: Expr
   -> (Expr, [Arg])
 collectArgs = second (fmap unthunk) . collectThunks
 
+-- | Collect the thunks of an application.
 collectThunks
   :: Expr
   -> (Expr, [Thunk])
@@ -800,6 +830,9 @@ collectThunks = go []
       App fun arg -> go (arg: args) fun
       expr -> (expr, args)
 
+-- | Transform thunks into arguments.
+--
+-- Really, args are just always thunks. This will put forced values into thunks.
 unthunk
   :: Thunk
   -> Arg
@@ -839,17 +872,21 @@ collectScrut = \case
   -- If not a cast, we attempt to get the literal at the spine and return the
   -- arguments excluding the universal type arguments.
   expr -> do
+    -- Gather a literal and it's arguments if possible.
     (lit, args) <- case collectArgs expr of
       (Lit lit, args) -> pure (lit, args)
       _ -> throwError' ()
 
+    -- Find the number of universal arguments required for the literal.
     let univ = case lit of
           DataCon _ tc -> tyConArity tc
           Int {} -> 0
           Word {} -> 0
 
+    -- Drop the universal arguments and return.
     pure (lit, drop univ args)
 
+-- | Push a TyConAppCo into the arguments of a DataCon.
 pushCoDataCon
   :: MonadError (EvalError ()) m
   => DataCon
@@ -871,6 +908,7 @@ pushCoDataCon dc args co = do
   (exTys, valArgs) <- do
     let (exArgs, valArgs) = splitAtList dcExVars $ dropList dcUnivVars args
     exTys <- for exArgs \case
+      -- TODO: Do we need to wrap Coercions with mkCoercionTy?
       Forced (Type ty) -> pure ty
       _ -> throwError' ()
     valArgs' <- for valArgs \case
@@ -882,7 +920,7 @@ pushCoDataCon dc args co = do
   let univCo = decomposeCo (tyConArity tcR) co $ tyConRolesRepresentational tcR
 
   -- Create the new existential type arguments and the type substitution for
-  -- the inner casts.
+  -- the argument casts.
   let (psiSubst, exTys')
         = liftCoSubstWithEx Representational dcUnivVars univCo dcExVars exTys
 
@@ -1034,7 +1072,7 @@ freshExpr famInst root = go Variable
             let scrut = tag .== fromIntegral (dataConTagZ dc)
 
             let fieldTys = scaledThing <$> dataConInstArgTys dc tyArgs
-            let args = zip [0..] fieldTys <&> \(idx, ty') -> do
+            let valArgs = zip [0..] fieldTys <&> \(idx, ty') -> do
                   go var
                     { varType = ty'
                     , varAccessor = Accessor dc idx : varAccessor var
@@ -1043,7 +1081,7 @@ freshExpr famInst root = go Variable
             -- FIXME: This should get the proper platform size.
             let dc' = mkLit $ mkDataCon @64 dc
             let tyArgs' = pure . mkType <$> tyArgs
-            let expr = mkApps dc' (tyArgs'  ++ args)
+            let expr = mkApps dc' $ tyArgs' ++ valArgs
 
             pure $ mrgIte scrut expr acc
 
@@ -1057,6 +1095,9 @@ saturate famInst expr = do
   -- TODO: I don't want to generate new arguments for each inner expression. I
   -- just want arguments once. If I can do exprType for the whole thing, then
   -- perhaps I can change the type of this to (Eval Expr, [(Var, Arg)]).
+  -- Actually, exprType already only uses the error part of the monad. We
+  -- should just put the error part of the monad as the outer one. Then we can
+  -- have the Eval for the inner Expr.
   ty <- exprType expr
   let (tvs, bty) = splitForAllTyVars ty
   let tyArgs = pure . mkType . mkTyVarTy <$> tvs
@@ -1089,6 +1130,10 @@ whyFail'
   -> m b
 whyFail' err = maybe (throwError' err) pure
 
+-- | A substitution map for 'Expr'.
+--
+-- Note, it is strickingly similar to the GHC Substitution. The main difference
+-- is the lookup for identifiers, which will look up a symbolic expression.
 data Subst where
   Subst ::
     { scSubst :: InScopeSet
@@ -1097,6 +1142,7 @@ data Subst where
     , cvSubst :: CvSubstEnv
     } -> Subst
 
+-- | An empty substitution map.
 emptySubst :: Subst
 emptySubst = Subst
   { scSubst = emptyInScopeSet
@@ -1105,6 +1151,7 @@ emptySubst = Subst
   , cvSubst = emptyVarEnv
   }
 
+-- | Extend the substitution with the given mapping.
 extendSubst
   :: Subst
   -> Var
@@ -1160,6 +1207,7 @@ extendSubstMany
   -> Eval Subst
 extendSubstMany = foldM $ uncurry . extendSubst
 
+-- | Lookup a variable in the current substitution environment.
 lookupId
   :: HasCallStack
   => Subst
@@ -1167,6 +1215,7 @@ lookupId
   -> Eval Expr
 lookupId subst = join . whyFail' () . lookupVarEnv (idSubst subst)
 
+-- | Substitute a Type.
 substTy
   :: Subst
   -> Type
@@ -1175,6 +1224,7 @@ substTy subst ty = do
   let subst' = tyCoSubst subst
   GHC.substTy subst' ty
 
+-- | Substitute a Coercion.
 substCo
   :: Subst
   -> Coercion
@@ -1183,6 +1233,7 @@ substCo subst ty = do
   let subst' = tyCoSubst subst
   GHC.substCo subst' ty
 
+-- | Get a GHC Substitution than can be used for type and coercion substitution.
 tyCoSubst :: Subst -> GHC.Subst
 tyCoSubst Subst { .. } = GHC.Subst scSubst emptyVarEnv tvSubst cvSubst
 
