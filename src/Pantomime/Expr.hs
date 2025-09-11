@@ -10,8 +10,12 @@
 module Pantomime.Expr
   ( Eval
   , EvalError (..)
+  , Variant (..)
   , Expr (..)
+  , Arg
   , Literal (..)
+  , Type
+  , Coercion
 
   , pprExpr
   , pprArg
@@ -20,6 +24,7 @@ module Pantomime.Expr
   , mkDataCon
   , mkIntN
   , mkWordN
+  , mkInteger
   , mkType
   , mkCoercion
   , mkLam
@@ -35,6 +40,7 @@ module Pantomime.Expr
   , eqLit
   , exprType
   , litType
+  , concreteDataCon
   , collectArgs
   , collectScrut
 
@@ -45,12 +51,15 @@ module Pantomime.Expr
   , whyFail'
 
   , Subst
+  , dbgIdEnv
   , emptySubst
   , extendSubst
   , extendSubstMany
   , lookupId
   , substTy
+  , substTyVar
   , substCo
+  , dbgE
   ) where
 
 import GHC.Plugins qualified as GHC
@@ -71,7 +80,7 @@ import GHC.Builtin.Types.Prim
   , word8PrimTy
   , word16PrimTy
   , word32PrimTy
-  , word64PrimTy
+  , word64PrimTy, intPrimTy, wordPrimTy
   )
 import GHC.Core.FamInstEnv
   ( FamInstEnvs
@@ -156,12 +165,11 @@ import GHC.Plugins
   , tyConArity
   , tyConRolesRepresentational
   , liftCoSubstWithEx
-  , dataConRepArgTys
+  , dataConRepArgTys, TyVar
   )
 
 import GHC.TypeNats
   ( KnownNat
-  , SomeNat (..)
   )
 import GHC.Generics
   ( Generic
@@ -193,15 +201,21 @@ import Grisette
   , Default (..)
   , Default1 (..)
   , wrapStrategy
-  , product2Strategy
   , liftUnion
   , simple
   , withMetadata
   , pattern Single
-  , pattern If, SymBool
+  , pattern If, SymBool, SymInteger
   )
 
 import Pantomime.Orphan.GHC ()
+import Pantomime.Grisette.SomeBV (SomeBV (..))
+import Pantomime.Grisette.Mergeable
+  ( partialStrategy
+  , ifStrategy
+  , tupleStrategy
+  , impossible
+  )
 import Pantomime.Grisette.BitVector
   ( IntN
   , WordN
@@ -211,14 +225,12 @@ import Pantomime.Util
   , freshIds
   )
 
-import Data.Either (isLeft)
 import Data.String (IsString(..))
 import Data.List ((!?))
 import Data.Functor ((<&>))
 import Data.Traversable (for)
 import Data.Typeable
   ( type (:~:) (..)
-  , Proxy (..)
   , eqT
   )
 
@@ -234,6 +246,11 @@ import Control.Monad
   , unless
   , join
   )
+
+import Debug.Trace qualified as Debug
+
+dbgE :: GHC.Outputable o => o -> Eval ()
+dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
 
 -- TODO: I want to add plucky error values to Eval. Note that I also want to
 -- get rid of the MonadError there.
@@ -270,6 +287,8 @@ data EvalError a where
 data Variant where
   UB :: Variant
   Unreachable :: Variant
+  -- TODO: Should this not contain an Eval Expr? In any case, we haven't really
+  -- implemented errors yet, so we should just look into this still.
   Raise :: Expr -> Variant
   deriving Generic
   deriving Mergeable via Default Variant
@@ -282,7 +301,7 @@ data Expr where
     :: Type
     -> Expr
   Coercion
-    :: CoercionR
+    :: Coercion
     -> Expr
   Lam
     :: Type
@@ -351,16 +370,15 @@ type Arg = Eval Expr
 -- out, so I wrote it down here!
 data Thunk where
   Thunked :: Arg -> Thunk
+  -- TODO: Shouldn't Forced just be an (Either Type Coercion)? We really don't
+  -- want to force anything else no?
   Forced :: Expr -> Thunk
   deriving Generic
   deriving Mergeable via Default Thunk
 
 data Literal where
   -- TODO: I think it makes sense to place the universal type arguments of a
-  -- DataCon inside of the literal. The reason I say this is that a tagToEnum#
-  -- call actually expects the type to coerce to. If this were to represent this
-  -- call (i.e by storing a enumeration TyCon), then we cannot really print it
-  -- as a call to tagToEnum# if it doesn't have its type arguments.
+  -- DataCon inside of the literal.
   DataCon
     :: KnownNat n
     => IntN S n
@@ -376,64 +394,18 @@ data Literal where
     => WordN S n
     -> Type
     -> Literal
-
--- | Partial merging strategy.
---
--- Sometimes we do not want to (or cannot) merge values. This function allows
--- one to encode which states are mergeable. The remaining patterns will receive
--- 'NoStrategy' as merging strategy.
-partialStrategy
-  :: (r -> a)
-  -> (a -> Maybe r)
-  -> MergingStrategy r
-  -> MergingStrategy a
-partialStrategy wrap unwrap strategy = do
-  wrapStrategy
-    -- Use inner merging strategy only if possible.
-    (ifStrategy
-      isLeft
-      NoStrategy
-      (wrapStrategy
-        strategy
-        Right
-        \case Right value -> value; _ -> impossible))
-
-    -- Wrap unmergeable value in Left and mergeable ones in Right.
-    (either id wrap)
-
-    -- Unwrap from original value or merged one.
-    (\value -> maybe (Left value) Right $ unwrap value)
-
--- | If strategy.
---
--- Depending on a predicate on a mergeable value, use either the first or the
--- second strategy.
-ifStrategy
-  :: (a -> Bool)
-  -> MergingStrategy a
-  -> MergingStrategy a
-  -> MergingStrategy a
-ifStrategy f true false = SortedStrategy f \case
-  True -> true
-  False -> false
-
--- | Product strategy specialised to a tuple.
-tupleStrategy
-  :: MergingStrategy a
-  -> MergingStrategy b
-  -> MergingStrategy (a, b)
-tupleStrategy = product2Strategy (,) id
-
--- | Marker to use for unreachable branches in merging strategies.
-impossible :: HasCallStack => a
-impossible = error "BUG: sorted strategy should ensure this path is unreachable"
+  Integer
+    :: SymInteger
+    -> Type
+    -> Literal
 
 instance Mergeable Literal where
   rootStrategy = SortedStrategy
     (\case
       DataCon _ _ -> 0 :: Int
       Int _ _ -> 1
-      Word _ _ -> 2)
+      Word _ _ -> 2
+      Integer _ _ -> 3)
     \case
       0 -> wrapStrategy
         (ifStrategy
@@ -461,6 +433,11 @@ instance Mergeable Literal where
         rootStrategy
         (\case (SomeBV value, ty) -> Word value ty)
         \case Word value ty -> (SomeBV value, ty) ; _ -> impossible
+
+      3 -> wrapStrategy
+        rootStrategy
+        (\case (value, ty) -> Integer value ty)
+        \case Integer value ty -> (value, ty) ; _ -> impossible
 
       _ -> impossible
 
@@ -556,6 +533,7 @@ instance Outputable Literal where
       | otherwise -> "INVALID DATACON"
     Int value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
     Word value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
+    Integer value ty -> text (show value) <+> "::" <+> ppr ty
 
 mkLit
   :: Literal
@@ -586,6 +564,12 @@ mkWordN
   -> Literal
 mkWordN = Word
 
+mkInteger
+  :: SymInteger
+  -> Type
+  -> Literal
+mkInteger = Integer
+
 mkType
   :: Type
   -> Expr
@@ -603,7 +587,8 @@ mkLam
 mkLam = Lam
 
 mkApp
-  :: Expr
+  :: HasCallStack
+  => Expr
   -> Arg
   -> Eval Expr
 mkApp fun arg = case fun of
@@ -630,23 +615,22 @@ pushCoArg
 pushCoArg co arg = if
   | tyL <- coercionLKind co
   , isForAllTy_ty tyL -> do
-
     -- The argument needs to be a type. As such, we can force it.
     ty <- arg >>= \case
       Type ty -> pure ty
       _ -> throwError' ()
 
     -- Attempt to push the coercion into the type argument.
-    (ty', rco) <- case pushCoTyArg co ty of
-      Just result -> pure result
-      _ -> throwError' ()
+    (ty', rco) <- whyFail' () $ pushCoTyArg co ty
 
+    -- Return the type argument and result coercion.
     pure (pure $ mkType ty', rco)
 
   | otherwise -> do
-    (aco, rco) <- case pushCoValArg co of
-      Just result -> pure result
-      _ -> throwError' ()
+    -- Attempt to split the coercion into an argument and result coercion.
+    (aco, rco) <- whyFail' () $ pushCoValArg co
+
+    -- Cast the argument and return the result coercion.
     let arg' = arg >>= flip mkCastMCo aco
     pure (arg', rco)
 
@@ -703,9 +687,6 @@ mkCast expr co = do
     Coercion co' | isCoVarType $ coercionRKind co -> do
       pure $ mkCoercion (mkCoCast co' co)
 
-    -- TODO: What about TyConAppCo? Shouldn't we reduce this as well? Or perhaps
-    -- that would be best left to when we try to pattern match? Idk...
-
     _ -> pure $ Cast (pure expr) co
 
 mkVariant
@@ -743,7 +724,8 @@ eqLit = \cases
 -- like the monad error constraint too much though, so I want to find a better
 -- solution sometime.
 exprType
-  :: MonadError (EvalError ()) m
+  :: HasCallStack
+  => MonadError (EvalError ()) m
   => Expr
   -> m Type
 exprType = \case
@@ -752,6 +734,7 @@ exprType = \case
   Coercion co -> pure $ coercionType co
   Lam ty _ -> pure ty
   App fun arg -> do
+    -- TODO: Recursive call grows callstack, fix this!
     fty <- exprType fun
     if
       | Just (var, rty) <- splitForAllTyCoVar_maybe fty -> do
@@ -779,6 +762,7 @@ litType = \case
 
   Int _ ty -> pure ty
   Word _ ty -> pure ty
+  Integer _ ty -> pure ty
 
 -- | Attempts to concretise a tag to a DataCon. If the TyCon is an enumeration,
 -- this will as a back-up gather any DataCon.
@@ -882,6 +866,7 @@ collectScrut = \case
           DataCon _ tc -> tyConArity tc
           Int {} -> 0
           Word {} -> 0
+          Integer {} -> 0
 
     -- Drop the universal arguments and return.
     pure (lit, drop univ args)
@@ -1009,29 +994,31 @@ freshExpr famInst root = go Variable
       let symbolic :: Solvable (ConType s) s => s
           symbolic = symbolicVar var Field
       if
+        -- Type Family Reduction:
+        -------------------------
+        | Just reduction <- topNormaliseType_maybe famInst $ varType var -> do
+          let co = mkSymCo $ reductionCoercion reduction
+          let ty' = reductionReducedType reduction
+          let var' = var { varType = ty' }
+          inner <- go var'
+          mkCast inner co
+
         -- Primitives:
         --------------
-        -- | ty `eqType` intPrimTy -> pure $ mkIntN @n symbolic
+        -- FIXME: Generate proper platform size.
+        | ty `eqType` intPrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
         | ty `eqType` int8PrimTy -> pure $ mkLit (mkIntN @8 symbolic ty)
         | ty `eqType` int16PrimTy -> pure $ mkLit (mkIntN @16 symbolic ty)
         | ty `eqType` int32PrimTy -> pure $ mkLit (mkIntN @32 symbolic ty)
         | ty `eqType` int64PrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-        -- | ty `eqType` wordPrimTy -> pure $ mkWordN @n symbolic
+        -- FIXME: Generate proper platform size.
+        | ty `eqType` wordPrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
         | ty `eqType` word8PrimTy -> pure $ mkLit (mkWordN @8 symbolic ty)
         | ty `eqType` word16PrimTy -> pure $ mkLit (mkWordN @16 symbolic ty)
         | ty `eqType` word32PrimTy -> pure $ mkLit (mkWordN @32 symbolic ty)
         | ty `eqType` word64PrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
         -- | ty `eqType` floatPrimTy -> undefined
         -- | ty `eqType` doublePrimTy -> undefined
-
-        -- Type Family Reduction:
-        -------------------------
-        | Just reduction <- topNormaliseType_maybe famInst (varType var) -> do
-          let co = mkSymCo $ reductionCoercion reduction
-          let ty' = reductionReducedType reduction
-          let var' = var { varType = ty' }
-          inner <- go var'
-          mkCast inner co
 
         -- Algebraic Data Types:
         ------------------------
@@ -1085,7 +1072,9 @@ freshExpr famInst root = go Variable
 
             pure $ mrgIte scrut expr acc
 
-        | otherwise -> throwError' ()
+        | otherwise -> do
+          dbgE ["could not create fresh value for", ppr ty]
+          throwError' ()
 
 saturate
   :: FamInstEnvs
@@ -1141,6 +1130,11 @@ data Subst where
     , tvSubst :: TvSubstEnv
     , cvSubst :: CvSubstEnv
     } -> Subst
+
+dbgIdEnv
+  :: Subst
+  -> SDoc
+dbgIdEnv = ppr . GHC.varEnvDomain . idSubst
 
 -- | An empty substitution map.
 emptySubst :: Subst
@@ -1200,6 +1194,7 @@ extendSubst subst var arg = if
     let idSubst' = extendVarEnv (idSubst subst) var arg
     pure subst { idSubst = idSubst' } 
 
+-- | Extend the substitution with the given mappings.
 extendSubstMany
   :: Foldable f
   => Subst
@@ -1209,11 +1204,10 @@ extendSubstMany = foldM $ uncurry . extendSubst
 
 -- | Lookup a variable in the current substitution environment.
 lookupId
-  :: HasCallStack
-  => Subst
+  :: Subst
   -> Var
-  -> Eval Expr
-lookupId subst = join . whyFail' () . lookupVarEnv (idSubst subst)
+  -> Maybe (Eval Expr)
+lookupId = lookupVarEnv . idSubst
 
 -- | Substitute a Type.
 substTy
@@ -1223,6 +1217,15 @@ substTy
 substTy subst ty = do
   let subst' = tyCoSubst subst
   GHC.substTy subst' ty
+
+-- | Substitute a TyVar.
+substTyVar
+  :: Subst
+  -> TyVar
+  -> Type
+substTyVar subst tv = do
+  let subst' = tyCoSubst subst
+  GHC.substTyVar subst' tv
 
 -- | Substitute a Coercion.
 substCo
@@ -1236,28 +1239,3 @@ substCo subst ty = do
 -- | Get a GHC Substitution than can be used for type and coercion substitution.
 tyCoSubst :: Subst -> GHC.Subst
 tyCoSubst Subst { .. } = GHC.Subst scSubst emptyVarEnv tvSubst cvSubst
-
--- TODO: This thing should get its own module!
-data SomeBV bv where
-  SomeBV :: KnownNat n => bv n -> SomeBV bv
-
-instance (forall n. KnownNat n => Show (bv n)) => Show (SomeBV bv) where
-  show (SomeBV value) = show value
-
--- FIXME: This should really use the inner Outputable instance.
-instance (forall n. KnownNat n => Show (bv n)) => Outputable (SomeBV bv) where
-  ppr = text . show
-
-instance (forall n. KnownNat n => Mergeable (bv n)) => Mergeable (SomeBV bv) where
-  rootStrategy = SortedStrategy
-    (\(SomeBV @n _) -> SomeNat @n Proxy)
-    (\(SomeNat @n _) -> wrapStrategy @(bv n)
-      rootStrategy
-      SomeBV
-      \case SomeBV @m bv | Just Refl <- eqT @n @m -> bv ; _ -> impossible)
-
-instance (forall n. KnownNat n => ToSym (bva n) (bvb n)) => ToSym (SomeBV bva) (SomeBV bvb) where
-  toSym (SomeBV @n bv) = SomeBV @n $ toSym bv
-
-instance (forall n. KnownNat n => ToCon (bva n) (bvb n)) => ToCon (SomeBV bva) (SomeBV bvb) where
-  toCon (SomeBV @n bv) = SomeBV @n <$> toCon bv
