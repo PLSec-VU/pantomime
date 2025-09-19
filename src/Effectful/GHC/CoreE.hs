@@ -170,22 +170,15 @@ instance Semigroup CoreWriter where
 -- | Reconstruct the CoreReader from the CoreM monad.
 getCoreReader :: CoreM CoreReader
 getCoreReader = do
-  hsc <- getHscEnv
+  cr_hsc_env <- getHscEnv
   -- Sadly, 'getHomeRuleBase' is not exported directly. This is a work around
   -- for now, but it is really not great...
-  rules <- re_home_rules <$> initRuleEnv undefined
-  modu <- getModule
-  ctx <- getNamePprCtx
-  loc <- getSrcSpanM
-  tag <- getUniqTag
-  pure CoreReader
-    { cr_hsc_env = hsc
-    , cr_rule_base = rules
-    , cr_module = modu
-    , cr_name_ppr_ctx = ctx
-    , cr_loc = loc
-    , cr_uniq_tag = tag
-    }
+  cr_rule_base <- re_home_rules <$> initRuleEnv undefined
+  cr_module <- getModule
+  cr_name_ppr_ctx <- getNamePprCtx
+  cr_loc <- getSrcSpanM
+  cr_uniq_tag <- getUniqTag
+  pure CoreReader { .. }
 
 -- | Same as 'runCoreM', but using records.
 runCoreM' :: CoreReader -> CoreM a -> IO (a, CoreWriter)
