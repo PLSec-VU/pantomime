@@ -6,7 +6,6 @@ module Pantomime.Symbolise
   , symboliseBindMany
   ) where
 
-import GHC.Stack (HasCallStack)
 import GHC.Plugins qualified as GHC
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
@@ -20,25 +19,34 @@ import GHC.Builtin.Types.Prim
   , word16PrimTy
   , word32PrimTy
   , word64PrimTy
+  , byteArrayPrimTy
   )
 
-import Pantomime.Expr
-import Pantomime.Util (foldM')
+import GHC.Stack (HasCallStack)
+import GHC.TypeNats (KnownNat)
 
-import Grisette (mrgIf, LogicalOp (..), SignConversion (..), SymOrd (..), SimpleMergeable (..), SymBool, SymEq (..))
+import Pantomime.Expr
+import Pantomime.Subst
+import Pantomime.Util (foldM')
+import Pantomime.Grisette.SizedBV (sizedBVResize)
+import Pantomime.Primitive.Reify
+
+import Grisette
+  ( LogicalOp (..)
+  , SignConversion (..)
+  , SymOrd (..)
+  , SimpleMergeable (..)
+  , SymBool
+  , SymEq (..)
+  , mrgIf
+  )
 
 import Control.Monad.Except (MonadError(..))
-import Control.Monad (join, foldM)
+import Control.Monad (join, foldM, unless)
 import Control.Arrow (Arrow(..))
-import Pantomime.Grisette.BitVector (IntN, WordN)
-import Grisette.Unified (EvalModeTag(..))
-import Data.Typeable (type (:~:)(..), eqT, Proxy (..))
-import GHC.TypeNats (Nat, KnownNat)
-import GHC.TypeLits (natVal)
-import Data.Type.Bool (type (||))
-import Data.Type.Equality (type (==))
-import Pantomime.Grisette.SizedBV (sizedBVResize)
+
 import Data.Bits (Bits(..), (.^.))
+import Data.Typeable (type (:~:)(..), eqT)
 
 symbolise
   :: HasCallStack
@@ -48,27 +56,33 @@ symbolise
 symbolise = go
   where
     go subst = \case
-      -- TODO: Tidy up unfolding code!
+      -- TODO: Maybe just pattern match on Var once and use multiple guards.
+      GHC.Var var | Just expr <- lookupIdSubst subst var -> expr
+
+      -- TODO: As unfoldings are closed, should we be using the subst0 that
+      -- was given at the initial call of this function? It would ensure the
+      -- substitution grows a lot less in size. I'm not sure if this actually
+      -- matters though.
       GHC.Var var | GHC.CoreUnfolding { uf_tmpl } <- GHC.idUnfolding var -> do
         go subst uf_tmpl
 
-      GHC.Var var | GHC.DFunUnfolding { df_bndrs, df_con, df_args } <- GHC.idUnfolding var -> do
+      GHC.Var var | GHC.DFunUnfolding { .. } <- GHC.idUnfolding var -> do
         let dataCon = GHC.Var $ GHC.dataConWorkId df_con
         let inner = GHC.mkApps dataCon df_args
         let quantified = GHC.mkLams df_bndrs inner
         go subst quantified
 
-      -- FIXME: Give proper word size.
-      GHC.Var var | Just op <- GHC.isPrimOpId_maybe var -> symbolisePrimOp @64 op
-
-      GHC.Var var | Just _ <- GHC.isPrimOpId_maybe var -> throwError' ()
+      -- FIXME: Give proper platform size.
+      GHC.Var var | Just op <- GHC.isPrimOpId_maybe var -> do
+        symbolisePrimOp @64 op
 
       GHC.Var var | Just dc <- GHC.isDataConId_maybe var -> do
         -- FIXME: This should get the proper platform size.
         let dc' = mkDataCon @64 dc
         pure $ mkLit dc'
 
-      GHC.Var var -> lookupId subst var
+      -- TODO: Give this a proper error.
+      GHC.Var _var -> throwError' ()
 
       GHC.Lit lit -> mkLit <$> symboliseLit lit
 
@@ -147,7 +161,8 @@ symboliseBind subst = \case
     subst'
 
 symboliseBindMany
-  :: Foldable f
+  :: HasCallStack
+  => Foldable f
   => Subst
   -> f GHC.CoreBind
   -> Eval Subst
@@ -174,10 +189,13 @@ symboliseLit = \case
       GHC.LitNumWord16 -> pure $ Word @16 num' word16PrimTy
       GHC.LitNumWord32 -> pure $ Word @32 num' word32PrimTy
       GHC.LitNumWord64 -> pure $ Word @64 num' word64PrimTy
-      -- TODO: The BigNat primitive operations are kind of "hidden". Somehow, we
-      -- want to wrap the behaviour!
-      -- LitNumBigNat -> throwError ()
-      _ -> throwError' ()
+      -- TODO: The BigNat primitive is a literal for BigNat# (which is a
+      -- ByteArray#). Once we have byte array literals, we could encode this
+      -- as such. For now, it is fine to just encode it as an Integer literal
+      -- with type ByteArray#. As we constant fold literally everything anyway,
+      -- it shouldn't be slow if we convert such a ByteArray# constant to a
+      -- symbolic integer later.
+      GHC.LitNumBigNat -> pure $ Integer num' byteArrayPrimTy
 
   -- GHC.LitFloat num -> do
   --   let num' = pure $ fromRational num
@@ -191,15 +209,15 @@ symboliseLit = \case
 
 symbolisePrimOp
   :: forall n
-   . KnownNat n
+   . HasCallStack
+  => KnownNat n
   => PrimOp
   -> Eval Expr
 symbolisePrimOp = \case
-  -- OrdOp -> throwError' ()
-
   -- Char operations:
   -------------------
   -- ChrOp -> throwError' ()
+  -- OrdOp -> throwError' ()
   -- CharGtOp -> throwError' ()
   -- CharGeOp -> throwError' ()
   -- CharEqOp -> throwError' ()
@@ -209,99 +227,99 @@ symbolisePrimOp = \case
 
   -- Int8 operations:
   -------------------
-  Int8ToIntOp -> prim @(PIntN 8 ~> PIntPW n) sizedBVResize
-  Int8ToWord8Op -> prim @(PIntN 8 ~> PWordN 8) toUnsigned
-  Int8NegOp -> unary @(PIntN 8) negate
-  Int8AddOp -> binary @(PIntN 8) (+)
-  Int8SubOp -> binary @(PIntN 8) (-)
-  Int8MulOp -> binary @(PIntN 8) (*)
+  Int8ToIntOp -> convert @(RHIntN 8) @(RHIntPW n) sizedBVResize
+  Int8ToWord8Op -> convert @(RHIntN 8) @(RHWordN 8) toUnsigned
+  Int8NegOp -> unary @(RHIntN 8) negate
+  Int8AddOp -> binary @(RHIntN 8) (+)
+  Int8SubOp -> binary @(RHIntN 8) (-)
+  Int8MulOp -> binary @(RHIntN 8) (*)
   -- Int8QuotOp -> throwError' ()
   -- Int8RemOp -> throwError' ()
   -- Int8QuotRemOp -> throwError' ()
   -- Int8SllOp -> binary @(PIntN 8) shiftL'
   -- Int8SraOp -> binary @(PIntN 8) shiftRA'
   -- Int8SrlOp -> binary @(PIntN 8) shiftRL'
-  Int8EqOp -> cmp @(PIntN 8) (.==)
-  Int8GeOp -> cmp @(PIntN 8) (.>=)
-  Int8GtOp -> cmp @(PIntN 8) (.>)
-  Int8LeOp -> cmp @(PIntN 8) (.<=)
-  Int8LtOp -> cmp @(PIntN 8) (.<)
-  Int8NeOp -> cmp @(PIntN 8) (./=)
+  Int8EqOp -> cmp @(RHIntN 8) (.==)
+  Int8GeOp -> cmp @(RHIntN 8) (.>=)
+  Int8GtOp -> cmp @(RHIntN 8) (.>)
+  Int8LeOp -> cmp @(RHIntN 8) (.<=)
+  Int8LtOp -> cmp @(RHIntN 8) (.<)
+  Int8NeOp -> cmp @(RHIntN 8) (./=)
 
   -- Int16 operations:
   --------------------
-  Int16ToIntOp -> prim @(PIntN 16 ~> PIntPW n) sizedBVResize
-  Int16ToWord16Op -> prim @(PIntN 16 ~> PWordN 16) toUnsigned
-  Int16NegOp -> unary @(PIntN 16) negate
-  Int16AddOp -> binary @(PIntN 16) (+)
-  Int16SubOp -> binary @(PIntN 16) (-)
-  Int16MulOp -> binary @(PIntN 16) (*)
+  Int16ToIntOp -> convert @(RHIntN 16) @(RHIntPW n) sizedBVResize
+  Int16ToWord16Op -> convert @(RHIntN 16) @(RHWordN 16) toUnsigned
+  Int16NegOp -> unary @(RHIntN 16) negate
+  Int16AddOp -> binary @(RHIntN 16) (+)
+  Int16SubOp -> binary @(RHIntN 16) (-)
+  Int16MulOp -> binary @(RHIntN 16) (*)
   -- Int16QuotOp -> throwError' ()
   -- Int16RemOp -> throwError' ()
   -- Int16QuotRemOp -> throwError' ()
   -- Int16SllOp -> binary @(PIntN 16) shiftL'
   -- Int16SraOp -> binary @(PIntN 16) shiftRA'
   -- Int16SrlOp -> binary @(PIntN 16) shiftRL'
-  Int16EqOp -> cmp @(PIntN 16) (.==)
-  Int16GeOp -> cmp @(PIntN 16) (.>=)
-  Int16GtOp -> cmp @(PIntN 16) (.>)
-  Int16LeOp -> cmp @(PIntN 16) (.<=)
-  Int16LtOp -> cmp @(PIntN 16) (.<)
-  Int16NeOp -> cmp @(PIntN 16) (./=) 
+  Int16EqOp -> cmp @(RHIntN 16) (.==)
+  Int16GeOp -> cmp @(RHIntN 16) (.>=)
+  Int16GtOp -> cmp @(RHIntN 16) (.>)
+  Int16LeOp -> cmp @(RHIntN 16) (.<=)
+  Int16LtOp -> cmp @(RHIntN 16) (.<)
+  Int16NeOp -> cmp @(RHIntN 16) (./=)
 
   -- Int32 operations:
   --------------------
-  Int32ToIntOp -> prim @(PIntN 32 ~> PIntPW n) sizedBVResize
-  Int32ToWord32Op -> prim @(PIntN 32 ~> PWordN 32) toUnsigned
-  Int32NegOp -> unary @(PIntN 32) negate
-  Int32AddOp -> binary @(PIntN 32) (+)
-  Int32SubOp -> binary @(PIntN 32) (-)
-  Int32MulOp -> binary @(PIntN 32) (*)
+  Int32ToIntOp -> convert @(RHIntN 32) @(RHIntPW n) sizedBVResize
+  Int32ToWord32Op -> convert @(RHIntN 32) @(RHWordN 32) toUnsigned
+  Int32NegOp -> unary @(RHIntN 32) negate
+  Int32AddOp -> binary @(RHIntN 32) (+)
+  Int32SubOp -> binary @(RHIntN 32) (-)
+  Int32MulOp -> binary @(RHIntN 32) (*)
   -- Int32QuotOp -> throwError' ()
   -- Int32RemOp -> throwError' ()
   -- Int32QuotRemOp -> throwError' ()
   -- Int32SllOp -> binary @(PIntN 32) shiftL'
   -- Int32SraOp -> binary @(PIntN 32) shiftRA'
   -- Int32SrlOp -> binary @(PIntN 32) shiftRL'
-  Int32EqOp -> cmp @(PIntN 32) (.==)
-  Int32GeOp -> cmp @(PIntN 32) (.>=)
-  Int32GtOp -> cmp @(PIntN 32) (.>)
-  Int32LeOp -> cmp @(PIntN 32) (.<=)
-  Int32LtOp -> cmp @(PIntN 32) (.<)
-  Int32NeOp -> cmp @(PIntN 32) (./=) 
+  Int32EqOp -> cmp @(RHIntN 32) (.==)
+  Int32GeOp -> cmp @(RHIntN 32) (.>=)
+  Int32GtOp -> cmp @(RHIntN 32) (.>)
+  Int32LeOp -> cmp @(RHIntN 32) (.<=)
+  Int32LtOp -> cmp @(RHIntN 32) (.<)
+  Int32NeOp -> cmp @(RHIntN 32) (./=)
 
   -- Int64 operations:
   --------------------
-  Int64ToIntOp -> prim @(PIntN 64 ~> PIntPW n) sizedBVResize
-  Int64ToWord64Op -> prim @(PIntN 64 ~> PWordN 64) toUnsigned
-  Int64NegOp -> unary @(PIntN 64) negate
-  Int64AddOp -> binary @(PIntN 64) (+)
-  Int64SubOp -> binary @(PIntN 64) (-)
-  Int64MulOp -> binary @(PIntN 64) (*)
+  Int64ToIntOp -> convert @(RHIntN 64) @(RHIntPW n) sizedBVResize
+  Int64ToWord64Op -> convert @(RHIntN 64) @(RHWordN 64) toUnsigned
+  Int64NegOp -> unary @(RHIntN 64) negate
+  Int64AddOp -> binary @(RHIntN 64) (+)
+  Int64SubOp -> binary @(RHIntN 64) (-)
+  Int64MulOp -> binary @(RHIntN 64) (*)
   -- Int64QuotOp -> throwError' ()
   -- Int64RemOp -> throwError' ()
   -- Int64SllOp -> binary @(PIntN 64) shiftL'
   -- Int64SraOp -> binary @(PIntN 64) shiftRA'
   -- Int64SrlOp -> binary @(PIntN 64) shiftRL'
-  Int64EqOp -> cmp @(PIntN 64) (.==)
-  Int64GeOp -> cmp @(PIntN 64) (.>=)
-  Int64GtOp -> cmp @(PIntN 64) (.>)
-  Int64LeOp -> cmp @(PIntN 64) (.<=)
-  Int64LtOp -> cmp @(PIntN 64) (.<)
-  Int64NeOp -> cmp @(PIntN 64) (./=) 
+  Int64EqOp -> cmp @(RHIntN 64) (.==)
+  Int64GeOp -> cmp @(RHIntN 64) (.>=)
+  Int64GtOp -> cmp @(RHIntN 64) (.>)
+  Int64LeOp -> cmp @(RHIntN 64) (.<=)
+  Int64LtOp -> cmp @(RHIntN 64) (.<)
+  Int64NeOp -> cmp @(RHIntN 64) (./=)
 
   -- Int operations:
   ------------------
-  IntToInt8Op -> prim @(PIntPW n ~> PIntN 8) sizedBVResize
-  IntToInt16Op -> prim @(PIntPW n ~> PIntN 16) sizedBVResize
-  IntToInt32Op -> prim @(PIntPW n ~> PIntN 32) sizedBVResize
-  IntToInt64Op -> prim @(PIntPW n ~> PIntN 64) sizedBVResize
-  IntToWordOp -> prim @(PIntPW n ~> PWordPW n) toUnsigned
+  IntToInt8Op -> convert @(RHIntPW n) @(RHIntN 8) sizedBVResize
+  IntToInt16Op -> convert @(RHIntPW n) @(RHIntN 16) sizedBVResize
+  IntToInt32Op -> convert @(RHIntPW n) @(RHIntN 32) sizedBVResize
+  IntToInt64Op -> convert @(RHIntPW n) @(RHIntN 64) sizedBVResize
+  IntToWordOp -> convert @(RHIntPW n) @(RHWordPW n) toUnsigned
   -- IntToFloatOp -> throwError' ()
   -- IntToDoubleOp -> throwError' ()
-  IntAddOp -> binary @(PIntPW n) (+)
-  IntSubOp -> binary @(PIntPW n) (-)
-  IntMulOp -> binary @(PIntPW n) (*)
+  IntAddOp -> binary @(RHIntPW n) (+)
+  IntSubOp -> binary @(RHIntPW n) (-)
+  IntMulOp -> binary @(RHIntPW n) (*)
   -- IntAddCOp -> throwError' ()
   -- IntSubCOp -> throwError' ()
   -- IntMul2Op -> throwError' ()
@@ -309,124 +327,124 @@ symbolisePrimOp = \case
   -- IntQuotOp -> throwError' ()
   -- IntRemOp -> throwError' ()
   -- IntQuotRemOp -> throwError' ()
-  IntAndOp -> binary @(PIntPW n) (.&.)
-  IntOrOp -> binary @(PIntPW n) (.|.)
-  IntXorOp -> binary @(PIntPW n) (.^.)
-  IntNotOp -> unary @(PIntPW n) complement
-  IntNegOp -> unary @(PIntPW n) negate
+  IntAndOp -> binary @(RHIntPW n) (.&.)
+  IntOrOp -> binary @(RHIntPW n) (.|.)
+  IntXorOp -> binary @(RHIntPW n) (.^.)
+  IntNotOp -> unary @(RHIntPW n) complement
+  IntNegOp -> unary @(RHIntPW n) negate
   -- IntSllOp -> binary $ shiftL' @(IntPW S ws)
   -- IntSraOp -> binary $ shiftRA' @(IntPW S ws)
   -- IntSrlOp -> binary $ shiftRL' @(IntPW S ws)
-  IntGtOp -> cmp @(PIntPW n) (.==)
-  IntGeOp -> cmp @(PIntPW n) (.>=)
-  IntEqOp -> cmp @(PIntPW n) (.>)
-  IntNeOp -> cmp @(PIntPW n) (.<=)
-  IntLtOp -> cmp @(PIntPW n) (.<)
-  IntLeOp -> cmp @(PIntPW n) (./=)
+  IntGtOp -> cmp @(RHIntPW n) (.==)
+  IntGeOp -> cmp @(RHIntPW n) (.>=)
+  IntEqOp -> cmp @(RHIntPW n) (.>)
+  IntNeOp -> cmp @(RHIntPW n) (.<=)
+  IntLtOp -> cmp @(RHIntPW n) (.<)
+  IntLeOp -> cmp @(RHIntPW n) (./=)
 
   -- Word8 operations:
   --------------------
-  Word8ToWordOp -> prim @(PWordN 8 ~> PWordPW n) sizedBVResize
-  Word8ToInt8Op -> prim @(PWordN 8 ~> PIntN 8) toSigned
-  Word8AddOp -> binary @(PWordN 8) (+)
-  Word8SubOp -> binary @(PWordN 8) (-)
-  Word8MulOp -> binary @(PWordN 8) (*)
+  Word8ToWordOp -> convert @(RHWordN 8) @(RHWordPW n) sizedBVResize
+  Word8ToInt8Op -> convert @(RHWordN 8) @(RHIntN 8) toSigned
+  Word8AddOp -> binary @(RHWordN 8) (+)
+  Word8SubOp -> binary @(RHWordN 8) (-)
+  Word8MulOp -> binary @(RHWordN 8) (*)
   -- Word8QuotOp -> throwError' ()
   -- Word8RemOp -> throwError' ()
   -- Word8QuotRemOp -> throwError' ()
-  Word8AndOp -> binary @(PWordN 8) (.&.)
-  Word8OrOp -> binary @(PWordN 8) (.|.)
-  Word8XorOp -> binary @(PWordN 8) (.^.)
-  Word8NotOp -> unary @(PWordN 8) complement
+  Word8AndOp -> binary @(RHWordN 8) (.&.)
+  Word8OrOp -> binary @(RHWordN 8) (.|.)
+  Word8XorOp -> binary @(RHWordN 8) (.^.)
+  Word8NotOp -> unary @(RHWordN 8) complement
   -- Word8SllOp -> binary $ shiftL' @(WordN S 8)
   -- Word8SrlOp -> binary $ shiftRL' @(WordN S 8)
-  Word8EqOp -> cmp @(PWordN 8) (.==)
-  Word8GeOp -> cmp @(PWordN 8) (.>=)
-  Word8GtOp -> cmp @(PWordN 8) (.>)
-  Word8LeOp -> cmp @(PWordN 8) (.<=)
-  Word8LtOp -> cmp @(PWordN 8) (.<)
-  Word8NeOp -> cmp @(PWordN 8) (./=)
+  Word8EqOp -> cmp @(RHWordN 8) (.==)
+  Word8GeOp -> cmp @(RHWordN 8) (.>=)
+  Word8GtOp -> cmp @(RHWordN 8) (.>)
+  Word8LeOp -> cmp @(RHWordN 8) (.<=)
+  Word8LtOp -> cmp @(RHWordN 8) (.<)
+  Word8NeOp -> cmp @(RHWordN 8) (./=)
 
   -- Word16 operations:
   ---------------------
-  Word16ToWordOp -> prim @(PWordN 16 ~> PWordPW n) sizedBVResize
-  Word16ToInt16Op -> prim @(PWordN 16 ~> PIntN 16) toSigned
-  Word16AddOp -> binary @(PWordN 16) (+)
-  Word16SubOp -> binary @(PWordN 16) (-)
-  Word16MulOp -> binary @(PWordN 16) (*)
+  Word16ToWordOp -> convert @(RHWordN 16) @(RHWordPW n) sizedBVResize
+  Word16ToInt16Op -> convert @(RHWordN 16) @(RHIntN 16) toSigned
+  Word16AddOp -> binary @(RHWordN 16) (+)
+  Word16SubOp -> binary @(RHWordN 16) (-)
+  Word16MulOp -> binary @(RHWordN 16) (*)
   -- Word16QuotOp -> throwError' ()
   -- Word16RemOp -> throwError' ()
   -- Word16QuotRemOp -> throwError' ()
-  Word16AndOp -> binary @(PWordN 16) (.&.)
-  Word16OrOp -> binary @(PWordN 16) (.|.)
-  Word16XorOp -> binary @(PWordN 16) (.^.)
-  Word16NotOp -> unary @(PWordN 16) complement
+  Word16AndOp -> binary @(RHWordN 16) (.&.)
+  Word16OrOp -> binary @(RHWordN 16) (.|.)
+  Word16XorOp -> binary @(RHWordN 16) (.^.)
+  Word16NotOp -> unary @(RHWordN 16) complement
   -- Word16SllOp -> binary $ shiftL' @(WordN S 16)
   -- Word16SrlOp -> binary $ shiftRL' @(WordN S 16)
-  Word16EqOp -> cmp @(PWordN 16) (.==)
-  Word16GeOp -> cmp @(PWordN 16) (.>=)
-  Word16GtOp -> cmp @(PWordN 16) (.>)
-  Word16LeOp -> cmp @(PWordN 16) (.<=)
-  Word16LtOp -> cmp @(PWordN 16) (.<)
-  Word16NeOp -> cmp @(PWordN 16) (./=)
+  Word16EqOp -> cmp @(RHWordN 16) (.==)
+  Word16GeOp -> cmp @(RHWordN 16) (.>=)
+  Word16GtOp -> cmp @(RHWordN 16) (.>)
+  Word16LeOp -> cmp @(RHWordN 16) (.<=)
+  Word16LtOp -> cmp @(RHWordN 16) (.<)
+  Word16NeOp -> cmp @(RHWordN 16) (./=)
 
   -- Word32 operations:
   ---------------------
-  Word32ToWordOp -> prim @(PWordN 32 ~> PWordPW n) sizedBVResize
-  Word32ToInt32Op -> prim @(PWordN 32 ~> PIntN 32) toSigned
-  Word32AddOp -> binary @(PWordN 32) (+)
-  Word32SubOp -> binary @(PWordN 32) (-)
-  Word32MulOp -> binary @(PWordN 32) (*)
+  Word32ToWordOp -> convert @(RHWordN 32) @(RHWordPW n) sizedBVResize
+  Word32ToInt32Op -> convert @(RHWordN 32) @(RHIntN 32) toSigned
+  Word32AddOp -> binary @(RHWordN 32) (+)
+  Word32SubOp -> binary @(RHWordN 32) (-)
+  Word32MulOp -> binary @(RHWordN 32) (*)
   -- Word32QuotOp -> throwError' ()
   -- Word32RemOp -> throwError' ()
   -- Word32QuotRemOp -> throwError' ()
-  Word32AndOp -> binary @(PWordN 32) (.&.)
-  Word32OrOp -> binary @(PWordN 32) (.|.)
-  Word32XorOp -> binary @(PWordN 32) (.^.)
-  Word32NotOp -> unary @(PWordN 32) complement
+  Word32AndOp -> binary @(RHWordN 32) (.&.)
+  Word32OrOp -> binary @(RHWordN 32) (.|.)
+  Word32XorOp -> binary @(RHWordN 32) (.^.)
+  Word32NotOp -> unary @(RHWordN 32) complement
   -- Word32SllOp -> binary $ shiftL' @(WordN S 32)
   -- Word32SrlOp -> binary $ shiftRL' @(WordN S 32)
-  Word32EqOp -> cmp @(PWordN 32) (.==)
-  Word32GeOp -> cmp @(PWordN 32) (.>=)
-  Word32GtOp -> cmp @(PWordN 32) (.>)
-  Word32LeOp -> cmp @(PWordN 32) (.<=)
-  Word32LtOp -> cmp @(PWordN 32) (.<)
-  Word32NeOp -> cmp @(PWordN 32) (./=)
+  Word32EqOp -> cmp @(RHWordN 32) (.==)
+  Word32GeOp -> cmp @(RHWordN 32) (.>=)
+  Word32GtOp -> cmp @(RHWordN 32) (.>)
+  Word32LeOp -> cmp @(RHWordN 32) (.<=)
+  Word32LtOp -> cmp @(RHWordN 32) (.<)
+  Word32NeOp -> cmp @(RHWordN 32) (./=)
 
   -- Word64 operations:
   ---------------------
-  Word64ToWordOp -> prim @(PWordN 64 ~> PWordPW n) sizedBVResize
-  Word64ToInt64Op -> prim @(PWordN 64 ~> PIntN 64) toSigned
-  Word64AddOp -> binary @(PWordN 64) (+)
-  Word64SubOp -> binary @(PWordN 64) (-)
-  Word64MulOp -> binary @(PWordN 64) (*)
+  Word64ToWordOp -> convert @(RHWordN 64) @(RHWordPW n) sizedBVResize
+  Word64ToInt64Op -> convert @(RHWordN 64) @(RHIntN 64) toSigned
+  Word64AddOp -> binary @(RHWordN 64) (+)
+  Word64SubOp -> binary @(RHWordN 64) (-)
+  Word64MulOp -> binary @(RHWordN 64) (*)
   -- Word64QuotOp -> throwError' ()
   -- Word64RemOp -> throwError' ()
-  Word64AndOp -> binary @(PWordN 64) (.&.)
-  Word64OrOp -> binary @(PWordN 64) (.|.)
-  Word64XorOp -> binary @(PWordN 64) (.^.)
-  Word64NotOp -> unary @(PWordN 64) complement
+  Word64AndOp -> binary @(RHWordN 64) (.&.)
+  Word64OrOp -> binary @(RHWordN 64) (.|.)
+  Word64XorOp -> binary @(RHWordN 64) (.^.)
+  Word64NotOp -> unary @(RHWordN 64) complement
   -- Word64SllOp -> binary $ shiftL' @(WordN S 64)
   -- Word64SrlOp -> binary $ shiftRL' @(WordN S 64)
-  Word64EqOp -> cmp @(PWordN 64) (.==)
-  Word64GeOp -> cmp @(PWordN 64) (.>=)
-  Word64GtOp -> cmp @(PWordN 64) (.>)
-  Word64LeOp -> cmp @(PWordN 64) (.<=)
-  Word64LtOp -> cmp @(PWordN 64) (.<)
-  Word64NeOp -> cmp @(PWordN 64) (./=)
+  Word64EqOp -> cmp @(RHWordN 64) (.==)
+  Word64GeOp -> cmp @(RHWordN 64) (.>=)
+  Word64GtOp -> cmp @(RHWordN 64) (.>)
+  Word64LeOp -> cmp @(RHWordN 64) (.<=)
+  Word64LtOp -> cmp @(RHWordN 64) (.<)
+  Word64NeOp -> cmp @(RHWordN 64) (./=)
 
   -- Word operations:
   -------------------
-  WordToWord8Op -> prim @(PWordPW n ~> PWordN 8) sizedBVResize
-  WordToWord16Op -> prim @(PWordPW n ~> PWordN 16) sizedBVResize
-  WordToWord32Op -> prim @(PWordPW n ~> PWordN 32) sizedBVResize
-  WordToWord64Op -> prim @(PWordPW n ~> PWordN 64) sizedBVResize
-  WordToIntOp -> prim @(PWordPW n ~> PIntPW n) toSigned
+  WordToWord8Op -> convert @(RHWordPW n) @(RHWordN 8) sizedBVResize
+  WordToWord16Op -> convert @(RHWordPW n) @(RHWordN 16) sizedBVResize
+  WordToWord32Op -> convert @(RHWordPW n) @(RHWordN 32) sizedBVResize
+  WordToWord64Op -> convert @(RHWordPW n) @(RHWordN 64) sizedBVResize
+  WordToIntOp -> convert @(RHWordPW n) @(RHIntPW n) toSigned
   -- WordToFloatOp -> throwError' ()
   -- WordToDoubleOp -> throwError' ()
-  WordAddOp -> binary @(PWordPW n) (+)
-  WordSubOp -> binary @(PWordPW n) (-)
-  WordMulOp -> binary @(PWordPW n) (*)
+  WordAddOp -> binary @(RHWordPW n) (+)
+  WordSubOp -> binary @(RHWordPW n) (-)
+  WordMulOp -> binary @(RHWordPW n) (*)
   -- WordAddCOp -> throwError' ()
   -- WordSubCOp -> throwError' ()
   -- WordAdd2Op -> throwError' ()
@@ -435,168 +453,73 @@ symbolisePrimOp = \case
   -- WordRemOp -> throwError' ()
   -- WordQuotRemOp -> throwError' ()
   -- WordQuotRem2Op -> throwError' ()
-  WordAndOp -> binary @(PWordPW n) (.&.)
-  WordOrOp -> binary @(PWordPW n) (.|.)
-  WordXorOp -> binary @(PWordPW n) (.^.)
-  WordNotOp -> unary @(PWordPW n) complement
+  WordAndOp -> binary @(RHWordPW n) (.&.)
+  WordOrOp -> binary @(RHWordPW n) (.|.)
+  WordXorOp -> binary @(RHWordPW n) (.^.)
+  WordNotOp -> unary @(RHWordPW n) complement
   -- WordSllOp -> binary $ shiftL' @(WordPW S ws)
   -- WordSrlOp -> binary $ shiftRL' @(WordPW S ws)
-  WordGtOp -> cmp @(PWordPW n) (.==)
-  WordGeOp -> cmp @(PWordPW n) (.>=)
-  WordEqOp -> cmp @(PWordPW n) (.>)
-  WordNeOp -> cmp @(PWordPW n) (.<=)
-  WordLtOp -> cmp @(PWordPW n) (.<)
-  WordLeOp -> cmp @(PWordPW n) (./=)
+  WordGtOp -> cmp @(RHWordPW n) (.==)
+  WordGeOp -> cmp @(RHWordPW n) (.>=)
+  WordEqOp -> cmp @(RHWordPW n) (.>)
+  WordNeOp -> cmp @(RHWordPW n) (.<=)
+  WordLtOp -> cmp @(RHWordPW n) (.<)
+  WordLeOp -> cmp @(RHWordPW n) (./=)
 
   -- Tag operations:
-  -- TagToEnumOp -> undefined
-  -- DataToTagSmallOp -> undefined
-  -- DataToTagLargeOp -> undefined
+  ------------------
+  TagToEnumOp -> tagToEnum
+  DataToTagSmallOp -> dataToTag
+  DataToTagLargeOp -> dataToTag
 
   _ -> throwError' ()
   where
-    prim
-      :: forall a
-       . Primitive a
-      => PrimRep a
+    convert
+      :: forall a b
+       . ReifyBuiltin a
+      => ReifyBuiltin b
+      => (InterpRep a -> InterpRep b)
       -> Eval Expr
-    prim = pure . primitive @a
+    convert = builtinReify @(a ~> b) . liftF1'
 
     binary
       :: forall a
-       . Primitive a
-      => (PrimRep a -> PrimRep a -> PrimRep a)
+       . ReifyBuiltin a
+      => (InterpRep a -> InterpRep a -> InterpRep a)
       -> Eval Expr
-    binary f = pure $ primitive @(a ~> a ~> a) f
+    binary = builtinReify @(a ~> a ~> a) . liftF2'
 
     unary
       :: forall a
-       . Primitive a
-      => (PrimRep a -> PrimRep a)
+       . ReifyBuiltin a
+      => (InterpRep a -> InterpRep a)
       -> Eval Expr
-    unary f = pure $ primitive @(a ~> a) f
+    unary = builtinReify @(a ~> a) . liftF1'
 
     cmp
       :: forall a
-       . Primitive a
-      => (PrimRep a -> PrimRep a -> SymBool)
+       . ReifyBuiltin a
+      => (InterpRep a -> InterpRep a -> SymBool)
       -> Eval Expr
-    cmp f = prim @(a ~> a ~> PIntPW n) \l r -> mrgIte (f l r) 1 0
+    cmp f = builtinReify @(a ~> a ~> RHIntPW n) $ liftF2' \l r -> do
+      mrgIte (f l r) 1 0
 
--- | Primitive type.
---
--- Primitives have a Haskell type and may be converted to and from expressions.
-class Primitive a where
-  type PrimRep a
+    tagToEnum = builtinReify @(AlphaType +> RHIntPW n ~> RPoly AlphaType) do
+      liftF2 \ty arg -> do
+        tag <- arg
+        mkEnumCon tag ty
 
-  primTy :: GHC.Type
-  primArg :: Expr -> Maybe (PrimRep a)
-  primitive :: PrimRep a -> Expr
+    dataToTag = builtinReify 
+      @(BetaLevity +> AlphaBoxed BetaLevity +> RPoly AlphaType ~> RHIntPW n) do
+        liftF3 \_lev ty arg -> do
+          arg' <- arg
 
--- | Function primitive.
-data (~>) a b
-infixr ~>
+          -- Ensure the argument is of the correct type.
+          argTy <- exprType arg'
+          unless (eqType ty argTy) do
+            throwError' ()
 
-instance (Primitive a, Primitive b) => Primitive (a ~> b) where
-  type PrimRep (a ~> b) = PrimRep a -> PrimRep b
-
-  primTy = GHC.mkFunTy GHC.FTF_T_T GHC.ManyTy (primTy @a) (primTy @b)
-
-  -- TODO: This is kind of misuse, as we really just cannot implement this for
-  -- functions. It should be a superclass I feel.
-  primArg = const Nothing
-
-  primitive f = do
-    let ty = primTy @(a ~> b)
-    mkLam ty \arg -> do
-      prim <- arg >>= whyFail' () . primArg @a
-      let result = f prim
-      pure $ primitive @b result
-
--- | Fixed size integer primitive.
-data PIntN (n :: Nat)
-
-instance
-  ( KnownNat n
-  , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
-  ) => Primitive (PIntN n) where
-  type PrimRep (PIntN n) = IntN S n
-
-  primTy = case natVal @n Proxy of
-    8 -> int8PrimTy
-    16 -> int16PrimTy
-    32 -> int32PrimTy
-    64 -> int64PrimTy
-    _ -> error "unreachable due to typeclass constraint"
-
-  primArg = \case
-    Lit (Int @m tag ty)
-      | Just Refl <- eqT @n @m
-      , ty == primTy @(PIntN n) -> pure tag
-    _ -> Nothing
-
-  primitive x = do
-    let ty = primTy @(PIntN n)
-    mkLit $ mkIntN x ty
-
--- | Platform sized integer primitive.
-data PIntPW (n :: Nat)
-
-instance KnownNat n => Primitive (PIntPW n) where
-  type PrimRep (PIntPW n) = IntN S n
-
-  primTy = intPrimTy
-
-  primArg = \case
-    Lit (Int @m tag ty)
-      | Just Refl <- eqT @n @m
-      , ty == primTy @(PIntPW n) -> pure tag
-    _ -> Nothing
-
-  primitive x = do
-    let ty = primTy @(PIntPW n)
-    mkLit $ mkIntN x ty
-
--- | Fixed size natural primitive.
-data PWordN (n :: Nat)
-
-instance
-  ( KnownNat n
-  , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
-  ) => Primitive (PWordN n) where
-  type PrimRep (PWordN n) = WordN S n
-
-  primTy = case natVal @n Proxy of
-    8 -> word8PrimTy
-    16 -> word16PrimTy
-    32 -> word32PrimTy
-    64 -> word64PrimTy
-    _ -> error "unreachable due to typeclass constraint"
-
-  primArg = \case
-    Lit (Word @m tag ty)
-      | Just Refl <- eqT @n @m
-      , ty == primTy @(PWordN n) -> pure tag
-    _ -> Nothing
-
-  primitive x = do
-    let ty = primTy @(PWordN n)
-    mkLit $ mkWordN x ty
-
--- | Platform word sized natural primitive.
-data PWordPW (n :: Nat)
-
-instance KnownNat n => Primitive (PWordPW n) where
-  type PrimRep (PWordPW n) = WordN S n
-
-  primTy = wordPrimTy
-
-  primArg = \case
-    Lit (Word @m tag ty)
-      | Just Refl <- eqT @n @m
-      , ty == primTy @(PWordPW n) -> pure tag
-    _ -> Nothing
-
-  primitive x = do
-    let ty = primTy @(PWordPW n)
-    mkLit $ mkWordN x ty
+          -- Get the DataCon tag if possible.
+          case fst $ collectArgs arg' of
+            Lit (DataCon @m tag _tc) | Just Refl <- eqT @n @m -> pure tag
+            _ -> throwError' ()

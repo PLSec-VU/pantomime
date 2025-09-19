@@ -1,8 +1,19 @@
--- TODO: Rename to Primitive once we get rid of the old file.
 -- TODO: Add more primitives and more operations on them.
 -- TODO: Add top-level explanation of why we need this module and how it is
 -- implemented under the hood.
-module Pantomime.Prim
+--
+-- Here's one important note already added:
+--
+-- NOTE: These primitives are explicitly defined as 'data' and not as 'newtype'.
+-- This is because we do not want to add their reduction to the 'FamInstEnvs' as
+-- this would make fresh variable generation fragile. That is, we really don't
+-- want to create casts for these primitives, but the 'FamInstEnvs' does not
+-- provide a way to remove these mappings. As such, we instead opt to just not
+-- add them in the first place!
+-- TODO: We can remove instances from FamInstEnvs by getting the list of
+-- elements via 'famInstEnvElts', filtering it and reconstructing the filtered
+-- version via 'emptyFamInstEnv' and 'extendFamInstEnvList'.
+module Pantomime.Primitive.Operations
   ( IntN
   , plusIntN
   , timesIntN
@@ -36,7 +47,9 @@ import Data.Function (on)
 --
 -- Although this has an implementation for usage during runtime, it is expected
 -- that this is primarily used to provide interpretations of other data types.
-newtype IntN (n :: Nat) where
+--
+-- WARNING: Do not change to 'newtype'. Read module comment as to why.
+data IntN (n :: Nat) where
   IntN :: { unIntN :: Pantomime.IntN C n } -> IntN n
 
 {-# OPAQUE plusIntN #-}
@@ -52,7 +65,7 @@ absIntN :: KnownNat n => IntN n -> IntN n
 absIntN = IntN . abs . unIntN
 
 {-# OPAQUE signumIntN #-}
-signumIntN :: KnownNat n => IntN n -> IntN n
+signumIntN :: forall n. KnownNat n => IntN n -> IntN n
 signumIntN = IntN . signum . unIntN
 
 {-# OPAQUE negateIntN #-}
@@ -74,8 +87,13 @@ instance KnownNat n => Num (IntN n) where
 -- newtype WordN (n :: Nat) where
 --   WordN :: { unWordN :: Pantomime.WordN C n } -> WordN n
 
--- Interpretable unbounded integer primitive.
-newtype Integer where
+-- | Interpretable unbounded integer primitive.
+--
+-- Although this has an implementation for usage during runtime, it is expected
+-- that this is primarily used to provide interpretations of other data types.
+--
+-- WARNING: Do not change to 'newtype'. Read module comment as to why.
+data Integer where
   Integer :: { unInteger :: Prelude.Integer } -> Integer
 
 {-# OPAQUE plusInteger #-}

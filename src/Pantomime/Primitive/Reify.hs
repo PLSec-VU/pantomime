@@ -8,7 +8,11 @@ module Pantomime.Primitive.Reify
   -- | Lambdas and quantifiers.
   , type (~>)
   , type (+>)
+  , RPoly
   , AlphaNat
+  , AlphaType
+  , AlphaBoxed
+  , BetaLevity
 
   -- | Pantomime primitives.
   , RIntN
@@ -30,6 +34,8 @@ module Pantomime.Primitive.Reify
   , liftF2'
   , liftF3
   , liftF3'
+  , liftF4
+  , liftF4'
   ) where
 
 import Pantomime.Expr
@@ -49,12 +55,12 @@ import Pantomime.Expr
   , concreteDataCon
   , throwError'
   , whyFail'
+  , exprType
   )
 import Pantomime.Subst
-  ( Subst
-  , extendSubst
+  ( extendSubst
   , substTy
-  , substTyVar
+  , mkEmptySubst
   )
 import Pantomime.Primitive.Operations qualified as Primitive
 import Pantomime.Grisette.BitVector (IntN, WordN)
@@ -65,35 +71,37 @@ import GHC.Builtin.Types.Prim
   ( alphaTyVar
   , wordPrimTy
   , intPrimTy
-  , intPrimTyCon
-  , int8PrimTyCon
-  , int16PrimTyCon
-  , int32PrimTyCon
-  , int64PrimTyCon
-  , wordPrimTyCon
-  , word8PrimTyCon
-  , word16PrimTyCon
-  , word32PrimTyCon
-  , word64PrimTyCon
   , levPolyBetaTyVar
+  , intPrimTy
+  , int8PrimTy
+  , int16PrimTy
+  , int32PrimTy
+  , int64PrimTy
+  , wordPrimTy
+  , word8PrimTy
+  , word16PrimTy
+  , word32PrimTy
+  , word64PrimTy
   )
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
   ( Name
-  , TyCon
-  , TyVar
   , ForAllTyBinder
   , ForAllTyFlag (..)
   , VarBndr (..)
   , mkTyConApp
   , mkSymCo
-  , setTyVarKind
+  , mkFunTy
   , mkTyVarTy
   , mkForAllTy
   , binderVar
-  , coercionRKind
+  , setTyVarKind
+  , splitForAllCoVar_maybe
+  , splitFunTy_maybe
+  , splitTyConApp_maybe
   , instNewTyCon_maybe
+  , coercionKind
   , naturalTy
   , naturalTyCon
   , naturalNSDataCon
@@ -103,9 +111,8 @@ import GHC.Plugins
   , integerINDataCon
   , integerISDataCon
   , integerIPDataCon
-  , mkTyConTy
   , tYPETyCon
-  , boxedRepDataConTyCon
+  , boxedRepDataConTyCon, splitForAllTyCoVar_maybe
   )
 
 import Language.Haskell.TH qualified as TH
@@ -123,115 +130,118 @@ import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.TyThing
 import Effectful.GHC.TH
+import Control.Monad (unless)
+import GHC.Data.Pair (Pair(..))
 
 class Reify a where
   type InterpRep a
 
-  data TypeInfo a
-
-  typeInfo
+  reifiedType
     :: forall es
      . HasCallStack
     => Error (LookupError TH.Name) :> es
     => Error (LookupError Name) :> es
     => HasThings :> es
     => THNameToGHCName :> es
-    => Eff es (TypeInfo a)
-
-  reifiedTy
-    :: TypeInfo a
-    -> Type
+    => Eff es Type
 
   reify
-    :: TypeInfo a
-    -> Subst
+    :: Type
     -> Eval (InterpRep a)
     -> Eval Expr
 
   interpret
-    :: TypeInfo a
-    -- TODO: Do we really need this substitution here?
-    -> Subst
+    :: Type
     -> Eval Expr
     -> Eval (InterpRep a)
 
 class Reify a => ReifyBuiltin a where
-  builtinTypeInfo :: TypeInfo a
+  builtinReifiedType :: Type
 
 builtinReify
   :: forall a
    . ReifyBuiltin a
-  => Subst
-  -> Eval (InterpRep a)
+  => Eval (InterpRep a)
   -> Eval Expr
-builtinReify subst expr = do
-  let info = builtinTypeInfo @a
-  reify info subst expr
+builtinReify expr = do
+  let ty = builtinReifiedType @a
+  reify @a ty expr
 
 class Quantifier a where
   quantifier :: ForAllTyBinder
 
--- -- | Polymorphic reify marker.
--- data RPoly a
+-- | Polymorphic reify marker.
+data RPoly a
 
--- instance Quantifier a => Reify (RPoly a) where
---   type InterpRep (RPoly a) = Expr
+instance Quantifier a => Reify (RPoly a) where
+  type InterpRep (RPoly a) = Expr
 
---   data TypeInfo (RPoly a) = PolyInfo
+  reifiedType = pure $ builtinReifiedType @(RPoly a)
 
---   typeInfo = pure builtinTypeInfo
+  reify ty expr = do
+    expr' <- expr
+    ty' <- exprType expr'
 
---   reifiedTy _ = mkTyVarTy $ binderVar (quantifier @a)
+    -- Ensure the expression has the correct type.
+    unless (eqType ty ty') do
+      throwError' ()
 
---   reify = undefined
+    pure expr'
 
---   interpret = undefined
+  interpret ty expr = do
+    expr' <- expr
+    ty' <- exprType expr'
 
--- instance Quantifier a => ReifyBuiltin (RPoly a) where
---   builtinTypeInfo = PolyInfo
+    -- Ensure the expression has the correct type.
+    unless (eqType ty ty') do
+      throwError' ()
+
+    pure expr'
+
+instance Quantifier a => ReifyBuiltin (RPoly a) where
+  builtinReifiedType = mkTyVarTy $ binderVar (quantifier @a)
 
 -- | Forall arrow reify marker.
 data a +> b
 infixr +>
 
 instance (Quantifier a, Reify b) => Reify (a +> b) where
-  type InterpRep (a +> b) = InterpRep b
+  type InterpRep (a +> b) = Type -> Eval (InterpRep b)
 
-  data TypeInfo (a +> b) = ForAllInfo
-    { quantInfo :: ForAllTyBinder
-    , bodyInfo :: TypeInfo b
-    }
+  reifiedType = do
+    bodyTy <- reifiedType @b
+    pure $ mkForAllTy (quantifier @a) bodyTy
 
-  typeInfo = do
-    bodyInfo' <- typeInfo @b
-    pure ForAllInfo
-      { quantInfo = quantifier @a
-      , bodyInfo = bodyInfo'
-      }
-
-  reifiedTy ForAllInfo { .. } = mkForAllTy quantInfo $ reifiedTy bodyInfo
-
-  reify info subst body = do
-    let ty = substTy subst $ reifiedTy info
+  reify ty fun = do
+    (tvar, tbody) <- whyFail' () $ splitForAllTyCoVar_maybe ty
     pure $ mkLam ty \arg -> do
-      let tv = binderVar $ quantInfo info
-      subst' <- extendSubst subst tv arg
-      reify (bodyInfo info) subst' body
+      -- Get the type of the body.
+      subst <- extendSubst mkEmptySubst tvar arg
+      let tbody' = substTy subst tbody
 
-  interpret info subst fun = do
-    let body = do
-          fun' <- fun
-          let arg = mkTyVarTy $ binderVar (quantInfo info)
-          let arg' = pure $ mkType arg
-          mkApp fun' arg'
+      -- Compute the actual function.
+      fun' <- fun
+      arg' <- arg >>= \case
+            Type ty' -> pure ty'
+            _ -> throwError' ()
 
-    interpret (bodyInfo info) subst body
+      reify @b tbody' $ fun' arg'
+
+  interpret ty fun = do
+    (tvar, tbody) <- whyFail' () $ splitForAllCoVar_maybe ty
+    pure \arg -> do
+      -- Compute the actual function.
+      fun' <- fun
+      let arg' = pure $ mkType arg
+
+      -- Get the type of the body.
+      subst <- extendSubst mkEmptySubst tvar arg'
+      let tbody' = substTy subst tbody
+
+      interpret @b tbody' $ mkApp fun' arg'
 
 instance (Quantifier a, ReifyBuiltin b) => ReifyBuiltin (a +> b) where
-  builtinTypeInfo = ForAllInfo
-    { quantInfo = quantifier @a
-    , bodyInfo = builtinTypeInfo @b
-    }
+  builtinReifiedType = mkForAllTy (quantifier @a) (builtinReifiedType @b)
 
 -- | Function arrow reify marker.
 data a ~> b
@@ -240,44 +250,30 @@ infixr ~>
 instance (Reify a, Reify b) => Reify (a ~> b) where
   type InterpRep (a ~> b) = Eval (InterpRep a) -> Eval (InterpRep b)
 
-  data TypeInfo (a ~> b) = FunInfo
-    { argInfo :: TypeInfo a
-    , resInfo :: TypeInfo b
-    }
+  reifiedType = do
+    argTy <- reifiedType @a
+    resTy <- reifiedType @b
+    pure $ mkFunTy GHC.FTF_T_T GHC.ManyTy argTy resTy
 
-  typeInfo = do
-    argInfo' <- typeInfo @a
-    resInfo' <- typeInfo @b
-    pure FunInfo
-      { argInfo = argInfo'
-      , resInfo = resInfo'
-      }
-
-  reifiedTy FunInfo { .. } = do
-    let argTy = reifiedTy argInfo
-    let resTy = reifiedTy resInfo
-    GHC.mkFunTy GHC.FTF_T_T GHC.ManyTy argTy resTy
-
-  reify info subst fun = do
-    let ty = substTy subst $ reifiedTy info
+  reify ty fun = do
+    (_flag, _mult, argTy, resTy) <- whyFail' () $ splitFunTy_maybe ty
     pure $ mkLam ty \arg -> do
       fun' <- fun
-      let arg' = interpret (argInfo info) subst arg
-      let result = fun' arg'
-      reify (resInfo info) subst result
+      let arg' = interpret @a argTy arg
+      reify @b resTy $ fun' arg'
 
-  interpret info subst fun = do
+  interpret ty fun = do
+    (_flag, _mult, argTy, resTy) <- whyFail' () $ splitFunTy_maybe ty
     pure \arg -> do
       fun' <- fun
-      let arg' = reify (argInfo info) subst arg
-      let result = mkApp fun' arg'
-      interpret (resInfo info) subst result
+      let arg' = reify @a argTy arg
+      interpret @b resTy $ mkApp fun' arg'
 
 instance (ReifyBuiltin a, ReifyBuiltin b) => ReifyBuiltin (a ~> b) where
-  builtinTypeInfo = FunInfo
-    { argInfo = builtinTypeInfo @a
-    , resInfo = builtinTypeInfo @b
-    }
+  builtinReifiedType = do
+    let argTy = builtinReifiedType @a
+    let resTy = builtinReifiedType @b
+    mkFunTy GHC.FTF_T_T GHC.ManyTy argTy resTy
 
 -- | Sized integer primitive reify marker.
 --
@@ -292,32 +288,19 @@ data RIntN n
 instance Quantifier n => Reify (RIntN n) where
   type InterpRep (RIntN n) = SomeBV (IntN S)
 
-  data TypeInfo (RIntN n) = IntNInfo
-    { intNTcInfo :: TyCon
-    , intNNInfo :: TyVar
-    }
-
-  typeInfo = do
+  reifiedType = do
     name <- thNameToGhcName ''Primitive.IntN
     tc <- lookupTyCon name
-    pure IntNInfo
-      { intNTcInfo = tc
-      , intNNInfo = binderVar $ quantifier @n
-      }
+    let size = binderVar $ quantifier @n
+    pure $ mkTyConApp tc [mkTyVarTy size]
 
-  reifiedTy IntNInfo { .. } = do
-    mkTyConApp intNTcInfo [mkTyVarTy intNNInfo]
-
-  reify info subst value = do
-    let ty = substTy subst $ reifiedTy info
+  reify ty value = do
     SomeBV value' <- value
     pure $ mkLit (mkIntN value' ty)
 
-  interpret info subst value = do
-    let reqTy = substTy subst $ reifiedTy info
-    value >>= \case
-      Lit (Int value' ty) | eqType ty reqTy -> pure $ SomeBV value'
-      _ -> throwError' ()
+  interpret ty value = value >>= \case
+    Lit (Int value' ty') | eqType ty ty' -> pure $ SomeBV value'
+    _ -> throwError' ()
 
 -- | KnownNat constraint reify marker.
 data RKnownNat n
@@ -325,38 +308,27 @@ data RKnownNat n
 instance Quantifier n => Reify (RKnownNat n) where
   type InterpRep (RKnownNat n) = InterpRep RNatural
 
-  data TypeInfo (RKnownNat n) = KnownNatInfo
-    { knownNatTcInfo :: TyCon
-    , knownNatNInfo :: TyVar
-    }
-
-  typeInfo = do
+  reifiedType = do
     name <- thNameToGhcName ''KnownNat
     tc <- lookupTyCon name
-    pure KnownNatInfo
-      { knownNatTcInfo = tc
-      , knownNatNInfo = binderVar $ quantifier @n
-      }
+    let size = binderVar $ quantifier @n
+    pure $ mkTyConApp tc [mkTyVarTy size]
 
-  reifiedTy KnownNatInfo { .. } = do
-    mkTyConApp knownNatTcInfo [mkTyVarTy knownNatNInfo]
-
-  reify info subst value = do
-    let tc = knownNatTcInfo info
-    let tv = substTyVar subst $ knownNatNInfo info
-    (_, co) <- whyFail' () $ instNewTyCon_maybe tc [tv]
-    inner <- reify NaturalInfo subst value
+  reify ty value = do
+    (tc, targs) <- whyFail' () $ splitTyConApp_maybe ty
+    (ty', co) <- whyFail' () $ instNewTyCon_maybe tc targs
+    inner <- reify @RNatural ty' value
     mkCast inner $ mkSymCo co
 
-  interpret info subst value = do
-    let reqTy = substTy subst $ reifiedTy info
-
+  interpret ty value = do
     -- Unwrap the KnownNat typeclass (which is a cast over a Natural).
-    body <- value >>= \case
-      Cast body co | eqType reqTy $ coercionRKind co -> pure body
+    (tyL, body) <- value >>= \case
+      Cast body co
+        | Pair tyL tyR <- coercionKind co
+        , eqType ty tyR -> pure (tyL, liftUnion body)
       _ -> throwError' ()
 
-    interpret NaturalInfo subst $ liftUnion body
+    interpret @RNatural tyL body
 
 -- | Natural reify marker.
 data RNatural
@@ -364,27 +336,33 @@ data RNatural
 instance Reify RNatural where
   type InterpRep RNatural = Either (SomeBV (WordN S)) ()
 
-  data TypeInfo RNatural = NaturalInfo
+  reifiedType = pure $ builtinReifiedType @RNatural
 
-  typeInfo = pure NaturalInfo
+  reify ty expr = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty naturalTy) do
+      throwError' ()
 
-  reifiedTy _ = naturalTy
-
-  reify _info _subst expr = do
     expr >>= \case
       Left (SomeBV value) -> do
+
         -- FIXME: Give proper platform size
         let dc = mkLit $ mkDataCon @64 naturalNSDataCon
         let arg = pure $ mkLit (mkWordN value wordPrimTy)
         mkApp dc arg
+
       Right _value -> do
-        let _dc = mkLit $ mkDataCon @64 naturalNBDataCon
+        -- let _dc = mkLit $ mkDataCon @64 naturalNBDataCon
         -- let arg = pure $ mkLit (mkByteArray value byteArrayPrimTy)
         -- mkApp dc arg
         -- FIXME: Implement this once we have byte array primitives.
         undefined
 
-  interpret _info _subst expr = do
+  interpret ty expr = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty naturalTy) do
+      throwError' ()
+
     -- Gather the arguments.
     (spine, args) <- collectArgs <$> expr
 
@@ -403,10 +381,12 @@ instance Reify RNatural where
 
     if
       | dc == naturalNSDataCon
-      , Lit (Word value ty) <- arg
+      , Lit (Word value ty') <- arg
       -- TODO: We could consider turning the Int into a ByteArray, such that we
-      -- have a uniform way of interpreting a Natural.
-      , eqType ty wordPrimTy -> pure $ Left (SomeBV value)
+      -- have a uniform way of interpreting a Natural. I guess this would reduce
+      -- the number of permitted operations though, so perhaps it's not worth
+      -- it...
+      , eqType ty' wordPrimTy -> pure $ Left (SomeBV value)
 
       | dc == naturalNBDataCon
       -- FIXME: We should have a ByteArray primitive to match on here!
@@ -415,7 +395,7 @@ instance Reify RNatural where
       | otherwise -> throwError' ()
 
 instance ReifyBuiltin RNatural where
-  builtinTypeInfo = NaturalInfo
+  builtinReifiedType = naturalTy
 
 -- | Integer reify marker.
 data RInteger
@@ -423,13 +403,13 @@ data RInteger
 instance Reify RInteger where
   type InterpRep RInteger = Either (SomeBV (IntN S)) ()
 
-  data TypeInfo RInteger = IntegerInfo
+  reifiedType = pure $ builtinReifiedType @RInteger
 
-  typeInfo = pure IntegerInfo
+  reify ty expr = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty integerTy) do
+      throwError' ()
 
-  reifiedTy _ = integerTy
-
-  reify _info _subst expr = do
     expr >>= \case
       Left (SomeBV value) -> do
         -- FIXME: Give proper platform size
@@ -443,7 +423,11 @@ instance Reify RInteger where
         -- FIXME: Implement this once we have byte array primitives.
         undefined
 
-  interpret _info _subst expr = do
+  interpret ty expr = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty integerTy) do
+      throwError' ()
+
     -- Gather the arguments.
     (spine, args) <- collectArgs <$> expr
 
@@ -462,10 +446,10 @@ instance Reify RInteger where
 
     if
       | dc == integerISDataCon
-      , Lit (Int value ty) <- arg
+      , Lit (Int value ty') <- arg
       -- TODO: We could consider turning the Int into a ByteArray, such that we
       -- have a uniform way of interpreting a Integer.
-      , eqType ty intPrimTy -> pure $ Left (SomeBV value)
+      , eqType ty' intPrimTy -> pure $ Left (SomeBV value)
 
       | dc == integerIPDataCon
       -- FIXME: We should have a ByteArray primitive to match on here!
@@ -478,7 +462,7 @@ instance Reify RInteger where
       | otherwise -> throwError' ()
 
 instance ReifyBuiltin RInteger where
-  builtinTypeInfo = IntegerInfo
+  builtinReifiedType = integerTy
 
 -- | Reify marker for Haskell sized integer primitives.
 data RHIntN (n :: Nat)
@@ -489,21 +473,20 @@ instance
   ) => Reify (RHIntN n) where
   type InterpRep (RHIntN n) = IntN S n
 
-  data TypeInfo (RHIntN n) = HIntNInfo TyCon
+  reifiedType = pure $ builtinReifiedType @(RHIntN n)
 
-  typeInfo = pure builtinTypeInfo
+  reify ty value = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty $ builtinReifiedType @(RHIntN n)) do
+      throwError' ()
 
-  reifiedTy (HIntNInfo tc) = mkTyConTy tc
-
-  reify info _subst value = do
     value' <- value
-    let ty = reifiedTy info
     pure $ mkLit (mkIntN value' ty)
 
-  interpret info _subst value = value >>= \case
-    Lit (Int @m value' ty)
+  interpret ty value = value >>= \case
+    Lit (Int @m value' ty')
       | Just Refl <- eqT @n @m
-      , eqType ty $ reifiedTy info -> pure value'
+      , eqType ty ty' -> pure value'
     _ -> throwError' ()
 
 instance
@@ -511,11 +494,11 @@ instance
   , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
   ) => ReifyBuiltin (RHIntN n) where
 
-  builtinTypeInfo = HIntNInfo $ case natVal @n Proxy of
-    8 -> int8PrimTyCon
-    16 -> int16PrimTyCon
-    32 -> int32PrimTyCon
-    64 -> int64PrimTyCon
+  builtinReifiedType = case natVal @n Proxy of
+    8 -> int8PrimTy
+    16 -> int16PrimTy
+    32 -> int32PrimTy
+    64 -> int64PrimTy
     _ -> error "unreachable due to typeclass constraint"
 
 -- | Reify marker for the Haskell platform sized integer primitives.
@@ -524,25 +507,24 @@ data RHIntPW (n :: Nat)
 instance KnownNat n => Reify (RHIntPW n) where
   type InterpRep (RHIntPW n) = IntN S n
 
-  data TypeInfo (RHIntPW n) = HIntPWInfo TyCon
+  reifiedType = pure $ builtinReifiedType @(RHIntPW n)
 
-  typeInfo = pure builtinTypeInfo
+  reify ty value = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty $ builtinReifiedType @(RHIntPW n)) do
+      throwError' ()
 
-  reifiedTy (HIntPWInfo tc) = mkTyConTy tc
-
-  reify info _subst value = do
     value' <- value
-    let ty = reifiedTy info
     pure $ mkLit (mkIntN value' ty)
 
-  interpret info _subst value = value >>= \case
-    Lit (Int @m value' ty)
+  interpret ty value = value >>= \case
+    Lit (Int @m value' ty')
       | Just Refl <- eqT @n @m
-      , eqType ty $ reifiedTy info -> pure value'
+      , eqType ty ty' -> pure value'
     _ -> throwError' ()
 
 instance KnownNat n => ReifyBuiltin (RHIntPW n) where
-  builtinTypeInfo = HIntPWInfo intPrimTyCon
+  builtinReifiedType = intPrimTy
 
 -- | Reify marker for Haskell sized integer primitives.
 data RHWordN (n :: Nat)
@@ -553,21 +535,20 @@ instance
   ) => Reify (RHWordN n) where
   type InterpRep (RHWordN n) = WordN S n
 
-  data TypeInfo (RHWordN n) = HWordNInfo TyCon
+  reifiedType = pure $ builtinReifiedType @(RHWordN n)
 
-  typeInfo = pure builtinTypeInfo
+  reify ty value = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty $ builtinReifiedType @(RHWordN n)) do
+      throwError' ()
 
-  reifiedTy (HWordNInfo tc) = mkTyConTy tc
-
-  reify info _subst value = do
     value' <- value
-    let ty = reifiedTy info
     pure $ mkLit (mkWordN value' ty)
 
-  interpret info _subst value = value >>= \case
-    Lit (Word @m value' ty)
+  interpret ty value = value >>= \case
+    Lit (Word @m value' ty')
       | Just Refl <- eqT @n @m
-      , eqType ty $ reifiedTy info -> pure value'
+      , eqType ty ty' -> pure value'
     _ -> throwError' ()
 
 instance
@@ -575,11 +556,11 @@ instance
   , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
   ) => ReifyBuiltin (RHWordN n) where
 
-  builtinTypeInfo = HWordNInfo $ case natVal @n Proxy of
-    8 -> word8PrimTyCon
-    16 -> word16PrimTyCon
-    32 -> word32PrimTyCon
-    64 -> word64PrimTyCon
+  builtinReifiedType = case natVal @n Proxy of
+    8 -> word8PrimTy
+    16 -> word16PrimTy
+    32 -> word32PrimTy
+    64 -> word64PrimTy
     _ -> error "unreachable due to typeclass constraint"
 
 -- | Reify marker for the Haskell platform sized integer primitives.
@@ -588,27 +569,26 @@ data RHWordPW (n :: Nat)
 instance KnownNat n => Reify (RHWordPW n) where
   type InterpRep (RHWordPW n) = WordN S n
 
-  data TypeInfo (RHWordPW n) = HWordPWInfo TyCon
+  reifiedType = pure $ builtinReifiedType @(RHWordPW n)
 
-  typeInfo = pure builtinTypeInfo
+  reify ty value = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty $ builtinReifiedType @(RHWordPW n)) do
+      throwError' ()
 
-  reifiedTy (HWordPWInfo tc) = mkTyConTy tc
-
-  reify info _subst value = do
     value' <- value
-    let ty = reifiedTy info
     pure $ mkLit (mkWordN value' ty)
 
-  interpret info _subst value = value >>= \case
-    Lit (Word @m value' ty)
+  interpret ty value = value >>= \case
+    Lit (Word @m value' ty')
       | Just Refl <- eqT @n @m
-      , eqType ty $ reifiedTy info -> pure value'
+      , eqType ty ty' -> pure value'
     _ -> throwError' ()
 
 instance KnownNat n => ReifyBuiltin (RHWordPW n) where
-  builtinTypeInfo = HWordPWInfo wordPrimTyCon
+  builtinReifiedType = wordPrimTy
 
--- | Type variable alpha of kind Nat.
+-- | Type variable alpha of kind 'Nat'.
 data AlphaNat
 
 instance Quantifier AlphaNat where
@@ -627,6 +607,13 @@ instance Quantifier l => Quantifier (AlphaBoxed l) where
     let tv = setTyVarKind alphaTyVar kind
     Bndr tv Specified
 
+-- | Type variable alpha of kind 'Type'.
+data AlphaType
+
+instance Quantifier AlphaType where
+  quantifier = do
+    Bndr alphaTyVar Specified
+
 -- | Type variable beta of kind levity.
 data BetaLevity
 
@@ -641,8 +628,8 @@ liftF1' = pure . fmap
 
 liftF2
   :: Applicative f
-  => (f a -> f b -> f c)
-  -> f (f a -> f (f b -> f c))
+  => (a -> b -> c)
+  -> f (a -> f (b -> c))
 liftF2 f = pure $ pure . f
 
 liftF2'
@@ -653,8 +640,8 @@ liftF2' = liftF2 . liftA2
 
 liftF3
   :: Applicative f
-  => (f a -> f b -> f c -> f d)
-  -> f (f a -> f (f b -> f (f c -> f d)))
+  => (a -> b -> c -> d)
+  -> f (a -> f (b -> f (c -> d)))
 liftF3 f = pure $ liftF2 . f
 
 liftF3'
@@ -662,3 +649,21 @@ liftF3'
   => (a -> b -> c -> d)
   -> f (f a -> f (f b -> f (f c -> f d)))
 liftF3' = liftF3 . liftA3
+
+liftA4
+  :: Applicative f
+  => (a -> b -> c -> d -> e)
+  -> (f a -> f b -> f c -> f d -> f e)
+liftA4 f a b c d = f <$> a <*> b <*> c <*> d
+
+liftF4
+  :: Applicative f
+  => (a -> b -> c -> d -> e)
+  -> f (a -> f (b -> f (c -> f (d -> e))))
+liftF4 f = pure $ liftF3 . f
+
+liftF4'
+  :: Applicative f
+  => (a -> b -> c -> d -> e)
+  -> f (f a -> f (f b -> f (f c -> f (f d -> f e))))
+liftF4' = liftF4 . liftA4
