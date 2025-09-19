@@ -1,10 +1,7 @@
-{-# LANGUAGE QuantifiedConstraints #-}
-{-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE PatternSynonyms #-}
 
 module Pantomime.Expr
@@ -22,6 +19,7 @@ module Pantomime.Expr
 
   , mkLit
   , mkDataCon
+  , mkEnumCon
   , mkIntN
   , mkWordN
   , mkInteger
@@ -37,6 +35,7 @@ module Pantomime.Expr
   , mkUB
   , mkRaise
 
+  , eqType
   , eqLit
   , exprType
   , litType
@@ -44,21 +43,8 @@ module Pantomime.Expr
   , collectArgs
   , collectScrut
 
-  , freshExpr
-  , saturate
-
   , throwError'
   , whyFail'
-
-  , Subst
-  , dbgIdEnv
-  , emptySubst
-  , extendSubst
-  , extendSubstMany
-  , lookupId
-  , substTy
-  , substTyVar
-  , substCo
   , dbgE
   ) where
 
@@ -67,37 +53,18 @@ import GHC.Core.Type qualified as GHC
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Ppr (pprOptCo)
 import GHC.Core.TyCo.Rep (scaledThing)
-import GHC.Core.Reduction (Reduction(..))
 import GHC.Core.Opt.Arity
   ( pushCoTyArg
   , pushCoValArg
   )
-import GHC.Builtin.Types.Prim
-  ( int8PrimTy
-  , int16PrimTy
-  , int32PrimTy
-  , int64PrimTy
-  , word8PrimTy
-  , word16PrimTy
-  , word32PrimTy
-  , word64PrimTy, intPrimTy, wordPrimTy
-  )
-import GHC.Core.FamInstEnv
-  ( FamInstEnvs
-  , topNormaliseType_maybe
-  )
-import GHC.Types.Unique
-  ( Uniquable(..)
-  , getKey
-  )
 import GHC.Utils.Outputable
-  ( IsLine (..)
+  ( Outputable (..)
+  , IsLine (..)
   , SDoc
   , ($+$)
   , parens
   , hang
   , nest
-  , showSDocUnsafe
   )
 import GHC.Plugins
   ( Type
@@ -106,17 +73,9 @@ import GHC.Plugins
   , MCoercionR
   , MCoercion (..)
   , Role (..)
-  , Var
-  , Name
-  , HasOccName (..)
   , TyCon
   , DataCon
   , HasCallStack
-  , Outputable (..)
-  , CvSubstEnv
-  , TvSubstEnv
-  , IdEnv
-  , InScopeSet
   , isEnumerationTyCon
   , dataConTagZ
   , dataConTyCon
@@ -138,24 +97,7 @@ import GHC.Plugins
   , mkCoercionTy
   , tyCoVarsOfTypes
   , mkInScopeSet
-  , mkEmptySubst
   , extendTCvSubst
-  , emptyInScopeSet
-  , emptyVarEnv
-  , isTyVar
-  , isCoVar
-  , extendVarEnv
-  , lookupVarEnv
-  , mkSymCo
-  , tcSplitTyConApp_maybe
-  , isDataTyCon
-  , isUnboxedTupleTyCon
-  , isUnboxedSumTyCon
-  , tyConDataCons_maybe
-  , dataConInstArgTys
-  , splitForAllTyVars
-  , mkTyVarTy
-  , splitFunTys
   , splitTyConApp_maybe
   , dataConExTyCoVars
   , splitAtList
@@ -165,7 +107,8 @@ import GHC.Plugins
   , tyConArity
   , tyConRolesRepresentational
   , liftCoSubstWithEx
-  , dataConRepArgTys, TyVar
+  , dataConRepArgTys
+  , mkEmptySubst
   )
 
 import GHC.TypeNats
@@ -184,10 +127,8 @@ import GHC.Stack
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
   ( Union
-  , Symbol
-  , Solvable (..)
-  , ConRep (..)
-  , SExpr (..)
+  , SymBool
+  , SymInteger
   , SymEq (..)
   , ToSym (..)
   , ToCon (..)
@@ -202,10 +143,8 @@ import Grisette
   , Default1 (..)
   , wrapStrategy
   , liftUnion
-  , simple
-  , withMetadata
   , pattern Single
-  , pattern If, SymBool, SymInteger
+  , pattern If
   )
 
 import Pantomime.Orphan.GHC ()
@@ -220,14 +159,8 @@ import Pantomime.Grisette.BitVector
   ( IntN
   , WordN
   )
-import Pantomime.Util
-  ( foldM'
-  , freshIds
-  )
 
-import Data.String (IsString(..))
 import Data.List ((!?))
-import Data.Functor ((<&>))
 import Data.Traversable (for)
 import Data.Typeable
   ( type (:~:) (..)
@@ -244,7 +177,6 @@ import Control.Monad.Except
 import Control.Monad
   ( foldM
   , unless
-  , join
   )
 
 import Debug.Trace qualified as Debug
@@ -549,6 +481,23 @@ mkDataCon dc = do
   let tag = fromIntegral . dataConTagZ $ dc
   let tc = dataConTyCon dc
   DataCon @n tag tc
+
+mkEnumCon
+  :: forall n
+   . KnownNat n
+  => IntN S n
+  -> Type
+  -> Eval Expr
+mkEnumCon tag ty = do
+  -- Ensure we have an enumeration type.
+  (tc, targs) <- whyFail' () $ splitTyConApp_maybe ty
+  unless (isEnumerationTyCon tc) do
+    throwError' ()
+
+  -- Construct the data constructor and its type arguments.
+  let dc = mkLit $ DataCon tag tc
+  let targs' = pure . mkType <$> targs
+  mkApps dc targs'
 
 mkIntN
   :: KnownNat n
@@ -919,187 +868,6 @@ pushCoDataCon dc args co = do
 
   pure (univArgsR, exArgs ++ valArgs')
 
-data Variable where
-  Variable ::
-    { varName :: Name
-    -- ^ Root name.
-    , varAccessor :: [Accessor]
-    -- ^ Accessor path, note that the first entry is accessed last.
-    , varType :: Type
-    -- ^ Type of this variable.
-    , varArgs :: [Arg]
-    -- ^ Arguments which the variable depends on.
-    } -> Variable
-
-data Accessor where
-  Accessor
-    :: DataCon
-    -- ^ The data constructor to access.
-    -> Int
-    -- ^ The field number to access.
-    -> Accessor
-
-data FieldOrTag where
-  Field :: FieldOrTag
-  Tag :: FieldOrTag
-
-varToSymbol
-  :: Variable
-  -> FieldOrTag
-  -> Symbol
-varToSymbol var dst = do
-  -- TODO: Clean this function up! It's super ugly!
-  let name = fromString . showSDocUnsafe . ppr . occName . varName $ var
-  let unique = NumberAtom . toInteger . getKey . getUnique . varName $ var
-  let dst' = case dst of
-        Field -> Atom "field"
-        Tag -> Atom "tag"
-  let accessors = flip fmap (varAccessor var) \(Accessor dc idx) -> do
-        List $ fmap (NumberAtom . toInteger) [dataConTagZ dc, idx]
-  let meta = List $ unique : dst' : accessors
-  let ident = withMetadata name meta
-  simple ident
-
-symbolicVar
-  :: Solvable (ConType s) s
-  => Variable
-  -> FieldOrTag
-  -> s
-symbolicVar var dst = case varArgs var of
-  [] -> sym $ varToSymbol var dst
-  -- FIXME: We should be able to generate symbolic functions that take a number
-  -- of arguments.
-  -- TODO: What if arguments differ? Will this generate a different function
-  -- everytime? I'm not sure how this would work, but I guess as long as the
-  -- method of creation is the same it should work.
-  _ -> error "Not implemented yet :("
-
-freshExpr
-  :: HasCallStack
-  => FamInstEnvs
-  -> Var
-  -> Arg
-freshExpr famInst root = go Variable
-  { varName = GHC.varName root
-  , varAccessor = []
-  , varType = GHC.varType root
-  , varArgs = []
-  }
-  where
-    go var = do
-      -- TODO: I don't like the nesting this gives. Maybe we should move these
-      -- inwards somehow. The ty can actually be replaced by pattern match on
-      -- the var btw.
-      let ty = varType var
-      let symbolic :: Solvable (ConType s) s => s
-          symbolic = symbolicVar var Field
-      if
-        -- Type Family Reduction:
-        -------------------------
-        | Just reduction <- topNormaliseType_maybe famInst $ varType var -> do
-          let co = mkSymCo $ reductionCoercion reduction
-          let ty' = reductionReducedType reduction
-          let var' = var { varType = ty' }
-          inner <- go var'
-          mkCast inner co
-
-        -- Primitives:
-        --------------
-        -- FIXME: Generate proper platform size.
-        | ty `eqType` intPrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-        | ty `eqType` int8PrimTy -> pure $ mkLit (mkIntN @8 symbolic ty)
-        | ty `eqType` int16PrimTy -> pure $ mkLit (mkIntN @16 symbolic ty)
-        | ty `eqType` int32PrimTy -> pure $ mkLit (mkIntN @32 symbolic ty)
-        | ty `eqType` int64PrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-        -- FIXME: Generate proper platform size.
-        | ty `eqType` wordPrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
-        | ty `eqType` word8PrimTy -> pure $ mkLit (mkWordN @8 symbolic ty)
-        | ty `eqType` word16PrimTy -> pure $ mkLit (mkWordN @16 symbolic ty)
-        | ty `eqType` word32PrimTy -> pure $ mkLit (mkWordN @32 symbolic ty)
-        | ty `eqType` word64PrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
-        -- | ty `eqType` floatPrimTy -> undefined
-        -- | ty `eqType` doublePrimTy -> undefined
-
-        -- Algebraic Data Types:
-        ------------------------
-        | Just (tyCon, tyArgs) <- tcSplitTyConApp_maybe ty
-        , or
-          [ isDataTyCon tyCon
-          , isUnboxedTupleTyCon tyCon
-          , isUnboxedSumTyCon tyCon
-          ]
-        , Just dataCons <- tyConDataCons_maybe tyCon -> do
-          -- FIXME: This should get the proper platform size.
-          let tag = symbolicVar @(IntN S 64) var Tag
-
-          -- TODO: This creates a long list of negated equalities for the
-          -- unreachable case: tag != 0 && tag != 1 ... tag != n
-          -- Instead, I wonder if it is not better to generate tag < n?
-          --
-          -- I guess another way to solve this would be order the Unreachable
-          -- state at the end? That way, we just get a natural chain of if-then
-          -- else until unreachable. I feel like this might hurt other merges
-          -- though...
-          --
-          -- Another thing to look out for is that for enumeration TyCon, we
-          -- generate.
-          -- ite
-          --   (tag == 0)
-          --   0
-          --   (ite
-          --     (tag == 1)
-          --     1
-          --     ...)
-          --
-          -- But really, we should just generate the equivalent expression:
-          -- tag
-          --
-          -- Note I skipped writing the Unreachable case in both examples.
-          join $ foldM' mkUnreachable dataCons \acc dc -> do
-            let scrut = tag .== fromIntegral (dataConTagZ dc)
-
-            let fieldTys = scaledThing <$> dataConInstArgTys dc tyArgs
-            let valArgs = zip [0..] fieldTys <&> \(idx, ty') -> do
-                  go var
-                    { varType = ty'
-                    , varAccessor = Accessor dc idx : varAccessor var
-                    }
-
-            -- FIXME: This should get the proper platform size.
-            let dc' = mkLit $ mkDataCon @64 dc
-            let tyArgs' = pure . mkType <$> tyArgs
-            let expr = mkApps dc' $ tyArgs' ++ valArgs
-
-            pure $ mrgIte scrut expr acc
-
-        | otherwise -> do
-          dbgE ["could not create fresh value for", ppr ty]
-          throwError' ()
-
-saturate
-  :: FamInstEnvs
-  -> Expr
-  -> Eval (Expr, [(Var, Arg)])
-saturate famInst expr = do
-  -- TODO: I don't want to generate new arguments for each inner expression. I
-  -- just want arguments once. If I can do exprType for the whole thing, then
-  -- perhaps I can change the type of this to (Eval Expr, [(Var, Arg)]).
-  -- Actually, exprType already only uses the error part of the monad. We
-  -- should just put the error part of the monad as the outer one. Then we can
-  -- have the Eval for the inner Expr.
-  ty <- exprType expr
-  let (tvs, bty) = splitForAllTyVars ty
-  let tyArgs = pure . mkType . mkTyVarTy <$> tvs
-  let (atys, _) = splitFunTys bty
-  let (avars, _) = freshIds (zip (repeat "arg") atys) emptyInScopeSet
-  let exprArgs = freshExpr famInst <$> avars
-  -- FIXME: Using these tvs is not really great: We should really generate fresh
-  -- ones given the current in-scope set.
-  let vars = tvs ++ avars
-  let args = tyArgs ++ exprArgs
-  result <- mkApps expr args
-  pure (result, zip vars args)
-
 -- TODO: This is horrible. It's better than not having a callstack, but we
 -- should really improve the error handling. Also, this should really not add
 -- it's own callstack to the throw no?
@@ -1118,124 +886,3 @@ whyFail'
   -> Maybe b
   -> m b
 whyFail' err = maybe (throwError' err) pure
-
--- | A substitution map for 'Expr'.
---
--- Note, it is strickingly similar to the GHC Substitution. The main difference
--- is the lookup for identifiers, which will look up a symbolic expression.
-data Subst where
-  Subst ::
-    { scSubst :: InScopeSet
-    , idSubst :: IdEnv (Eval Expr)
-    , tvSubst :: TvSubstEnv
-    , cvSubst :: CvSubstEnv
-    } -> Subst
-
-dbgIdEnv
-  :: Subst
-  -> SDoc
-dbgIdEnv = ppr . GHC.varEnvDomain . idSubst
-
--- | An empty substitution map.
-emptySubst :: Subst
-emptySubst = Subst
-  { scSubst = emptyInScopeSet
-  , idSubst = emptyVarEnv
-  , tvSubst = emptyVarEnv
-  , cvSubst = emptyVarEnv
-  }
-
--- | Extend the substitution with the given mapping.
-extendSubst
-  :: Subst
-  -> Var
-  -> Arg
-  -> Eval Subst
-extendSubst subst var arg = if
-  | isTyVar var -> do
-    -- FIXME: We currently create a new substitution for every type argument
-    -- that exists. This might introduce a huge amount of code paths. Consider
-    -- for example a data type with 3 existentials, each with two options.
-    -- If we case split for every one, we get 8 executions. Likely, only 2 of
-    -- those were actually possible in the first place.
-    --
-    -- The alternatives would be:
-    -- 1. Let the tvSubst (and cvSubst) be a Union, so they themselves may
-    -- return different values once they're required.
-    -- 2. If we really won't ever even rely on this behaviour of having multiple
-    -- types in one Union, then we should just check here whether we have
-    -- strictly one value! The monad should also just be an error one instead of
-    -- Eval in this case btw. The current implementation is actually heavily
-    -- leaning in this direction!
-
-    -- Ensure that the variables are only types. Note that we force the
-    -- evaluation here as type reduction should always terminate.
-    ty <- arg >>= \case
-      Type ty -> pure ty
-      _ -> throwError' ()
-
-    -- Extend the type variable substitution.
-    let tvSubst' = extendVarEnv (tvSubst subst) var ty
-    pure subst { tvSubst = tvSubst' }
-
-  | isCoVar var -> do
-    -- Ensure that the variables are only types. Note that we force the
-    -- evaluation here as type reduction should always terminate.
-    co <- arg >>= \case
-      Coercion co -> pure co
-      _ -> throwError' ()
-
-    -- Extend the coercion variable substitution.
-    let cvSubst' = extendVarEnv (cvSubst subst) var co
-    pure subst { cvSubst = cvSubst' }
-
-  | otherwise -> do
-    -- Extend the identifier substitution.
-    let idSubst' = extendVarEnv (idSubst subst) var arg
-    pure subst { idSubst = idSubst' } 
-
--- | Extend the substitution with the given mappings.
-extendSubstMany
-  :: Foldable f
-  => Subst
-  -> f (Var, Arg)
-  -> Eval Subst
-extendSubstMany = foldM $ uncurry . extendSubst
-
--- | Lookup a variable in the current substitution environment.
-lookupId
-  :: Subst
-  -> Var
-  -> Maybe (Eval Expr)
-lookupId = lookupVarEnv . idSubst
-
--- | Substitute a Type.
-substTy
-  :: Subst
-  -> Type
-  -> Type
-substTy subst ty = do
-  let subst' = tyCoSubst subst
-  GHC.substTy subst' ty
-
--- | Substitute a TyVar.
-substTyVar
-  :: Subst
-  -> TyVar
-  -> Type
-substTyVar subst tv = do
-  let subst' = tyCoSubst subst
-  GHC.substTyVar subst' tv
-
--- | Substitute a Coercion.
-substCo
-  :: Subst
-  -> Coercion
-  -> Coercion
-substCo subst ty = do
-  let subst' = tyCoSubst subst
-  GHC.substCo subst' ty
-
--- | Get a GHC Substitution than can be used for type and coercion substitution.
-tyCoSubst :: Subst -> GHC.Subst
-tyCoSubst Subst { .. } = GHC.Subst scSubst emptyVarEnv tvSubst cvSubst
