@@ -39,6 +39,7 @@ import Grisette
   , SymIntN
   , SymInteger
   , BitCast (..)
+  , Solvable (..)
   , true
   , false
   )
@@ -53,6 +54,7 @@ import Grisette.Unified
 import Data.Bits (Bits (..), FiniteBits (..))
 import Data.Data (Proxy(..))
 import Data.Bifunctor (Bifunctor(..))
+import Data.String (IsString (..))
 
 import Pantomime.Dict (withSize, Dict (..), unsafeDict)
 import Pantomime.Grisette.SizedBV
@@ -213,8 +215,6 @@ instance (DecideEvalMode mode, KnownNat n) => EvalSym (IntN mode n) where
         op = withMode @mode evalSym evalSym
     unaryI $ op fill model
 
--- TODO: Does this make sense? I feel like mergeable should use a concrete
--- boolean when merging concrete values?
 instance (DecideEvalMode mode, KnownNat n) => Mergeable (IntN mode n) where
   rootStrategy = do
     let concrete :: MergingStrategy (IntN C n)
@@ -377,6 +377,20 @@ instance (DecideEvalMode mode, KnownNat n) => BitCast (WordN mode n) (IntN mode 
 
 instance BitCast (IntN mode n) (IntN mode n) where
   bitCast = id
+
+instance KnownNat n => IsString (IntN S n) where
+  fromString s = withSizeI @n $ fromString s
+
+instance KnownNat n => Solvable (IntN C n) (IntN S n) where
+  con = \case
+    IntZ -> IntZ
+    IntP value -> IntP $ con value
+
+  conView = \case
+    IntZ -> pure IntZ
+    IntP value -> IntP <$> conView value
+
+  sym symbol = withSizeI @n $ sym symbol
 
 -- | Sized word primitive.
 --
@@ -695,6 +709,20 @@ instance (DecideEvalMode mode, KnownNat n) => BitCast (IntN mode n) (WordN mode 
 
 instance BitCast (WordN mode n) (WordN mode n) where
   bitCast = id
+
+instance KnownNat n => IsString (WordN S n) where
+  fromString s = withSizeW @n $ fromString s
+
+instance KnownNat n => Solvable (WordN C n) (WordN S n) where
+  con = \case
+    WordZ -> WordZ
+    WordP value -> WordP $ con value
+
+  conView = \case
+    WordZ -> pure WordZ
+    WordP value -> WordP <$> conView value
+
+  sym symbol = withSizeW @n $ sym symbol
 
 instance (DecideEvalMode mode, KnownNat n) => SignConversion (WordN mode n) (IntN mode n) where
   toSigned = \case

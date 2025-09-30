@@ -11,6 +11,8 @@ module Pantomime.Util
 
   , freshId
   , freshIds
+  , freshTyVar
+  , freshTyVars
   ) where
 
 import GHC.Plugins hiding (empty)
@@ -94,7 +96,7 @@ infixr 4 %~~
 (%~~) :: Lens s t a b -> (a -> (c, b)) -> s -> (c, t)
 (%~~) = ($)
 
--- | Create a fresh variable.
+-- | Create a fresh local identifier.
 --
 -- Fetches a locally fresh unique from the in-scope set of the substitution.
 -- Creates a new identifier and adds it to the in-scope set of the given
@@ -116,10 +118,40 @@ freshId name (Scaled mult ty) scope = do
   let scope' = extendInScopeSet scope identifier
   (identifier, scope')
 
--- | Get multiple fresh identifiers via `freshId`.
+-- | Get multiple fresh identifiers via 'freshId'.
 freshIds
   :: Traversable f
   => f (String, Scaled Type)
   -> InScopeSet
   -> (f Id, InScopeSet)
 freshIds = accumL $ uncurry freshId
+
+-- | Create a fresh type variable.
+--
+-- Fetches a locally fresh unique from the in-scope set of the substitution.
+-- Creates a new type variable and adds it to the in-scope set of the given
+-- substitution.
+freshTyVar
+  :: String
+  -> Kind
+  -> InScopeSet
+  -> (TyVar, InScopeSet)
+freshTyVar name kind scope = do
+  -- Get a new unique value.
+  let unique = unsafeGetFreshLocalUnique scope
+
+  -- Create the fresh identifier.
+  let name' = mkSystemName unique $ mkVarOcc name
+  let tyVar = mkTyVar name' kind
+
+  -- Extend the scope and return it, together with the fresh identifier.
+  let scope' = extendInScopeSet scope tyVar
+  (tyVar, scope')
+
+-- | Get multiple fresh type variables via 'freshTyVar'.
+freshTyVars
+  :: Traversable f
+  => f (String, Kind)
+  -> InScopeSet
+  -> (f TyVar, InScopeSet)
+freshTyVars = accumL $ uncurry freshTyVar

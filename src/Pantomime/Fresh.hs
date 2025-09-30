@@ -2,6 +2,7 @@
 
 module Pantomime.Fresh
   ( freshExpr
+  , freshArgs
   , saturate
   ) where
 
@@ -37,6 +38,7 @@ import GHC.Plugins
   , HasOccName (..)
   , DataCon
   , HasCallStack
+  , InScopeSet
   , dataConTagZ
   , emptyInScopeSet
   , mkSymCo
@@ -46,11 +48,11 @@ import GHC.Plugins
   , tyConDataCons_maybe
   , dataConInstArgTys
   , splitForAllTyVars
-  , mkTyVarTy
   , splitFunTys
   , splitTyConApp_maybe
   , mkTyConTy
   , isNumLitTy
+  , tyVarKind
   )
 
 import GHC.TypeNats
@@ -79,10 +81,9 @@ import Pantomime.Grisette.BitVector
 import Pantomime.Expr
 import Pantomime.Primitive.GHC qualified as Primitive
 import GHC.Plugins qualified as GHC
-import GHC.Core.TyCo.Compare (eqType)
 import GHC.TypeLits (someNatVal)
 import Control.Monad (join)
-import Pantomime.Util (foldM', freshIds)
+import Pantomime.Util (foldM', freshIds, freshTyVars)
 import GHC.Core.TyCo.Rep (scaledThing)
 import Data.Functor ((<&>))
 
@@ -141,12 +142,14 @@ symbolicVar var dst = case varArgs var of
   -- method of creation is the same it should work.
   _ -> error "Not implemented yet :("
 
+-- TODO: This name isn't great. We really are making a symbolic expression here.
+-- The freshness hinges on the freshness of the Var.
 freshExpr
   :: HasCallStack
   => FamInstEnvs
   -> Primitive.Types
   -> Var
-  -> Arg
+  -> Eval Expr
 freshExpr famInst primTys root = go Variable
   { varName = GHC.varName root
   , varAccessor = []
@@ -191,8 +194,10 @@ freshExpr famInst primTys root = go Variable
         , tc == Primitive.tcIntN primTys
         , Just nat <- isNumLitTy $ topNormaliseType famInst arg 
         , Just (SomeNat @n _) <- someNatVal nat -> do
-          -- TODO: Should we place a Cast for the type families on the inner
-          -- value.
+          -- FIXME: Should we place a Cast for the type families on the inner
+          -- value. I think yes? We'll have to test it, but my guess is that any
+          -- usage of will first have a cast for the type-level natural (only
+          -- if it is symbolic btw).
           let value = mkIntN @n symbolic ty
           pure $ mkLit value
 
@@ -259,9 +264,10 @@ freshExpr famInst primTys root = go Variable
 
             pure $ mrgIte scrut expr acc
 
+        -- TODO: Throw proper error!
         | otherwise -> do
           dbgE ["could not create fresh value for", ppr ty]
-          throwError' ()
+          throwE ()
 
 saturate
   :: FamInstEnvs
@@ -275,15 +281,43 @@ saturate famInst primTys expr = do
   -- Actually, exprType already only uses the error part of the monad. We
   -- should just put the error part of the monad as the outer one. Then we can
   -- have the Eval for the inner Expr.
-  ty <- exprType expr
-  let (tvs, bty) = splitForAllTyVars ty
-  let tyArgs = pure . mkType . mkTyVarTy <$> tvs
-  let (atys, _) = splitFunTys bty
-  let (avars, _) = freshIds (zip (repeat "arg") atys) emptyInScopeSet
-  let exprArgs = freshExpr famInst primTys <$> avars
-  -- FIXME: Using these tvs is not really great: We should really generate fresh
-  -- ones given the current in-scope set.
-  let vars = tvs ++ avars
-  let args = tyArgs ++ exprArgs
-  result <- mkApps expr args
-  pure (result, zip vars args)
+  ty <- liftR $ exprType expr
+  let (args, _) = freshArgs famInst primTys ty emptyInScopeSet
+  result <- mkApps expr $ fmap snd args
+  pure (result, args)
+
+freshArgs
+  :: FamInstEnvs
+  -> Primitive.Types
+  -> Type
+  -> InScopeSet
+  -> ([(Var, Arg)], InScopeSet)
+freshArgs famInst primTys ty scope0 = do
+  -- Gather the argument types.
+  let (tyVars, funTy) = splitForAllTyVars ty
+  let (argTys, _resTy) = splitFunTys funTy
+
+  -- TODO: Isn't there some infinite sequence of names that could be used
+  -- instead of this?
+  -- Names for the arguments.
+  let names = repeat @String "arg"
+
+  -- Create fresh type arguments.
+  let kinds = zip names $ fmap tyVarKind tyVars
+  let (tyArgs, scope1) = freshTyVars kinds scope0
+
+  -- Create fresh value arguments.
+  let types = zip names argTys
+  let (valArgs, scope2) = freshIds types scope1
+
+  -- Collection of all arguments.
+  let args = tyArgs <> valArgs
+
+  -- Create symbolic instance of the arguments.
+  let symbolic = freshExpr famInst primTys <$> args
+
+  -- Zip the binders together with their symbolic instance.
+  let binders = zip args symbolic
+
+  -- Return the binders and the new scope.
+  (binders, scope2)

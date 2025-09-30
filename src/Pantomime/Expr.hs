@@ -5,8 +5,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 
 module Pantomime.Expr
-  ( Eval
-  , EvalError (..)
+  ( Eval (..)
   , Variant (..)
   , Expr (..)
   , Arg
@@ -16,6 +15,7 @@ module Pantomime.Expr
 
   , pprExpr
   , pprArg
+  , pprEval
 
   , mkLit
   , mkDataCon
@@ -35,6 +35,11 @@ module Pantomime.Expr
   , mkUB
   , mkRaise
 
+  , forceTyCo
+  , forceTy
+  , forceCo
+
+  , exprToBool
   , eqType
   , eqLit
   , exprType
@@ -43,8 +48,9 @@ module Pantomime.Expr
   , collectArgs
   , collectScrut
 
-  , throwError'
-  , whyFail'
+  , throwE
+  , failWithE
+  , liftR
   , dbgE
   ) where
 
@@ -53,10 +59,7 @@ import GHC.Core.Type qualified as GHC
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.Ppr (pprOptCo)
 import GHC.Core.TyCo.Rep (scaledThing)
-import GHC.Core.Opt.Arity
-  ( pushCoTyArg
-  , pushCoValArg
-  )
+import GHC.Core.Opt.Arity (pushCoTyArg, pushCoValArg)
 import GHC.Utils.Outputable
   ( Outputable (..)
   , IsLine (..)
@@ -109,20 +112,12 @@ import GHC.Plugins
   , liftCoSubstWithEx
   , dataConRepArgTys
   , mkEmptySubst
+  , boolTyCon
+  , trueDataCon
   )
 
-import GHC.TypeNats
-  ( KnownNat
-  )
-import GHC.Generics
-  ( Generic
-  , Generic1
-  )
-import GHC.Stack
-  ( CallStack
-  , callStack
-  , prettyCallStack
-  )
+import GHC.TypeNats (KnownNat)
+import GHC.Generics (Generic)
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -130,6 +125,8 @@ import Grisette
   , SymBool
   , SymInteger
   , SymEq (..)
+  , SymOrd (..)
+  , LogicalOp ((.&&))
   , ToSym (..)
   , ToCon (..)
   , TryMerge (..)
@@ -139,18 +136,23 @@ import Grisette
   , SimpleMergeable1 (..)
   , SymBranching (..)
   , MergingStrategy (..)
+  , EvalSym (..)
+  , EvalSym1 (..)
   , Default (..)
-  , Default1 (..)
   , wrapStrategy
+  , rootStrategy1
   , liftUnion
+  , mrgIf
   , pattern Single
   , pattern If
   )
 
 import Pantomime.Orphan.GHC ()
+import Pantomime.Result
 import Pantomime.Grisette.SomeBV (SomeBV (..))
 import Pantomime.Grisette.Mergeable
-  ( partialStrategy
+  ( NoMerge (..)
+  , partialStrategy
   , ifStrategy
   , tupleStrategy
   , impossible
@@ -160,6 +162,8 @@ import Pantomime.Grisette.BitVector
   , WordN
   )
 
+import Data.Composition ((.:))
+import Data.Coerce (coerce)
 import Data.List ((!?))
 import Data.Traversable (for)
 import Data.Typeable
@@ -170,13 +174,13 @@ import Data.Typeable
 import Control.Arrow (Arrow(..))
 import Control.Applicative (Alternative(..))
 import Control.Monad.Except
-  ( MonadError (..)
-  , ExceptT (..)
+  ( ExceptT (..)
   , runExceptT
   )
 import Control.Monad
   ( foldM
   , unless
+  , (>=>)
   )
 
 import Debug.Trace qualified as Debug
@@ -184,33 +188,60 @@ import Debug.Trace qualified as Debug
 dbgE :: GHC.Outputable o => o -> Eval ()
 dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
 
--- TODO: I want to add plucky error values to Eval. Note that I also want to
--- get rid of the MonadError there.
---
--- TODO: I think the Mergeable instance should have a NoStrategy on the
--- evaluation errors of Eval. That is, I really don't want to merge actual
--- errors. Note, it is completely fine to merge the Variant. I guess the best
--- way to solve this would just be to make a wrapper type for the error that
--- has NoStrategy. Hmm. I guess perhaps we could merge btw. As in, we could have
--- the same error trigger multiple times as an expression may be duplicated. We
--- can see if we can merge CallStack such that we only merge if an error has the
--- same origin? Of course, this could cause false merging if we accidentially
--- cut the CallStack short. Still, I think it has benefits as well!
+-- TODO: I want to add plucky error values to Eval. We adjusted the error value
+-- to use it internally, but have yet to expose it.
 newtype Eval a where
-  Eval :: ExceptT (EvalError ()) (ExceptT Variant Union) a -> Eval a
+  Eval ::
+    -- TODO: I adjusted the order of errors here. I wonder if it is better to
+    -- group errors all together like this, or linearly how we had it before.
+    -- We should look into this both in terms of constraint size and solve
+    -- duration. My guess is that this encoding is slightly less optimal for
+    -- constraint size. Of course, this doesn't necessarily mean the solver is
+    -- always faster.
+    { runEval :: ExceptT (Result '[()] Variant) Union a
+    } -> Eval a
   deriving Functor
   deriving Applicative
   deriving Monad
-  deriving (MonadError (EvalError ()))
-  deriving Generic
-  deriving Mergeable via Default (Eval a)
-  deriving SimpleMergeable via Default (Eval a)
-  deriving Generic1
-  deriving Mergeable1 via Default1 Eval
-  deriving SimpleMergeable1 via Default1 Eval
 
-data EvalError a where
-  EvalError :: CallStack -> a -> EvalError a
+-- TODO: I feel like these instances are a bit messy here and distract from the
+-- core data structures. Should we move these?
+type MergeableEval = ExceptT (Either (NoMerge (Error '[()])) Variant) Union
+
+instance Mergeable a => Mergeable (Eval a) where
+  rootStrategy = rootStrategy1
+
+instance Mergeable1 Eval where
+  liftRootStrategy = coerce . liftRootStrategy @MergeableEval
+
+instance Mergeable a => SimpleMergeable (Eval a) where
+  mrgIte = coerce $ mrgIte @(MergeableEval a)
+
+instance SimpleMergeable1 Eval where
+  liftMrgIte @a = coerce $ liftMrgIte @MergeableEval @a
+
+instance TryMerge Eval where
+  tryMergeWithStrategy @a = coerce $ tryMergeWithStrategy @MergeableEval @a
+
+instance SymBranching Eval where
+  mrgIfWithStrategy @a = coerce $ mrgIfWithStrategy @MergeableEval @a
+
+  mrgIfPropagatedStrategy @a = coerce $ mrgIfPropagatedStrategy @MergeableEval @a
+
+-- TODO: Should this marker get it's own file?
+newtype NoEval a where
+  NoEval :: a -> NoEval a
+
+instance EvalSym (NoEval a) where
+  evalSym _ _ = id
+
+type EvalSymEval = ExceptT (Either (NoEval (Error '[()])) Variant) Union
+
+instance EvalSym a => EvalSym (Eval a) where
+  evalSym = coerce $ evalSym @(EvalSymEval a)
+
+instance EvalSym1 Eval where
+  liftEvalSym @a = coerce $ liftEvalSym @(EvalSymEval) @a
 
 -- TODO: I'm not sure if I like this name. Perhaps we can think about what other
 -- options these have. Unlike the other error types, these ones don't need a
@@ -224,6 +255,7 @@ data Variant where
   Raise :: Expr -> Variant
   deriving Generic
   deriving Mergeable via Default Variant
+  deriving EvalSym via Default Variant
 
 data Expr where
   Lit
@@ -302,9 +334,7 @@ type Arg = Eval Expr
 -- out, so I wrote it down here!
 data Thunk where
   Thunked :: Arg -> Thunk
-  -- TODO: Shouldn't Forced just be an (Either Type Coercion)? We really don't
-  -- want to force anything else no?
-  Forced :: Expr -> Thunk
+  Forced :: Either Type Coercion -> Thunk
   deriving Generic
   deriving Mergeable via Default Thunk
 
@@ -373,19 +403,32 @@ instance Mergeable Literal where
 
       _ -> impossible
 
-instance TryMerge Eval where
-  tryMergeWithStrategy strategy (Eval m) = do
-    Eval $ tryMergeWithStrategy strategy m
+instance EvalSym Expr where
+  evalSym fill model = \case
+    Lit lit -> Lit $ evalSym' lit
+    Type ty -> Type ty
+    Coercion co -> Coercion co
+    Lam ty closure -> Lam ty \arg -> evalSym' (closure arg)
+    App fun arg -> App (evalSym' fun) (evalSym' arg)
+    Cast body co -> Cast (evalSym' body) co
+    where
+      evalSym' :: EvalSym a => a -> a
+      evalSym' = evalSym fill model
 
-instance SymBranching Eval where
-  mrgIfWithStrategy strategy scrut (Eval true) (Eval false) = do
-    Eval $ mrgIfWithStrategy strategy scrut true false
+instance EvalSym Literal where
+  evalSym fill model = \case
+    DataCon tag tc -> DataCon (evalSym' tag) tc
+    Int value ty -> Int (evalSym' value) ty
+    Word value ty -> Word (evalSym' value) ty
+    Integer value ty -> Integer (evalSym' value) ty
+    where
+      evalSym' :: EvalSym a => a -> a
+      evalSym' = evalSym fill model
 
-  mrgIfPropagatedStrategy scrut (Eval true) (Eval false) = do
-    Eval $ mrgIfPropagatedStrategy scrut true false
-
-instance Mergeable (EvalError a) where
-  rootStrategy = NoStrategy
+instance EvalSym Thunk where
+  evalSym fill model = \case
+    Thunked value -> Thunked $ evalSym fill model value
+    Forced value -> Forced value
 
 pprExpr
   :: (SDoc -> SDoc)
@@ -417,14 +460,25 @@ pprArg
   :: (SDoc -> SDoc)
   -> Arg
   -> SDoc
-pprArg addParens (Eval arg) = do
-  let f p = \case
-        Left UB -> "UB"
-        Left Unreachable -> "Unreachable"
-        Left (Raise expr) -> "raise#" <+> pprExpr p expr
-        Right (Right expr) -> pprExpr p expr
-        Right (Left (EvalError trace ())) -> "UNKNOWN ERROR :(" $+$ text (prettyCallStack trace)
-  pprUnion addParens f $ runExceptT (runExceptT arg)
+pprArg addParens = pprEval addParens pprExpr
+
+pprEval
+  :: forall a
+   . Mergeable a
+  => (SDoc -> SDoc)
+  -> ((SDoc -> SDoc) -> a -> SDoc)
+  -> Eval a
+  -> SDoc
+pprEval addParens f m = do
+  let inner p = \case
+        Left (Left _err) -> undefined -- "UNKNOWN ERROR :(" $+$ text (prettyCallStack trace)
+        Left (Right UB) -> "UB"
+        Left (Right Unreachable) -> "Unreachable"
+        Left (Right (Raise expr)) -> "raise#" <+> pprExpr p expr
+        Right expr -> f p expr
+
+  let m' = runExceptT $ coerce @_ @(MergeableEval a) m
+  pprUnion addParens inner m'
 
 pprUnion
   :: Mergeable a
@@ -446,6 +500,13 @@ pprUnion addParens inner = \case
       , pprUnion parens inner true
       , pprUnion parens inner false
       ]
+
+-- TODO: I don't like this too much, ideally it is polymorphic over any Expr,
+-- but I don't now how to properly parenthesise an Expr in this case (as
+-- the inner expression needs to get a function which parenthesises it, if
+-- necessary).
+instance Outputable (Eval Expr) where
+  ppr = pprArg id
 
 instance Outputable Expr where
   ppr = pprExpr id
@@ -490,9 +551,9 @@ mkEnumCon
   -> Eval Expr
 mkEnumCon tag ty = do
   -- Ensure we have an enumeration type.
-  (tc, targs) <- whyFail' () $ splitTyConApp_maybe ty
+  (tc, targs) <- failWithE () $ splitTyConApp_maybe ty
   unless (isEnumerationTyCon tc) do
-    throwError' ()
+    throwE ()
 
   -- Construct the data constructor and its type arguments.
   let dc = mkLit $ DataCon tag tc
@@ -548,13 +609,13 @@ mkApp fun arg = case fun of
     mkCastMCo expr rco
   Lam _ty closure -> closure arg
   _ -> do
-    ty <- exprType fun
+    ty <- liftR $ exprType fun
     if
       | isFunTy ty -> pure $ App fun (Thunked arg)
       | isForAllTy ty -> do
-        forced <- arg
+        forced <- liftR $ forceTyCo arg
         pure $ App fun (Forced forced)
-      | otherwise -> throwError' ()
+      | otherwise -> throwE ()
 
 pushCoArg
   :: HasCallStack
@@ -565,19 +626,17 @@ pushCoArg co arg = if
   | tyL <- coercionLKind co
   , isForAllTy_ty tyL -> do
     -- The argument needs to be a type. As such, we can force it.
-    ty <- arg >>= \case
-      Type ty -> pure ty
-      _ -> throwError' ()
+    ty <- liftR $ forceTy arg
 
     -- Attempt to push the coercion into the type argument.
-    (ty', rco) <- whyFail' () $ pushCoTyArg co ty
+    (ty', rco) <- failWithE () $ pushCoTyArg co ty
 
     -- Return the type argument and result coercion.
     pure (pure $ mkType ty', rco)
 
   | otherwise -> do
     -- Attempt to split the coercion into an argument and result coercion.
-    (aco, rco) <- whyFail' () $ pushCoValArg co
+    (aco, rco) <- failWithE () $ pushCoValArg co
 
     -- Cast the argument and return the result coercion.
     let arg' = arg >>= flip mkCastMCo aco
@@ -607,13 +666,13 @@ mkCast expr co = do
   -- Ensure the coercion has role representational.
   unless (coercionRole co == Representational) do
     -- FIXME: Make this a proper error.
-    throwError' ()
+    throwE ()
 
   -- Ensure the cast can be applied to the expression.
-  ty <- exprType expr
+  ty <- liftR $ exprType expr
   unless (eqType ty $ coercionLKind co) do
     -- FIXME: Make this a proper error.
-    throwError' ()
+    throwE ()
 
   case expr of
     -- A reflexive cast is a no-op and thus may be removed immediately.
@@ -641,7 +700,7 @@ mkCast expr co = do
 mkVariant
   :: Variant
   -> Eval a
-mkVariant = Eval . ExceptT . throwError
+mkVariant = Eval . ExceptT . pure . Left . Right
 
 mkUnreachable :: Eval a
 mkUnreachable = mkVariant Unreachable
@@ -652,11 +711,65 @@ mkUB = mkVariant UB
 mkRaise :: Expr -> Eval a
 mkRaise = mkVariant . Raise
 
+-- | Force an expression into a type or coercion.
+--
+-- A type or coercion is always terminating. Within a union they should
+-- additionally always be a single. As such, we can escape the monad here.
+--
+-- WARNING: In general, expressions may be non-terminating. Use only when a Type
+-- or Coercion is the expected result.
+forceTyCo
+  :: HasCallStack
+  => () !> es
+  => Arg
+  -> Result es (Either Type Coercion)
+forceTyCo arg = case runExceptT $ coerce @_ @(MergeableEval Expr) arg of
+  -- TODO: Should we throw the original error if an Error occurs inside of
+  -- here? This kind of masks the origin of an error here!
+  Single (Right value) -> case value of
+    Type ty -> pure $ Left ty
+    Coercion co -> pure $ Right co
+    _ -> throw ()
+  _ -> throw ()
+
+forceTy
+  :: HasCallStack
+  => () !> es
+  => Arg
+  -> Result es Type
+forceTy = forceTyCo >=> either pure (const $ throw ())
+
+forceCo
+  :: HasCallStack
+  => () !> es
+  => Arg
+  -> Result es Coercion
+forceCo = forceTyCo >=> either (const $ throw ()) pure
+
+-- | Convert an expression of type Bool to a symbolic boolean.
+exprToBool
+  :: Expr
+  -> Eval SymBool
+exprToBool = \case
+  Lit (DataCon tag tc) | tc == boolTyCon -> do
+    -- The bounds of the tag.
+    let upper = fromIntegral $ length (tyConDataCons tc)
+    let inBounds = 0 .<= tag .&& tag .< upper
+
+    let trueTag = fromIntegral $ dataConTagZ trueDataCon
+    let result = pure $ tag .== trueTag
+
+    mrgIf inBounds result mkUB
+  _ -> throwE ()
+
+-- | Equivalence between literals.
+--
+-- NOTE: This only handles cases that may occur in a case expression.
 eqLit
-  :: MonadError (EvalError ()) m
+  :: () !> es
   => Literal
   -> Literal
-  -> m SymBool
+  -> Result es SymBool
 eqLit = \cases
   (DataCon @l ltag ltc) (DataCon @r rtag rtc) 
     | ltc == rtc
@@ -667,19 +780,19 @@ eqLit = \cases
   (Word @l lval lty) (Word @r rval rty) 
     | eqType lty rty
     , Just Refl <- eqT @l @r -> pure $ lval .== rval
-  _ _ -> throwError' ()
+  _ _ -> throw ()
 
 -- TODO: I split away the Eval from this as I'm only using the error. I don't
 -- like the monad error constraint too much though, so I want to find a better
 -- solution sometime.
 exprType
   :: HasCallStack
-  => MonadError (EvalError ()) m
+  => () !> es
   => Expr
-  -> m Type
+  -> Result es Type
 exprType = \case
   Lit lit -> litType lit
-  Type _ -> throwError' ()
+  Type _ -> throw ()
   Coercion co -> pure $ coercionType co
   Lam ty _ -> pure ty
   App fun arg -> do
@@ -688,27 +801,26 @@ exprType = \case
     if
       | Just (var, rty) <- splitForAllTyCoVar_maybe fty -> do
         aty <- case arg of
-          Forced (Coercion co) -> pure $ mkCoercionTy co
-          Forced (Type ty) -> pure ty
-          _ -> throwError' ()
+          Forced (Right co) -> pure $ mkCoercionTy co
+          Forced (Left ty) -> pure ty
+          _ -> throw ()
         let scope = mkInScopeSet $ tyCoVarsOfTypes [aty, rty]
         let subst = extendTCvSubst (mkEmptySubst scope) var aty
         pure $ GHC.substTy subst rty
 
       | Just (_, _, _, rty) <- splitFunTy_maybe fty -> pure rty
 
-      | otherwise -> throwError' ()
+      | otherwise -> throw ()
   Cast _ co -> pure $ coercionRKind co
 
 litType
-  :: MonadError (EvalError ()) m
+  :: () !> es
   => Literal
-  -> m Type
+  -> Result es Type
 litType = \case
   DataCon tag tc -> do
-    dc <- whyFail' () $ anyDataCon tag tc
+    dc <- failWith () $ anyDataCon tag tc
     pure $ dataConRepType dc
-
   Int _ ty -> pure ty
   Word _ ty -> pure ty
   Integer _ ty -> pure ty
@@ -771,7 +883,9 @@ unthunk
   -> Arg
 unthunk = \case
   Thunked value -> value
-  Forced value -> pure value
+  Forced value -> case value of
+    Right co -> pure $ mkCoercion co
+    Left ty -> pure $ mkType ty
 
 -- | Collect the arguments of a scrutinee.
 --
@@ -791,15 +905,15 @@ collectScrut = \case
     -- Collect the arguments and literal.
     (lit, args) <- case collectThunks body' of
       (Lit lit, args) -> pure (lit, args)
-      _ -> throwError' ()
+      _ -> throwE ()
 
     -- Only a DataCon may have its arguments pushed.
     dc <- case lit of
       DataCon tag tc | Just dc <- anyDataCon tag tc -> pure dc
-      _ -> throwError' ()
+      _ -> throwE ()
 
     -- Push the coercion into the arguments.
-    (_univ, args') <- pushCoDataCon dc args co
+    (_univ, args') <- liftR $ pushCoDataCon dc args co
     pure (lit, unthunk <$> args')
 
   -- If not a cast, we attempt to get the literal at the spine and return the
@@ -808,7 +922,7 @@ collectScrut = \case
     -- Gather a literal and it's arguments if possible.
     (lit, args) <- case collectArgs expr of
       (Lit lit, args) -> pure (lit, args)
-      _ -> throwError' ()
+      _ -> throwE ()
 
     -- Find the number of universal arguments required for the literal.
     let univ = case lit of
@@ -822,17 +936,18 @@ collectScrut = \case
 
 -- | Push a TyConAppCo into the arguments of a DataCon.
 pushCoDataCon
-  :: MonadError (EvalError ()) m
+  :: HasCallStack
+  => () !> es
   => DataCon
   -> [Thunk]
   -> Coercion
-  -> m ([Type], [Thunk])
+  -> Result es ([Type], [Thunk])
 pushCoDataCon dc args co = do
   -- Check whether the outer type is a TyConAppCo.
   let tyR = coercionRKind co
-  (tcR, univArgsR) <- whyFail' () $ splitTyConApp_maybe tyR
+  (tcR, univArgsR) <- failWith () $ splitTyConApp_maybe tyR
   unless (tcR == dataConTyCon dc) do
-    throwError' ()
+    throw ()
 
   -- Gather information on type variables of the DataCon.
   let dcUnivVars = dataConUnivTyVars dc
@@ -843,11 +958,11 @@ pushCoDataCon dc args co = do
     let (exArgs, valArgs) = splitAtList dcExVars $ dropList dcUnivVars args
     exTys <- for exArgs \case
       -- TODO: Do we need to wrap Coercions with mkCoercionTy?
-      Forced (Type ty) -> pure ty
-      _ -> throwError' ()
+      Forced (Left ty) -> pure ty
+      _ -> throw ()
     valArgs' <- for valArgs \case
       Thunked value -> pure value
-      Forced _ -> throwError' ()
+      Forced _ -> throw ()
     pure (exTys, valArgs')
 
   -- Get coercions for the universal type variables.
@@ -864,25 +979,35 @@ pushCoDataCon dc args co = do
   let valArgs' = Thunked <$> zipWith castArg valArgs argTys
 
   -- Wrap the existential type arguments back into thunks.
-  let exArgs = Forced . Type <$> exTys'
+  let exArgs = Forced . Left <$> exTys'
 
   pure (univArgsR, exArgs ++ valArgs')
 
 -- TODO: This is horrible. It's better than not having a callstack, but we
--- should really improve the error handling. Also, this should really not add
--- it's own callstack to the throw no?
-throwError'
+-- should really improve the error handling to contain actual error values.
+-- Also, we should probably freeze the callstack after this point.
+throwE
   :: HasCallStack
-  => MonadError (EvalError a) m
-  => a
-  -> m b
-throwError' = throwError . EvalError callStack
+--   => e !> es
+--   => e
+  => ()
+  -> Eval a
+throwE = Eval . ExceptT . pure . Left . throw
 
 -- TODO: The callstack should probably be frozen before calling the throw.
-whyFail'
+failWithE
   :: HasCallStack
-  => MonadError (EvalError a) m
-  => a
-  -> Maybe b
-  -> m b
-whyFail' err = maybe (throwError' err) pure
+--   => e !> es
+--   => e
+  => ()
+  -> Maybe a
+  -> Eval a
+failWithE = liftR .: failWith
+
+-- | Lift a result into the evaluation context.
+-- TODO: Allow more than just the unit error to be lifted once Eval support more
+-- error types.
+liftR :: Result '[()] a -> Eval a
+liftR = \case
+  Left err -> Eval . ExceptT . pure . Left . Left $ err
+  Right value -> pure value

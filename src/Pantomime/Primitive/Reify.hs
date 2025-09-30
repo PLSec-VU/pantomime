@@ -53,9 +53,10 @@ import Pantomime.Expr
   , mkCast
   , collectArgs
   , concreteDataCon
-  , throwError'
-  , whyFail'
   , exprType
+  , throwE
+  , failWithE
+  , liftR
   )
 import Pantomime.Subst
   ( extendSubst
@@ -180,21 +181,21 @@ instance Quantifier a => Reify (RPoly a) where
 
   reify ty expr = do
     expr' <- expr
-    ty' <- exprType expr'
+    ty' <- liftR $ exprType expr'
 
     -- Ensure the expression has the correct type.
     unless (eqType ty ty') do
-      throwError' ()
+      throwE ()
 
     pure expr'
 
   interpret ty expr = do
     expr' <- expr
-    ty' <- exprType expr'
+    ty' <- liftR $ exprType expr'
 
     -- Ensure the expression has the correct type.
     unless (eqType ty ty') do
-      throwError' ()
+      throwE ()
 
     pure expr'
 
@@ -213,29 +214,29 @@ instance (Quantifier a, Reify b) => Reify (a +> b) where
     pure $ mkForAllTy (quantifier @a) bodyTy
 
   reify ty fun = do
-    (tvar, tbody) <- whyFail' () $ splitForAllTyCoVar_maybe ty
+    (tvar, tbody) <- failWithE () $ splitForAllTyCoVar_maybe ty
     pure $ mkLam ty \arg -> do
       -- Get the type of the body.
-      subst <- extendSubst mkEmptySubst tvar arg
+      subst <- liftR $ extendSubst mkEmptySubst tvar arg
       let tbody' = substTy subst tbody
 
       -- Compute the actual function.
       fun' <- fun
       arg' <- arg >>= \case
             Type ty' -> pure ty'
-            _ -> throwError' ()
+            _ -> throwE ()
 
       reify @b tbody' $ fun' arg'
 
   interpret ty fun = do
-    (tvar, tbody) <- whyFail' () $ splitForAllCoVar_maybe ty
+    (tvar, tbody) <- failWithE () $ splitForAllCoVar_maybe ty
     pure \arg -> do
       -- Compute the actual function.
       fun' <- fun
       let arg' = pure $ mkType arg
 
       -- Get the type of the body.
-      subst <- extendSubst mkEmptySubst tvar arg'
+      subst <- liftR $ extendSubst mkEmptySubst tvar arg'
       let tbody' = substTy subst tbody
 
       interpret @b tbody' $ mkApp fun' arg'
@@ -256,14 +257,14 @@ instance (Reify a, Reify b) => Reify (a ~> b) where
     pure $ mkFunTy GHC.FTF_T_T GHC.ManyTy argTy resTy
 
   reify ty fun = do
-    (_flag, _mult, argTy, resTy) <- whyFail' () $ splitFunTy_maybe ty
+    (_flag, _mult, argTy, resTy) <- failWithE () $ splitFunTy_maybe ty
     pure $ mkLam ty \arg -> do
       fun' <- fun
       let arg' = interpret @a argTy arg
       reify @b resTy $ fun' arg'
 
   interpret ty fun = do
-    (_flag, _mult, argTy, resTy) <- whyFail' () $ splitFunTy_maybe ty
+    (_flag, _mult, argTy, resTy) <- failWithE () $ splitFunTy_maybe ty
     pure \arg -> do
       fun' <- fun
       let arg' = reify @a argTy arg
@@ -300,7 +301,7 @@ instance Quantifier n => Reify (RIntN n) where
 
   interpret ty value = value >>= \case
     Lit (Int value' ty') | eqType ty ty' -> pure $ SomeBV value'
-    _ -> throwError' ()
+    _ -> throwE ()
 
 -- | KnownNat constraint reify marker.
 data RKnownNat n
@@ -315,8 +316,8 @@ instance Quantifier n => Reify (RKnownNat n) where
     pure $ mkTyConApp tc [mkTyVarTy size]
 
   reify ty value = do
-    (tc, targs) <- whyFail' () $ splitTyConApp_maybe ty
-    (ty', co) <- whyFail' () $ instNewTyCon_maybe tc targs
+    (tc, targs) <- failWithE () $ splitTyConApp_maybe ty
+    (ty', co) <- failWithE () $ instNewTyCon_maybe tc targs
     inner <- reify @RNatural ty' value
     mkCast inner $ mkSymCo co
 
@@ -326,7 +327,7 @@ instance Quantifier n => Reify (RKnownNat n) where
       Cast body co
         | Pair tyL tyR <- coercionKind co
         , eqType ty tyR -> pure (tyL, liftUnion body)
-      _ -> throwError' ()
+      _ -> throwE ()
 
     interpret @RNatural tyL body
 
@@ -341,7 +342,7 @@ instance Reify RNatural where
   reify ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty naturalTy) do
-      throwError' ()
+      throwE ()
 
     expr >>= \case
       Left (SomeBV value) -> do
@@ -361,7 +362,7 @@ instance Reify RNatural where
   interpret ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty naturalTy) do
-      throwError' ()
+      throwE ()
 
     -- Gather the arguments.
     (spine, args) <- collectArgs <$> expr
@@ -371,13 +372,13 @@ instance Reify RNatural where
       Lit (DataCon tag tc)
         | tc == naturalTyCon 
         , Just dc <- concreteDataCon tag tc -> pure dc
-      _ -> throwError' ()
+      _ -> throwE ()
 
     -- All natural DataCon have only one argument exactly. Note that we also
     -- force it here already.
     arg <- case args of
       [arg] -> arg
-      _ -> throwError' ()
+      _ -> throwE ()
 
     if
       | dc == naturalNSDataCon
@@ -392,7 +393,7 @@ instance Reify RNatural where
       -- FIXME: We should have a ByteArray primitive to match on here!
       , Lit _ <- arg -> pure $ Right ()
 
-      | otherwise -> throwError' ()
+      | otherwise -> throwE ()
 
 instance ReifyBuiltin RNatural where
   builtinReifiedType = naturalTy
@@ -408,7 +409,7 @@ instance Reify RInteger where
   reify ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty integerTy) do
-      throwError' ()
+      throwE ()
 
     expr >>= \case
       Left (SomeBV value) -> do
@@ -426,7 +427,7 @@ instance Reify RInteger where
   interpret ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty integerTy) do
-      throwError' ()
+      throwE ()
 
     -- Gather the arguments.
     (spine, args) <- collectArgs <$> expr
@@ -436,13 +437,13 @@ instance Reify RInteger where
       Lit (DataCon tag tc)
         | tc == integerTyCon
         , Just dc <- concreteDataCon tag tc -> pure dc
-      _ -> throwError' ()
+      _ -> throwE ()
 
     -- All natural DataCon have only one argument exactly. Note that we also
     -- force it here already.
     arg <- case args of
       [arg] -> arg
-      _ -> throwError' ()
+      _ -> throwE ()
 
     if
       | dc == integerISDataCon
@@ -459,7 +460,7 @@ instance Reify RInteger where
       -- FIXME: We should have a ByteArray primitive to match on here!
       , Lit _ <- arg -> pure $ Right ()
 
-      | otherwise -> throwError' ()
+      | otherwise -> throwE ()
 
 instance ReifyBuiltin RInteger where
   builtinReifiedType = integerTy
@@ -478,7 +479,7 @@ instance
   reify ty value = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty $ builtinReifiedType @(RHIntN n)) do
-      throwError' ()
+      throwE ()
 
     value' <- value
     pure $ mkLit (mkIntN value' ty)
@@ -487,7 +488,7 @@ instance
     Lit (Int @m value' ty')
       | Just Refl <- eqT @n @m
       , eqType ty ty' -> pure value'
-    _ -> throwError' ()
+    _ -> throwE ()
 
 instance
   ( KnownNat n
@@ -512,7 +513,7 @@ instance KnownNat n => Reify (RHIntPW n) where
   reify ty value = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty $ builtinReifiedType @(RHIntPW n)) do
-      throwError' ()
+      throwE ()
 
     value' <- value
     pure $ mkLit (mkIntN value' ty)
@@ -521,7 +522,7 @@ instance KnownNat n => Reify (RHIntPW n) where
     Lit (Int @m value' ty')
       | Just Refl <- eqT @n @m
       , eqType ty ty' -> pure value'
-    _ -> throwError' ()
+    _ -> throwE ()
 
 instance KnownNat n => ReifyBuiltin (RHIntPW n) where
   builtinReifiedType = intPrimTy
@@ -540,7 +541,7 @@ instance
   reify ty value = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty $ builtinReifiedType @(RHWordN n)) do
-      throwError' ()
+      throwE ()
 
     value' <- value
     pure $ mkLit (mkWordN value' ty)
@@ -549,7 +550,7 @@ instance
     Lit (Word @m value' ty')
       | Just Refl <- eqT @n @m
       , eqType ty ty' -> pure value'
-    _ -> throwError' ()
+    _ -> throwE ()
 
 instance
   ( KnownNat n
@@ -574,7 +575,7 @@ instance KnownNat n => Reify (RHWordPW n) where
   reify ty value = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty $ builtinReifiedType @(RHWordPW n)) do
-      throwError' ()
+      throwE ()
 
     value' <- value
     pure $ mkLit (mkWordN value' ty)
@@ -583,7 +584,7 @@ instance KnownNat n => Reify (RHWordPW n) where
     Lit (Word @m value' ty')
       | Just Refl <- eqT @n @m
       , eqType ty ty' -> pure value'
-    _ -> throwError' ()
+    _ -> throwE ()
 
 instance KnownNat n => ReifyBuiltin (RHWordPW n) where
   builtinReifiedType = wordPrimTy

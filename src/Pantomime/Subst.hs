@@ -11,8 +11,11 @@ module Pantomime.Subst
   ) where
 
 import Pantomime.Expr
+import Pantomime.Result
 
+import GHC.Core.Type qualified as GHC
 import GHC.Plugins qualified as GHC
+import GHC.Stack (HasCallStack)
 import GHC.Utils.Outputable
   ( Outputable (..)
   , SDoc
@@ -32,7 +35,6 @@ import GHC.Plugins
   , lookupVarEnv
   )
 import Control.Monad (foldM)
-import GHC.Core.Type qualified as GHC
 
 -- | A substitution map for 'Expr'.
 --
@@ -63,10 +65,12 @@ mkEmptySubst = Subst
 
 -- | Extend the substitution with the given mapping.
 extendSubst
-  :: Subst
+  :: HasCallStack
+  => () !> es
+  => Subst
   -> Var
   -> Arg
-  -> Eval Subst
+  -> Result es Subst
 extendSubst subst var arg = if
   | isTyVar var -> do
     -- FIXME: We currently create a new substitution for every type argument
@@ -86,9 +90,7 @@ extendSubst subst var arg = if
 
     -- Ensure that the variables are only types. Note that we force the
     -- evaluation here as type reduction should always terminate.
-    ty <- arg >>= \case
-      Type ty -> pure ty
-      _ -> throwError' ()
+    ty <- forceTy arg
 
     -- Extend the type variable substitution.
     let tvSubst' = extendVarEnv (tvSubst subst) var ty
@@ -97,9 +99,7 @@ extendSubst subst var arg = if
   | isCoVar var -> do
     -- Ensure that the variables are only types. Note that we force the
     -- evaluation here as type reduction should always terminate.
-    co <- arg >>= \case
-      Coercion co -> pure co
-      _ -> throwError' ()
+    co <- forceCo arg
 
     -- Extend the coercion variable substitution.
     let cvSubst' = extendVarEnv (cvSubst subst) var co
@@ -112,10 +112,12 @@ extendSubst subst var arg = if
 
 -- | Extend the substitution with the given mappings.
 extendSubstMany
-  :: Foldable f
+  :: HasCallStack
+  => () !> es
+  => Foldable f
   => Subst
   -> f (Var, Arg)
-  -> Eval Subst
+  -> Result es Subst
 extendSubstMany = foldM $ uncurry . extendSubst
 
 -- | Lookup a variable in the current substitution environment.

@@ -1,5 +1,6 @@
 module Pantomime.Grisette.Mergeable
-  ( partialStrategy
+  ( NoMerge (..)
+  , partialStrategy
   , ifStrategy
   , tupleStrategy
   , impossible
@@ -10,10 +11,23 @@ import GHC.Stack (HasCallStack)
 import Data.Either (isLeft)
 
 import Grisette
-  ( MergingStrategy (..)
+  ( Mergeable (..)
+  , Mergeable1 (..)
+  , MergingStrategy (..)
   , product2Strategy
   , wrapStrategy
   )
+
+-- | A marker which allows a non-mergeable value to simply implement no merging
+-- strategy.
+newtype NoMerge a where
+  NoMerge :: a -> NoMerge a
+
+instance Mergeable (NoMerge a) where
+  rootStrategy = NoStrategy
+
+instance Mergeable1 NoMerge where
+  liftRootStrategy _ = NoStrategy
 
 -- | Partial merging strategy.
 --

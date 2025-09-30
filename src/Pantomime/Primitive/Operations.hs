@@ -13,6 +13,8 @@
 -- TODO: We can remove instances from FamInstEnvs by getting the list of
 -- elements via 'famInstEnvElts', filtering it and reconstructing the filtered
 -- version via 'emptyFamInstEnv' and 'extendFamInstEnvList'.
+{-# LANGUAGE RoleAnnotations #-}
+
 module Pantomime.Primitive.Operations
   ( IntN
   , plusIntN
@@ -51,6 +53,8 @@ import Data.Function (on)
 -- WARNING: Do not change to 'newtype'. Read module comment as to why.
 data IntN (n :: Nat) where
   IntN :: { unIntN :: Pantomime.IntN C n } -> IntN n
+
+type role IntN nominal
 
 {-# OPAQUE plusIntN #-}
 plusIntN :: KnownNat n => IntN n -> IntN n -> IntN n

@@ -37,14 +37,20 @@ import GHC.Plugins
   , Id
   , Outputable (..)
   , IsLine (..)
-  , GhcException (PprPanic)
+  , GhcException (..)
   , IsDoc (..)
   , Type
+  , InlinePragma (..)
+  , InlineSpec (..)
   , varType
   , prettyCallStackDoc
-  , callStackDoc, showSDocUnsafe, Uniquable (..), idInlinePragma, InlinePragma (..), InlineSpec (..)
+  , callStackDoc
+  , idInlinePragma
   )
 
+import Pantomime.Expr (Eval, Expr, failWithE, throwE)
+import Pantomime.Grisette.SomeBV (SomeBV(..))
+import Pantomime.Grisette.BitVector (IntN)
 import Pantomime.Primitive.Operations qualified as Primitive
 import Pantomime.Primitive.Reify
 
@@ -52,19 +58,17 @@ import Data.Typeable (type (:~:) (..), eqT)
 
 import Control.Monad (unless, (>=>))
 
+import GHC.TypeLits (KnownNat)
+import GHC.Num (integerToInt#, integerToWord#)
+
 import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.TH
 import Effectful.GHC.TyThing
-import Grisette.Unified (EvalModeTag (..))
-import Pantomime.Expr (Eval, Expr, whyFail', throwError')
-import Pantomime.Grisette.SomeBV (SomeBV(..))
-import Pantomime.Grisette.BitVector (IntN)
-import GHC.TypeLits (KnownNat)
 import Effectful.Exception (throwIO)
-import GHC.Num (integerToInt#, integerToWord#)
+
+import Grisette.Unified (EvalModeTag (..))
 import Grisette (SignConversion(..))
-import Effectful.Dispatch.Static (unsafeEff_)
 
 thNameToTyCon
   :: HasCallStack
@@ -149,12 +153,6 @@ lookupReify name interp = do
     -- inlineable functions as they are fragile when being interpreted.
     _ -> undefined
 
-  unsafeEff_ . putStrLn . showSDocUnsafe $ vcat
-    [ "#############"
-    , ppr var
-    , ppr $ getUnique var
-    ] 
-
   -- Lookup the type info for reification.
   ty <- reifiedType @a
 
@@ -207,7 +205,7 @@ reifiedIntN = staticReifyError $ lookupReifyMany
       -- the bitvector?
       SomeBV @n x' <- x
       SomeBV @m y' <- y
-      Refl <- whyFail' () $ eqT @n @m
+      Refl <- failWithE () $ eqT @n @m
       pure . SomeBV $ op x' y'
 
     unary
@@ -219,6 +217,11 @@ reifiedIntN = staticReifyError $ lookupReifyMany
       SomeBV x' <- x
       pure . SomeBV $ op x'
 
+-- TODO: The only reason we need to reify these is because of the NOINLINE
+-- pragma. Perhaps it makes more sense to use the user-interpretation stuff once
+-- we have it implemented. The only thing we would need to do is to copy-paste
+-- the code that has a NOINLINE pragma and then provide it as an interp for the
+-- NOINLINE code.
 reifiedBase
   :: forall es
    . HasCallStack
@@ -235,7 +238,7 @@ reifiedBase = staticReifyError $ lookupReifyMany
       Left (SomeBV @n value)
         -- FIXME: Use proper architecture size on this comparison.
         | Just Refl <- eqT @n @64 -> pure value
-      Left _ -> throwError' ()
+      Left _ -> throwE ()
       Right () -> undefined
 
   , Interpretation @(RInteger ~> RHWordPW 64) 'integerToWord# $ pure \x -> do
@@ -244,7 +247,7 @@ reifiedBase = staticReifyError $ lookupReifyMany
       Left (SomeBV @n value)
         -- FIXME: Use proper architecture size on this comparison.
         | Just Refl <- eqT @n @64 -> pure $ toUnsigned value
-      Left _ -> throwError' ()
+      Left _ -> throwE ()
       Right () -> undefined
   ]
 
