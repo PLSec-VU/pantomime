@@ -1,6 +1,8 @@
 -- TODO: I'm not sure about this module name. It looks as though it's about
 -- GHC primitives. In reality, we just lookup all the GHC information before we
--- can perform the interpretations.
+-- can perform the interpretations. I think we will at some point remove all
+-- bindings of base. For this reason, perhaps 'Builtin' might be a good name for
+-- this module.
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -48,7 +50,7 @@ import GHC.Plugins
   , idInlinePragma
   )
 
-import Pantomime.Expr (Eval, Expr, failWithE, throwE)
+import Pantomime.Expr (Eval, EvalExpr, failWithE, throwE)
 import Pantomime.Grisette.SomeBV (SomeBV(..))
 import Pantomime.Grisette.BitVector (IntN)
 import Pantomime.Primitive.Operations qualified as Primitive
@@ -69,6 +71,7 @@ import Effectful.Exception (throwIO)
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette (SignConversion(..))
+import Pantomime.Result (type (!>))
 
 thNameToTyCon
   :: HasCallStack
@@ -127,21 +130,26 @@ instance Outputable ReifyMismatch where
     , "reified type:" <+> ppr ty
     ]
 
-data Interpretation where
-  Interpretation :: Reify a => TH.Name -> Eval (InterpRep a) -> Interpretation
+data Interpretation es where
+  Interpretation
+    :: Reify a
+    => TH.Name
+    -> Eval es (InterpRep es a)
+    -> Interpretation es
 
 lookupReify
-  :: forall a es
+  :: forall a es fs
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => Error ReifyMismatch :> es
   => HasThings :> es
   => THNameToGHCName :> es
+  => () !> fs
   => Reify a
   => TH.Name
-  -> Eval (InterpRep a)
-  -> Eff es (Var, Eval Expr)
+  -> Eval fs (InterpRep fs a)
+  -> Eff es (Var, EvalExpr fs)
 lookupReify name interp = do
   -- Lookup the identifier.
   var <- thNameToId name
@@ -165,27 +173,29 @@ lookupReify name interp = do
   pure (var, expr)
 
 lookupReifyMany
-  :: forall f es
+  :: forall f es fs
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => Error ReifyMismatch :> es
   => HasThings :> es
   => THNameToGHCName :> es
+  => () !> fs
   => Traversable f
-  => f Interpretation
-  -> Eff es (f (Var, Eval Expr))
+  => f (Interpretation fs)
+  -> Eff es (f (Var, EvalExpr fs))
 lookupReifyMany = traverse \(Interpretation @r name interp) -> do
   lookupReify @r name interp
 
 reifiedIntN
-  :: forall es
+  :: forall es fs
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Eff es [(Var, Eval Expr)]
+  => () !> fs
+  => Eff es [(Var, EvalExpr fs)]
 reifiedIntN = staticReifyError $ lookupReifyMany
   [ binary 'Primitive.plusIntN (+)
   , binary 'Primitive.timesIntN (*)
@@ -198,7 +208,7 @@ reifiedIntN = staticReifyError $ lookupReifyMany
     binary
       :: TH.Name
       -> (forall n. KnownNat n => IntN S n -> IntN S n -> IntN S n)
-      -> Interpretation
+      -> Interpretation fs
     binary name op = Interpretation @BinaryIntN name $ liftF4 \_n c x y -> do
       _ <- c
       -- TODO: Should we check that the KnownNat is indeed equal to the size of
@@ -211,7 +221,7 @@ reifiedIntN = staticReifyError $ lookupReifyMany
     unary
       :: TH.Name
       -> (forall n. KnownNat n => IntN S n -> IntN S n)
-      -> Interpretation
+      -> Interpretation fs
     unary name op = Interpretation @UnaryIntN name $ liftF3 \_n c x -> do
       _ <- c
       SomeBV x' <- x
@@ -222,14 +232,19 @@ reifiedIntN = staticReifyError $ lookupReifyMany
 -- we have it implemented. The only thing we would need to do is to copy-paste
 -- the code that has a NOINLINE pragma and then provide it as an interp for the
 -- NOINLINE code.
+--
+-- If it ever happens that base is decoupled from GHC, we could even add the
+-- expose-all-unfoldings flag to the compilation of base. This would remove the
+-- need of adding the implementation elsewhere.
 reifiedBase
-  :: forall es
+  :: forall es fs
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Eff es [(Var, Eval Expr)]
+  => () !> fs
+  => Eff es [(Var, EvalExpr fs)]
 reifiedBase = staticReifyError $ lookupReifyMany
   -- FIXME: Get proper architecture size.
   [ Interpretation @(RInteger ~> RHIntPW 64) 'integerToInt# $ pure \x -> do

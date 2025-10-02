@@ -49,16 +49,17 @@ import Grisette
   )
 
 import Control.Monad (join, foldM, unless)
-import Control.Arrow (Arrow(..))
+import Control.Arrow (Arrow (..))
 
-import Data.Bits (Bits(..), (.^.))
-import Data.Typeable (Proxy (..), type (:~:)(..), eqT)
+import Data.Bits (Bits (..), (.^.))
+import Data.Typeable (Proxy (..), type (:~:) (..), eqT)
 
 symbolise
   :: HasCallStack
-  => Subst
+  => () !> es
+  => Subst es
   -> GHC.CoreExpr
-  -> Eval Expr
+  -> EvalExpr es
 symbolise = go
   where
     -- TODO: I think we should add notes where we add helper functions like this
@@ -170,32 +171,34 @@ symbolise = go
 -- TODO: This is mutually recursive with 'symbolise'. I have to find a way not
 -- to bloat the callstack!
 symboliseBind
-  :: HasCallStack
+  :: forall es fs
+   . HasCallStack
   => () !> es
-  => Subst
+  => () !> fs
+  => Subst fs
   -> GHC.CoreBind
-  -> Result es Subst
+  -> Result es (Subst fs)
 symboliseBind subst = \case
   GHC.NonRec bndr rhs -> do
     let rhs' = symbolise subst rhs
-    extendSubst subst bndr rhs'
+    extendIdSubst subst bndr rhs'
 
   GHC.Rec pairs -> do
-    -- TODO: We can probably remove this type signature once we adjust
-    -- 'liftR'
-    let subst' :: forall es. () !> es => Result es Subst
-        subst' = extendSubstMany subst pairs'
+    let subst' :: forall gs. () !> gs => Result gs (Subst fs)
+        subst' = extendIdSubstMany subst pairs'
         pairs' = second symbolise' <$> pairs
         symbolise' rhs = liftR subst' >>= flip symbolise rhs
     subst'
 
 symboliseBindMany
-  :: HasCallStack
+  :: forall f es fs
+   . HasCallStack
   => () !> es
+  => () !> fs
   => Foldable f
-  => Subst
+  => Subst fs
   -> f GHC.CoreBind
-  -> Result es Subst
+  -> Result es (Subst fs)
 symboliseBindMany = foldM symboliseBind
 
 symboliseLit
@@ -238,11 +241,12 @@ symboliseLit = \case
   _ -> throw ()
 
 symbolisePrimOp
-  :: forall n
+  :: forall n es
    . HasCallStack
+  => () !> es
   => KnownNat n
   => PrimOp
-  -> Eval Expr
+  -> EvalExpr es
 symbolisePrimOp = \case
   -- Char operations:
   -------------------
@@ -516,29 +520,29 @@ symbolisePrimOp = \case
       :: forall a b
        . ReifyBuiltin a
       => ReifyBuiltin b
-      => (InterpRep a -> InterpRep b)
-      -> Eval Expr
+      => (InterpRep es a -> InterpRep es b)
+      -> EvalExpr es
     convert = builtinReify @(a ~> b) . liftF1'
 
     binary
       :: forall a
        . ReifyBuiltin a
-      => (InterpRep a -> InterpRep a -> InterpRep a)
-      -> Eval Expr
+      => (InterpRep es a -> InterpRep es a -> InterpRep es a)
+      -> EvalExpr es
     binary = builtinReify @(a ~> a ~> a) . liftF2'
 
     unary
       :: forall a
        . ReifyBuiltin a
-      => (InterpRep a -> InterpRep a)
-      -> Eval Expr
+      => (InterpRep es a -> InterpRep es a)
+      -> EvalExpr es
     unary = builtinReify @(a ~> a) . liftF1'
 
     cmp
       :: forall a
        . ReifyBuiltin a
-      => (InterpRep a -> InterpRep a -> SymBool)
-      -> Eval Expr
+      => (InterpRep es a -> InterpRep es a -> SymBool)
+      -> EvalExpr es
     cmp f = builtinReify @(a ~> a ~> RHIntPW n) $ liftF2' \l r -> do
       mrgIte (f l r) 1 0
 
@@ -550,12 +554,12 @@ symbolisePrimOp = \case
       :: forall a bv m
        . ReifyBuiltin a
       => KnownNat m
-      => InterpRep a ~ bv m
+      => InterpRep es a ~ bv m
       => SymFromIntegral (IntN S n) (bv m)
       => SimpleMergeable (bv m)
       => GenSymSimple () (bv m)
       => (bv m -> bv m -> bv m)
-      -> Eval Expr
+      -> EvalExpr es
     shft f = builtinReify @(a ~> RHIntPW n ~> a) $ liftF2' \val idx -> do
       -- The bit-size of platform words.
       let size = fromIntegral $ natVal (Proxy @m)

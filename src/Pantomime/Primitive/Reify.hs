@@ -66,6 +66,7 @@ import Pantomime.Subst
 import Pantomime.Primitive.Operations qualified as Primitive
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Grisette.SomeBV (SomeBV (..))
+import Pantomime.Result (type (!>))
 
 import GHC.TypeNats (KnownNat, Nat, natVal)
 import GHC.Builtin.Types.Prim
@@ -84,6 +85,7 @@ import GHC.Builtin.Types.Prim
   , word32PrimTy
   , word64PrimTy
   )
+import GHC.Data.Pair (Pair(..))
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
@@ -118,11 +120,13 @@ import GHC.Plugins
 
 import Language.Haskell.TH qualified as TH
 
+import Data.Kind qualified as Kind
 import Data.Type.Bool (type (||))
 import Data.Type.Equality (type (==))
 import Data.Typeable (Proxy(..), type (:~:) (..), eqT)
 
 import Control.Applicative (liftA3)
+import Control.Monad (unless)
 
 import Grisette.Unified (EvalModeTag(..))
 import Grisette (liftUnion)
@@ -131,11 +135,15 @@ import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.TyThing
 import Effectful.GHC.TH
-import Control.Monad (unless)
-import GHC.Data.Pair (Pair(..))
 
+-- | How to convert to and from interpretations of an 'Expr'.
+--
+-- Instead of directly having the interpreted representation in the typeclass
+-- slot, we keep it as a type family. This is because the relation is
+-- surjective: multiple expressions may have the same interpretation. As such,
+-- we generally use a sort of marker value as the implementor of this function.
 class Reify a where
-  type InterpRep a
+  type InterpRep (es :: [Kind.Type]) a
 
   reifiedType
     :: forall es
@@ -146,24 +154,37 @@ class Reify a where
     => THNameToGHCName :> es
     => Eff es Type
 
+  -- TODO: For now, just having the generic () !> es error suffices. Ideally
+  -- though, we have a type family that spells out which errors may occur during
+  -- either reification or intepretation. Perhaps we even need a type family for
+  -- each, though I would rather not go there... In any case, I cannot write a
+  -- type family of ReifyError a :: [Kind.Type] here, as Haskell type families
+  -- are too slow to have a type family for (!>>). I would need to write
+  -- ReifyError es :: Kind.Constraint, which I think it much worse. With that
+  -- one, I'm also still a little bit worried about compile times... I guess we
+  -- could alternatively have a single error type that existentially wraps any
+  -- error we might want to give. It could be a stop-gap solution...
   reify
-    :: Type
-    -> Eval (InterpRep a)
-    -> Eval Expr
+    :: () !> es
+    => Type
+    -> Eval es (InterpRep es a)
+    -> Eval es (Expr es)
 
   interpret
-    :: Type
-    -> Eval Expr
-    -> Eval (InterpRep a)
+    :: () !> es
+    => Type
+    -> Eval es (Expr es)
+    -> Eval es (InterpRep es a)
 
 class Reify a => ReifyBuiltin a where
   builtinReifiedType :: Type
 
 builtinReify
-  :: forall a
-   . ReifyBuiltin a
-  => Eval (InterpRep a)
-  -> Eval Expr
+  :: forall a es
+   . () !> es
+  => ReifyBuiltin a
+  => Eval es (InterpRep es a)
+  -> Eval es (Expr es)
 builtinReify expr = do
   let ty = builtinReifiedType @a
   reify @a ty expr
@@ -175,7 +196,7 @@ class Quantifier a where
 data RPoly a
 
 instance Quantifier a => Reify (RPoly a) where
-  type InterpRep (RPoly a) = Expr
+  type InterpRep es (RPoly a) = Expr es
 
   reifiedType = pure $ builtinReifiedType @(RPoly a)
 
@@ -207,7 +228,7 @@ data a +> b
 infixr +>
 
 instance (Quantifier a, Reify b) => Reify (a +> b) where
-  type InterpRep (a +> b) = Type -> Eval (InterpRep b)
+  type InterpRep es (a +> b) = Type -> Eval es (InterpRep es b)
 
   reifiedType = do
     bodyTy <- reifiedType @b
@@ -249,7 +270,7 @@ data a ~> b
 infixr ~>
 
 instance (Reify a, Reify b) => Reify (a ~> b) where
-  type InterpRep (a ~> b) = Eval (InterpRep a) -> Eval (InterpRep b)
+  type InterpRep es (a ~> b) = Eval es (InterpRep es a) -> Eval es (InterpRep es b)
 
   reifiedType = do
     argTy <- reifiedType @a
@@ -287,7 +308,7 @@ instance (ReifyBuiltin a, ReifyBuiltin b) => ReifyBuiltin (a ~> b) where
 data RIntN n
 
 instance Quantifier n => Reify (RIntN n) where
-  type InterpRep (RIntN n) = SomeBV (IntN S)
+  type InterpRep es (RIntN n) = SomeBV (IntN S)
 
   reifiedType = do
     name <- thNameToGhcName ''Primitive.IntN
@@ -307,7 +328,7 @@ instance Quantifier n => Reify (RIntN n) where
 data RKnownNat n
 
 instance Quantifier n => Reify (RKnownNat n) where
-  type InterpRep (RKnownNat n) = InterpRep RNatural
+  type InterpRep es (RKnownNat n) = InterpRep es RNatural
 
   reifiedType = do
     name <- thNameToGhcName ''KnownNat
@@ -335,7 +356,7 @@ instance Quantifier n => Reify (RKnownNat n) where
 data RNatural
 
 instance Reify RNatural where
-  type InterpRep RNatural = Either (SomeBV (WordN S)) ()
+  type InterpRep es RNatural = Either (SomeBV (WordN S)) ()
 
   reifiedType = pure $ builtinReifiedType @RNatural
 
@@ -402,7 +423,7 @@ instance ReifyBuiltin RNatural where
 data RInteger
 
 instance Reify RInteger where
-  type InterpRep RInteger = Either (SomeBV (IntN S)) ()
+  type InterpRep es RInteger = Either (SomeBV (IntN S)) ()
 
   reifiedType = pure $ builtinReifiedType @RInteger
 
@@ -472,7 +493,7 @@ instance
   ( KnownNat n
   , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
   ) => Reify (RHIntN n) where
-  type InterpRep (RHIntN n) = IntN S n
+  type InterpRep es (RHIntN n) = IntN S n
 
   reifiedType = pure $ builtinReifiedType @(RHIntN n)
 
@@ -506,7 +527,7 @@ instance
 data RHIntPW (n :: Nat)
 
 instance KnownNat n => Reify (RHIntPW n) where
-  type InterpRep (RHIntPW n) = IntN S n
+  type InterpRep es (RHIntPW n) = IntN S n
 
   reifiedType = pure $ builtinReifiedType @(RHIntPW n)
 
@@ -534,7 +555,7 @@ instance
   ( KnownNat n
   , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
   ) => Reify (RHWordN n) where
-  type InterpRep (RHWordN n) = WordN S n
+  type InterpRep es (RHWordN n) = WordN S n
 
   reifiedType = pure $ builtinReifiedType @(RHWordN n)
 
@@ -568,7 +589,7 @@ instance
 data RHWordPW (n :: Nat)
 
 instance KnownNat n => Reify (RHWordPW n) where
-  type InterpRep (RHWordPW n) = WordN S n
+  type InterpRep es (RHWordPW n) = WordN S n
 
   reifiedType = pure $ builtinReifiedType @(RHWordPW n)
 

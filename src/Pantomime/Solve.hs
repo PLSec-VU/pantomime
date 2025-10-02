@@ -22,7 +22,7 @@ import GHC.Platform (PlatformWordSize (..), Platform (..))
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Tc.Utils.TcType (eqType, tcSplitSigmaTy)
 
-import Grisette (LogicalOp (..), ModelOps (..), IfViewResult (..), UnionView (..), SymBranching (..), onUnion, EvalSym (..))
+import Grisette (LogicalOp (..), ModelOps (..), onUnion, EvalSym (..))
 
 import Control.Monad (unless)
 
@@ -80,18 +80,22 @@ checkValid
   => CoreExpr
   -> Eff es ()
 checkValid expr = do
-  let dbg :: forall o es'. Outputable o => o -> Eff es' ()
+  -- TODO: Somehow this code doesn't read very nice. I think I should review it
+  -- Specifically the substitution part should dictate the inner error. I guess
+  -- it does now because it can also substitute types. Perhaps we can adjust
+  -- extendSubstMany that is only does value substitution. This way, we can
+  -- split the error type for adding from the one used in the expression itself.
+  let dbg :: forall o . Outputable o => o -> Eff es ()
       dbg = unsafeEff_ . putStrLn . showSDocUnsafe . ppr
 
   program <- get @CoreProgram
 
   reifiedIntN <- Primitive.reifiedIntN
   reifiedBase <- Primitive.reifiedBase
-  -- dbg $ getUnique plusvar
-  -- dbg $ exprType lhs
+
   let subst = do
-        subst' <- Pantomime.extendSubstMany Pantomime.mkEmptySubst reifiedIntN
-        subst'' <- Pantomime.extendSubstMany subst' reifiedBase
+        subst' <- Pantomime.extendIdSubstMany Pantomime.mkEmptySubst reifiedIntN
+        subst'' <- Pantomime.extendIdSubstMany subst' reifiedBase
         Pantomime.symboliseBindMany subst'' program
 
   subst' <- case handle subst of
@@ -107,29 +111,14 @@ checkValid expr = do
 
   let result = do
         fun <- Pantomime.symbolise subst' expr
-        Pantomime.mkApps fun (fmap snd args)
-          -- fun >>= flip Pantomime.mkApps (fmap snd args)
+        Pantomime.mkApps fun $ fmap snd args
 
-  -- let symbolic = do
-  --       -- subst' <- Pantomime.extendSubst subst plusvar plusexpr
-  --       fun <- Pantomime.symbolise subst expr
-  --       Pantomime.saturate famInst primTys fun
+  let Pantomime.Eval boolResult = result >>= Pantomime.exprToBool
 
-  -- let evalBool = symbolic >>= Pantomime.exprToBool . fst
-  -- let binds = sequence $ snd <$> symbolic
-        -- (saturated, _binds) <- Pantomime.saturate famInst primTys fun
-        -- Pantomime.exprToBool saturated
-
-  let boolResult = result >>= Pantomime.exprToBool
-
-  -- TODO: I should make a better interface to strip errors! This code is really
-  -- horrible anyway, so I should clean it up...
-  evalBool <- forUnion (runExceptT $ Pantomime.runEval boolResult) \case
-    Left (Left _err) -> do
-      -- dbg $ "UNKNOWN ERROR :(" $+$ text (prettyCallStack trace)
-      undefined
-    Left (Right variant) -> pure $ Left variant
-    Right value -> pure $ Right value
+  evalBool <- case handle boolResult of
+    -- TODO: Properly propagate error!
+    Left (_cs, ()) -> undefined
+    Right value -> pure $ runExceptT (ok value)
 
   let eq = flip onUnion evalBool \case
         Left Pantomime.Unreachable -> true
@@ -162,53 +151,16 @@ checkValid expr = do
         dbg $ vcat
           [ "==================="
           , ppr bndr <+> "::" <+> ppr (varType bndr)
-          , Pantomime.pprArg id arg'
+          , ppr arg'
           ]
-      -- let args' = evalSym true model . snd <$> args
-      -- let counterExample = evalSym true model result
-      -- dbg $ Pantomime.pprArg id <$> args'
-      -- dbg $ Pantomime.pprArg id counterExample
-
-      -- dbg $ Pantomime.pprEval id (const $ text . show) counterExample
       error "Expression was **not** valid!"
-      -- let concretise' = runEvalErr . concretise model
-      -- bndrs' <- forM bndrs concretise'
-      -- lres' <- concretise' lres
-      -- rres' <- concretise' rres
-      -- throwError_ $ Counterexample bndrs' lres' rres'
     Unsatisfiable -> do
-      error "Expression was valid!"
-      -- conc <- runEvalErr $ concretise2 emptyModel lres
-      -- unsafeEff_ . print . showSDocUnsafe . ppr $ conc
-      -- pure ()
+      dbg @SDoc "Expression was valid!"
+      pure ()
     -- FIXME: I don't think this is always true. Especially so w.r.t. allowing
     -- user define Opaque types. Also not sure about some of the floating point
     -- stuff for example.
     Unknown -> throwIO $ ErrorCall "checks are in decidable fragment"
-
-forUnion
-  :: UnionView t
-  => Applicative f
-  => t a
-  -> (a -> f b)
-  -> f (t b)
-forUnion = flip traverseUnion
-
-traverseUnion
-  :: UnionView t
-  => Applicative f
-  => (a -> f b)
-  -> t a
-  -> f (t b)
-traverseUnion f m = if
-  | Just x <- singleView m -> pure <$> f x
-  | Just (IfViewResult cond tr fl) <- ifView m -> do
-    mrgIfPropagatedStrategy cond <$> traverseUnion f tr <*> traverseUnion f fl
-  -- TODO: This is aweful. Shouldn't Grisette just change the interface on
-  -- this or something?... Note, we cannot use 'Single' and 'If' pattern
-  -- as we cannot introduce a mergeable constraint on the values of the
-  -- Union.
-  | otherwise -> error "BUG: union should always be either 'Single' or 'If'"
 
 -- TODO: We really want to remove this thing once we get rid of MonadEval in
 -- the entire codebase. This return is a horrible overapproximation!

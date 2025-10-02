@@ -3,10 +3,10 @@
 module Pantomime.Fresh
   ( freshExpr
   , freshArgs
-  , saturate
   ) where
 
 import GHC.Core.Reduction (Reduction(..))
+import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Builtin.Types.Prim
   ( intPrimTy
   , int8PrimTy
@@ -32,6 +32,7 @@ import GHC.Utils.Outputable
   ( Outputable (..)
   , showSDocUnsafe
   )
+import GHC.Plugins qualified as GHC
 import GHC.Plugins
   ( Var
   , Name
@@ -40,7 +41,6 @@ import GHC.Plugins
   , HasCallStack
   , InScopeSet
   , dataConTagZ
-  , emptyInScopeSet
   , mkSymCo
   , isDataTyCon
   , isUnboxedTupleTyCon
@@ -55,9 +55,8 @@ import GHC.Plugins
   , tyVarKind
   )
 
-import GHC.TypeNats
-  ( SomeNat (..)
-  )
+import GHC.TypeLits (someNatVal)
+import GHC.TypeNats (SomeNat (..))
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -71,23 +70,18 @@ import Grisette
   , withMetadata
   )
 
+import Data.Functor ((<&>))
 import Data.String (IsString(..))
 
+import Control.Monad (join)
 
-import Pantomime.Grisette.BitVector
-  ( IntN
-  )
-
+import Pantomime.Grisette.BitVector (IntN)
 import Pantomime.Expr
 import Pantomime.Primitive.GHC qualified as Primitive
-import GHC.Plugins qualified as GHC
-import GHC.TypeLits (someNatVal)
-import Control.Monad (join)
 import Pantomime.Util (foldM', freshIds, freshTyVars)
-import GHC.Core.TyCo.Rep (scaledThing)
-import Data.Functor ((<&>))
+import Pantomime.Result (type (!>))
 
-data Variable where
+data Variable es where
   Variable ::
     { varName :: Name
     -- ^ Root name.
@@ -95,9 +89,9 @@ data Variable where
     -- ^ Accessor path, note that the first entry is accessed last.
     , varType :: Type
     -- ^ Type of this variable.
-    , varArgs :: [Arg]
+    , varArgs :: [Arg es]
     -- ^ Arguments which the variable depends on.
-    } -> Variable
+    } -> Variable es
 
 data Accessor where
   Accessor
@@ -112,7 +106,7 @@ data FieldOrTag where
   Tag :: FieldOrTag
 
 varToSymbol
-  :: Variable
+  :: Variable es
   -> FieldOrTag
   -> Symbol
 varToSymbol var dst = do
@@ -130,7 +124,7 @@ varToSymbol var dst = do
 
 symbolicVar
   :: Solvable (ConType s) s
-  => Variable
+  => Variable es
   -> FieldOrTag
   -> s
 symbolicVar var dst = case varArgs var of
@@ -146,10 +140,11 @@ symbolicVar var dst = case varArgs var of
 -- The freshness hinges on the freshness of the Var.
 freshExpr
   :: HasCallStack
+  => () !> es
   => FamInstEnvs
   -> Primitive.Types
   -> Var
-  -> Eval Expr
+  -> EvalExpr es
 freshExpr famInst primTys root = go Variable
   { varName = GHC.varName root
   , varAccessor = []
@@ -269,29 +264,14 @@ freshExpr famInst primTys root = go Variable
           dbgE ["could not create fresh value for", ppr ty]
           throwE ()
 
-saturate
-  :: FamInstEnvs
-  -> Primitive.Types
-  -> Expr
-  -> Eval (Expr, [(Var, Arg)])
-saturate famInst primTys expr = do
-  -- TODO: I don't want to generate new arguments for each inner expression. I
-  -- just want arguments once. If I can do exprType for the whole thing, then
-  -- perhaps I can change the type of this to (Eval Expr, [(Var, Arg)]).
-  -- Actually, exprType already only uses the error part of the monad. We
-  -- should just put the error part of the monad as the outer one. Then we can
-  -- have the Eval for the inner Expr.
-  ty <- liftR $ exprType expr
-  let (args, _) = freshArgs famInst primTys ty emptyInScopeSet
-  result <- mkApps expr $ fmap snd args
-  pure (result, args)
-
 freshArgs
-  :: FamInstEnvs
+  :: HasCallStack
+  => () !> es
+  => FamInstEnvs
   -> Primitive.Types
   -> Type
   -> InScopeSet
-  -> ([(Var, Arg)], InScopeSet)
+  -> ([(Var, Arg es)], InScopeSet)
 freshArgs famInst primTys ty scope0 = do
   -- Gather the argument types.
   let (tyVars, funTy) = splitForAllTyVars ty
