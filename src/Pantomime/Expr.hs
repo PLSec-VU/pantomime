@@ -79,7 +79,6 @@ import GHC.Plugins
   , Role (..)
   , TyCon
   , DataCon
-  , HasCallStack
   , isEnumerationTyCon
   , dataConTagZ
   , dataConTyCon
@@ -114,11 +113,11 @@ import GHC.Plugins
   , dataConRepArgTys
   , mkEmptySubst
   , boolTyCon
-  , trueDataCon
   )
 
-import GHC.TypeNats (KnownNat)
+import GHC.TypeNats (KnownNat, SomeNat (..))
 import GHC.Generics (Generic)
+import GHC.Stack (HasCallStack, withFrozenCallStack)
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -128,6 +127,7 @@ import Grisette
   , SymEq (..)
   , SymOrd (..)
   , LogicalOp ((.&&))
+  , BitCast (..)
   , ToSym (..)
   , ToCon (..)
   , TryMerge (..)
@@ -154,6 +154,7 @@ import Pantomime.Orphan.Grisette ()
 import Pantomime.Orphan.GHC ()
 import Pantomime.Result
 import Pantomime.Grisette.SomeBV (SomeBV (..))
+import Pantomime.Grisette.SizedBV (sizedBVZresize)
 import Pantomime.Grisette.Mergeable
   ( partialStrategy
   , ifStrategy
@@ -171,6 +172,7 @@ import Data.List ((!?))
 import Data.Traversable (for)
 import Data.Typeable
   ( type (:~:) (..)
+  , Proxy (..)
   , eqT
   )
 
@@ -340,7 +342,7 @@ type EvalExpr es = Eval es (Expr es)
 -- | Like 'EvalExpr', this may be considered a thunk. Unlike 'EvalExpr', this is
 -- an expression that may appear in the argument position. This entails that
 -- it may be a 'Type' or 'Coercion' in the spine.
-type Arg es = Eval es (Expr es)
+type Arg es = EvalExpr es
 
 -- TODO: For now, I've made this Thunk so data constructors with different
 -- existentials applications do not merge. I'm not sure whether perhaps it is
@@ -530,7 +532,7 @@ pprEval addParens f = coerce go
     go :: EvalCoerce es a -> SDoc
     go = \case
       -- TODO: How should I actually emit the error...
-      Left _err -> undefined
+      Left err -> GHC.prettyCallStackDoc $ location err
       -- TODO: This has a bit too much nesting for me, I should reduce it!
       Right union -> flip (pprUnion addParens) (runExceptT union) \p -> \case
         Left UB -> "UB"
@@ -614,10 +616,17 @@ mkEnumCon tag ty = do
   unless (isEnumerationTyCon tc) do
     throwE ()
 
+  -- Check to ensure we have a proper tag.
+  let upper = fromIntegral $ length (tyConDataCons boolTyCon)
+  let inBounds = 0 .<= tag .&& tag .< upper
+
   -- Construct the data constructor and its type arguments.
   let dc = mkLit $ DataCon tag tc
   let targs' = pure . mkType <$> targs
-  mkApps dc targs'
+  let expr = mkApps dc targs'
+
+  -- The expression is UB if it the tag is not within bounds.
+  mrgIf inBounds expr mkUB
 
 mkIntN
   :: KnownNat n
@@ -824,14 +833,10 @@ exprToBool
   -> Eval es SymBool
 exprToBool = \case
   Lit (DataCon tag tc) | tc == boolTyCon -> do
-    -- The bounds of the tag.
-    let upper = fromIntegral $ length (tyConDataCons boolTyCon)
-    let inBounds = 0 .<= tag .&& tag .< upper
+    -- DataCon are checked at creation for correctness. Hence, we can simply
+    -- cast the bit value.
+    pure $ bitCast (sizedBVZresize @_ @_ @1 tag)
 
-    let trueTag = fromIntegral $ dataConTagZ trueDataCon
-    let result = pure $ tag .== trueTag
-
-    mrgIf inBounds result mkUB
   _ -> throwE ()
 
 -- | Equivalence between literals.
@@ -855,7 +860,8 @@ eqLit = \cases
     , Just Refl <- eqT @l @r -> pure $ lval .== rval
   _ _ -> throw ()
 
--- TODO: This function deserves some clean-up!
+-- TODO: This function deserves some clean-up! My syntax highlighter is even
+-- breaking on it...
 exprType
   :: HasCallStack
   => () !> es
@@ -967,7 +973,7 @@ collectScrut
   :: HasCallStack
   => () !> es
   => Expr es
-  -> Eval es (Literal, [Arg es])
+  -> Eval es (Either Coercion Literal, [Arg es])
 collectScrut = \case
   -- On a cast, we may attempt to push a TyConAppCo into the arguments of
   -- a DataCon literal.
@@ -975,37 +981,43 @@ collectScrut = \case
     -- Perform the operation for every body in the cast.
     body' <- liftUnion body
 
-    -- Collect the arguments and literal.
-    (lit, args) <- case collectThunks body' of
-      (Lit lit, args) -> pure (lit, args)
-      _ -> throwE ()
+    -- Collect the spine and arguments.
+    let (spine, args) = collectThunks body'
 
-    -- Only a DataCon may have its arguments pushed.
-    dc <- case lit of
-      DataCon tag tc | Just dc <- anyDataCon tag tc -> pure dc
+    -- Only a DataCon spine may have its arguments pushed.
+    (SomeNat @n _, dc) <- case spine of
+      Lit (DataCon @n tag tc)
+        | Just dc <- anyDataCon tag tc -> pure (SomeNat @n Proxy, dc)
       _ -> throwE ()
 
     -- Push the coercion into the arguments.
     (_univ, args') <- liftR $ pushCoDataCon dc args co
-    pure (lit, unthunk <$> args')
+    pure (Right $ mkDataCon @n dc, unthunk <$> args')
 
   -- If not a cast, we attempt to get the literal at the spine and return the
   -- arguments excluding the universal type arguments.
   expr -> do
-    -- Gather a literal and it's arguments if possible.
-    (lit, args) <- case collectArgs expr of
-      (Lit lit, args) -> pure (lit, args)
-      _ -> throwE ()
+    -- Gather the spine and its arguments.
+    let (spine, args) = collectArgs expr
 
-    -- Find the number of universal arguments required for the literal.
-    let univ = case lit of
+    -- Gathers the number of universal arguments of a literal.
+    let nUnivLit = \case
           DataCon _ tc -> tyConArity tc
+          -- TODO: Use or pattern once we bump the GHC version.
           Int {} -> 0
           Word {} -> 0
           Integer {} -> 0
 
+    -- Gather the spine as either a literal or coercion and the number of
+    -- universal arguments.
+    (spine', nUniv) <- case spine of
+      Lit lit -> pure (Right lit, nUnivLit lit)
+      Coercion co -> pure (Left co, 0)
+      _ -> throwE ()
+
     -- Drop the universal arguments and return.
-    pure (lit, drop univ args)
+    let args' = drop nUniv args
+    pure (spine', args')
 
 -- | Push a TyConAppCo into the arguments of a DataCon.
 pushCoDataCon
@@ -1056,24 +1068,22 @@ pushCoDataCon dc args co = do
 
   pure (univArgsR, exArgs ++ valArgs')
 
--- TODO: This is horrible. It's better than not having a callstack, but we
--- should really improve the error handling to contain actual error values.
--- Also, we should probably freeze the callstack after this point.
+-- | Throw an error within the 'Eval' monadic context.
 throwE
   :: HasCallStack
   => e !> es
   => e
   -> Eval es a
-throwE = Eval . throw
+throwE = Eval . withFrozenCallStack throw
 
--- TODO: The callstack should probably be frozen before calling the throw.
+-- | Throw the given error on 'Nothing' within the 'Eval' monadic context.
 failWithE
   :: HasCallStack
   => e !> es
   => e
   -> Maybe a
   -> Eval es a
-failWithE = liftR .: failWith
+failWithE = liftR .: withFrozenCallStack failWith
 
 -- | Lift a result into the evaluation context.
 liftR :: Result es a -> Eval es a

@@ -27,7 +27,7 @@ import GHC.TypeNats (KnownNat, natVal)
 
 import Pantomime.Expr
 import Pantomime.Subst
-import Pantomime.Util (foldM')
+import Pantomime.Util (foldlBy)
 import Pantomime.Grisette.SizedBV (sizedBVResize)
 import Pantomime.Primitive.Reify
 import Pantomime.Grisette.BitVector (IntN)
@@ -48,8 +48,8 @@ import Grisette
   , genSymSimple
   )
 
-import Control.Monad (join, foldM, unless)
 import Control.Arrow (Arrow (..))
+import Control.Monad (foldM, unless)
 
 import Data.Bits (Bits (..), (.^.))
 import Data.Typeable (Proxy (..), type (:~:) (..), eqT)
@@ -65,48 +65,42 @@ symbolise = go
     -- TODO: I think we should add notes where we add helper functions like this
     -- to signify it is to ensure the callstack doesn't grow.
     go subst = \case
-      -- TODO: Maybe just pattern match on Var once and use multiple guards.
-      GHC.Var var | Just expr <- lookupIdSubst subst var -> expr
+      GHC.Var var
+        | Just expr <- lookupIdSubst subst var -> expr
 
-      -- TODO: As unfoldings are closed, should we be using the subst0 that
-      -- was given at the initial call of this function? It would ensure the
-      -- substitution grows a lot less in size. I'm not sure if this actually
-      -- matters though.
-      GHC.Var var | GHC.CoreUnfolding { uf_tmpl } <- GHC.idUnfolding var -> do
-        go subst uf_tmpl
+        | Just expr <- GHC.maybeUnfoldingTemplate $ GHC.idUnfolding var -> do
+          -- TODO: As unfoldings are closed, should we be using the subst0 that
+          -- was given at the initial call of this function? It would ensure
+          -- the substitution grows a lot less in size. I'm not sure if this
+          -- actually matters though.
+          go subst expr
 
-      GHC.Var var | GHC.DFunUnfolding { .. } <- GHC.idUnfolding var -> do
-        let dataCon = GHC.Var $ GHC.dataConWorkId df_con
-        let inner = GHC.mkApps dataCon df_args
-        let quantified = GHC.mkLams df_bndrs inner
-        go subst quantified
+        | Just op <- GHC.isPrimOpId_maybe var -> do
+          -- FIXME: Give proper platform size.
+          symbolisePrimOp @64 op
 
-      -- FIXME: Give proper platform size.
-      GHC.Var var | Just op <- GHC.isPrimOpId_maybe var -> do
-        symbolisePrimOp @64 op
+        | Just dc <- GHC.isDataConId_maybe var -> do
+          -- FIXME: This should get the proper platform size.
+          let dc' = mkDataCon @64 dc
+          pure $ mkLit dc'
 
-      GHC.Var var | Just dc <- GHC.isDataConId_maybe var -> do
-        -- FIXME: This should get the proper platform size.
-        let dc' = mkDataCon @64 dc
-        pure $ mkLit dc'
+        -- TODO: This case is to capture erased evidence variable. As far I as
+        -- understand, these are constraints that could be completely eliminated.
+        -- I don't understand how we are supposed to differentate from normal
+        -- unit-typed variables. We should look into this...
+        | eqType GHC.unitTy $ GHC.varType var -> do
+          -- FIXME: This should get the proper platform size.
+          let dc = mkDataCon @64 GHC.unitDataCon
+          pure $ mkLit dc
 
-      -- TODO: This case is to capture erased evidence variable. As far I as
-      -- understand, these are constraints that could be completely eliminated.
-      -- I don't understand how we are supposed to differentate from normal
-      -- unit-typed variables. We should look into this...
-      GHC.Var var | eqType GHC.unitTy $ GHC.varType var -> do
-        -- FIXME: This should get the proper platform size.
-        let dc = mkDataCon @64 GHC.unitDataCon
-        pure $ mkLit dc
-
-      -- TODO: Give this a proper error.
-      GHC.Var var -> do
-        dbgE
-          [ GHC.ppr $ GHC.varType var
-          , GHC.ppr var
-          , GHC.ppr $ GHC.idDetails var
-          ]
-        throwE ()
+        -- TODO: Give this a proper error.
+        | otherwise -> do
+          dbgE
+            [ GHC.ppr $ GHC.varType var
+            , GHC.ppr var
+            , GHC.ppr $ GHC.idDetails var
+            ]
+          throwE ()
 
       GHC.Lit lit -> liftR $ mkLit <$> symboliseLit lit
 
@@ -126,18 +120,37 @@ symbolise = go
         go subst' body
 
       GHC.Case scrut bndr _ty alts -> do
+        -- Gather the spine and arguments of the scrutinee.
         scrut' <- go subst scrut
-        subst' <- liftR $ extendSubst subst bndr (pure scrut')
-
         (spine, args) <- collectScrut scrut'
 
-        join $ foldM' mkUB alts \acc (GHC.Alt con bndrs rhs) -> do
-          -- Check equality between alt pattern and the spine.
-          eq <- liftR $ case con of
-            -- FIXME: Create proper data con size.
-            GHC.DataAlt dc -> eqLit spine (mkDataCon @64 dc)
-            GHC.LitAlt lit -> symboliseLit lit >>= eqLit spine
-            GHC.DEFAULT -> pure true
+        -- Altough perhaps overly cautious, we check whether the types line up.
+        -- This is one of the places where values are forced, and thus one of
+        -- the few places where we can perform a sanity check without messing
+        -- with the evaluation semantic.
+        let expectedTy = substTy subst $ GHC.varType bndr
+        scrutTy <- liftR $ exprType scrut'
+        unless (eqType scrutTy expectedTy) do
+          throwE ()
+
+        -- Extend the substitution with the case binder.
+        subst' <- liftR $ extendSubst subst bndr (pure scrut')
+
+        -- Create if-statement for every alternative.
+        foldlBy mkUB alts \acc (GHC.Alt con bndrs rhs) -> do
+          -- Gather the equality constraint for this branch.
+          eq <- case spine of
+            -- A coercion spine is only allowed to match default.
+            Left _co
+              | GHC.DEFAULT <- con -> pure true
+              | otherwise -> throwE ()
+
+            -- A literal spine should match the pattern.
+            Right spine' -> liftR $ case con of
+              -- FIXME: Create proper data con size.
+              GHC.DataAlt dc -> eqLit spine' $ mkDataCon @64 dc
+              GHC.LitAlt lit -> symboliseLit lit >>= eqLit spine'
+              GHC.DEFAULT -> pure true
 
           -- TODO: Perhaps it's a good idea to check that the number of
           -- arguments match the binders (unless it is a DEFAULT, in which case
@@ -149,9 +162,9 @@ symbolise = go
                 subst'' <- liftR $ extendSubstMany subst' (zip bndrs args)
                 go subst'' rhs
 
-          -- We do not want to merge errors of values that are unreachable. As
-          -- such, we first branch before joining the monad.
-          pure $ mrgIf eq branch acc
+          -- We want to lazily evaluate branches. As such, we keep them unforced
+          -- inside of the monad.
+          mrgIf eq branch acc
 
       GHC.Cast body co -> do
         body' <- go subst body

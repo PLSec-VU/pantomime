@@ -1,12 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Pantomime.Fresh
-  ( freshExpr
+  ( FreshInstEnv (..)
+  , freshExpr
   , freshArgs
   ) where
 
 import GHC.Core.Reduction (Reduction(..))
-import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
 import GHC.Builtin.Types.Prim
   ( intPrimTy
   , int8PrimTy
@@ -28,6 +29,7 @@ import GHC.Types.Unique
   ( Uniquable(..)
   , getKey
   )
+import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
 import GHC.Utils.Outputable
   ( Outputable (..)
   , showSDocUnsafe
@@ -35,11 +37,13 @@ import GHC.Utils.Outputable
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
   ( Var
+  , TyCon
   , Name
   , HasOccName (..)
   , DataCon
   , HasCallStack
   , InScopeSet
+  , Role (..)
   , dataConTagZ
   , mkSymCo
   , isDataTyCon
@@ -53,6 +57,10 @@ import GHC.Plugins
   , mkTyConTy
   , isNumLitTy
   , tyVarKind
+  , mkUnivCo
+  , mkAppCos
+  , mkReflCo
+  , coercionLKind
   )
 
 import GHC.TypeLits (someNatVal)
@@ -73,13 +81,18 @@ import Grisette
 import Data.Functor ((<&>))
 import Data.String (IsString(..))
 
-import Control.Monad (join)
-
 import Pantomime.Grisette.BitVector (IntN)
 import Pantomime.Expr
 import Pantomime.Primitive.GHC qualified as Primitive
-import Pantomime.Util (foldM', freshIds, freshTyVars)
+import Pantomime.Util (freshIds, freshTyVars, foldlBy)
 import Pantomime.Result (type (!>))
+
+data FreshInstEnv where
+  FreshInstEnv ::
+    { fieFam :: FamInstEnvs
+    , fieUser :: TyConEnv TyCon
+    , fiePrim :: Primitive.Types
+    } -> FreshInstEnv
 
 data Variable es where
   Variable ::
@@ -141,11 +154,10 @@ symbolicVar var dst = case varArgs var of
 freshExpr
   :: HasCallStack
   => () !> es
-  => FamInstEnvs
-  -> Primitive.Types
+  => FreshInstEnv
   -> Var
   -> EvalExpr es
-freshExpr famInst primTys root = go Variable
+freshExpr FreshInstEnv { .. } root = go Variable
   { varName = GHC.varName root
   , varAccessor = []
   , varType = GHC.varType root
@@ -180,14 +192,14 @@ freshExpr famInst primTys root = go Variable
         -- Pantomime Primitives:
         ------------------------
         -- Integer:
-        | ty `eqType` mkTyConTy (Primitive.tcInteger primTys) -> do
+        | ty `eqType` mkTyConTy (Primitive.tcInteger fiePrim) -> do
           let value = mkInteger symbolic ty
           pure $ mkLit value
 
         -- IntN:
         | Just (tc, [arg]) <- splitTyConApp_maybe ty
-        , tc == Primitive.tcIntN primTys
-        , Just nat <- isNumLitTy $ topNormaliseType famInst arg 
+        , tc == Primitive.tcIntN fiePrim
+        , Just nat <- isNumLitTy $ topNormaliseType fieFam arg
         , Just (SomeNat @n _) <- someNatVal nat -> do
           -- FIXME: Should we place a Cast for the type families on the inner
           -- value. I think yes? We'll have to test it, but my guess is that any
@@ -198,12 +210,27 @@ freshExpr famInst primTys root = go Variable
 
         -- TODO: Add remaining primitives
 
+        -- User Defined Coercion:
+        -------------------------
+        | Just (tc, args) <- splitTyConApp_maybe ty
+        , Just tc' <- lookupTyConEnv fieUser tc -> do
+          -- Construct the coercion
+          let prov = PluginProv "pantomime user-defined"
+          let tyL = mkTyConTy tc
+          let tyR = mkTyConTy tc'
+          let univ = mkSymCo $ mkUnivCo prov Representational tyL tyR
+          let co = mkAppCos univ $ mkReflCo Nominal <$> args
+
+          -- Construct the inner term and cast it using the coercion.
+          let var' = var { varType = coercionLKind co }
+          inner <- go var'
+          mkCast inner co
+
         -- Type Family Reduction:
         -------------------------
-        | Just reduction <- topNormaliseType_maybe famInst ty -> do
+        | Just reduction <- topNormaliseType_maybe fieFam ty -> do
           let co = mkSymCo $ reductionCoercion reduction
-          let ty' = reductionReducedType reduction
-          let var' = var { varType = ty' }
+          let var' = var { varType = reductionReducedType reduction }
           inner <- go var'
           mkCast inner co
 
@@ -242,7 +269,7 @@ freshExpr famInst primTys root = go Variable
           -- tag
           --
           -- Note I skipped writing the Unreachable case in both examples.
-          join $ foldM' mkUnreachable dataCons \acc dc -> do
+          foldlBy mkUnreachable dataCons \acc dc -> do
             let scrut = tag .== fromIntegral (dataConTagZ dc)
 
             let fieldTys = scaledThing <$> dataConInstArgTys dc tyArgs
@@ -257,7 +284,7 @@ freshExpr famInst primTys root = go Variable
             let tyArgs' = pure . mkType <$> tyArgs
             let expr = mkApps dc' $ tyArgs' ++ valArgs
 
-            pure $ mrgIte scrut expr acc
+            mrgIte scrut expr acc
 
         -- TODO: Throw proper error!
         | otherwise -> do
@@ -267,12 +294,11 @@ freshExpr famInst primTys root = go Variable
 freshArgs
   :: HasCallStack
   => () !> es
-  => FamInstEnvs
-  -> Primitive.Types
+  => FreshInstEnv
   -> Type
   -> InScopeSet
   -> ([(Var, Arg es)], InScopeSet)
-freshArgs famInst primTys ty scope0 = do
+freshArgs freshEnv ty scope0 = do
   -- Gather the argument types.
   let (tyVars, funTy) = splitForAllTyVars ty
   let (argTys, _resTy) = splitFunTys funTy
@@ -294,7 +320,7 @@ freshArgs famInst primTys ty scope0 = do
   let args = tyArgs <> valArgs
 
   -- Create symbolic instance of the arguments.
-  let symbolic = freshExpr famInst primTys <$> args
+  let symbolic = freshExpr freshEnv <$> args
 
   -- Zip the binders together with their symbolic instance.
   let binders = zip args symbolic
