@@ -1,6 +1,5 @@
 module Pantomime.Subst
   ( Subst
-  , dbgIdEnv
   , mkEmptySubst
   , extendSubst
   , extendSubstMany
@@ -16,9 +15,7 @@ import Pantomime.Expr
 import Pantomime.Result
 
 import GHC.Core.Type qualified as GHC
-import GHC.Plugins qualified as GHC
 import GHC.Stack (HasCallStack)
-import GHC.Utils.Outputable (Outputable (..), SDoc)
 import GHC.Plugins
   ( Var
   , Id
@@ -32,7 +29,8 @@ import GHC.Plugins
   , isTyVar
   , isCoVar
   , extendVarEnv
-  , lookupVarEnv, isId
+  , lookupVarEnv
+  , isId
   )
 
 import Control.Monad (foldM)
@@ -48,12 +46,6 @@ data Subst es where
     , tvSubst :: TvSubstEnv
     , cvSubst :: CvSubstEnv
     } -> Subst es
-
--- TODO: Remove this one!
-dbgIdEnv
-  :: Subst es
-  -> SDoc
-dbgIdEnv = ppr . GHC.varEnvDomain . idSubst
 
 -- | An empty substitution map.
 mkEmptySubst :: Subst es

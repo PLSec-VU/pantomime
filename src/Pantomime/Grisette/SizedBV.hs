@@ -9,6 +9,8 @@ module Pantomime.Grisette.SizedBV
   ( SizedBV (..)
   , sizedBVExtract
   , sizedBVResize
+  , sizedBVZresize
+  , sizedBVSresize
   ) where
 
 import GHC.TypeNats (type (<=), type (+), type (-), KnownNat)
@@ -95,6 +97,25 @@ sizedBVExtract = runIdentity $ do
 
   pure $ sizedBVSelect @bv @start @width @n
 
+-- | Helper functions to implement the flavours of resizing.
+sizedBVResizeWith
+  :: forall bv l r
+   . SizedBV bv
+  => KnownNat l
+  => KnownNat r
+  => (l <= r => bv l -> bv r)
+  -> bv l
+  -> bv r
+sizedBVResizeWith f = case cmpNat' @l @r of
+  LTI -> f
+  EQI -> id
+  -- SAFETY: The unsafe coerce is just to have 'r <= l' as Haskell cannot figure
+  -- this out given the 'l >= r' that is already in context. Theoretically we
+  -- should be able to do this without unsafeCoerce, but I'm not sure how.
+  -- I'm not keen on importing a type level nat plugin for just one function.
+  GTI -> case unsafeDict @(r <= l) of
+    Dict -> sizedBVSelect @bv @0
+
 -- | Resize the given bitvector.
 --
 -- Whether the bitvector is sign extended or not depends on its implementation
@@ -106,12 +127,28 @@ sizedBVResize
   => KnownNat r
   => bv l
   -> bv r
-sizedBVResize = case cmpNat' @l @r of
-  LTI -> sizedBVExt
-  EQI -> id
-  -- SAFETY: The unsafe coerce is just to have 'r <= l' as Haskell cannot figure
-  -- this out given the 'l >= r' that is already in context. Theoretically we
-  -- should be able to do this without unsafeCoerce, but I'm not sure how.
-  -- I'm not keen on importing a type level nat plugin for just one function.
-  GTI -> case unsafeDict @(r <= l) of
-    Dict -> sizedBVSelect @bv @0
+sizedBVResize = sizedBVResizeWith sizedBVExt
+
+-- | Resize the given bitvector.
+--
+-- Will zero extend the bitvector if it is extended.
+sizedBVZresize
+  :: forall bv l r
+   . SizedBV bv
+  => KnownNat l
+  => KnownNat r
+  => bv l
+  -> bv r
+sizedBVZresize = sizedBVResizeWith sizedBVZext
+
+-- | Resize the given bitvector.
+--
+-- Will sign extend the bitvector if it is extended.
+sizedBVSresize
+  :: forall bv l r
+   . SizedBV bv
+  => KnownNat l
+  => KnownNat r
+  => bv l
+  -> bv r
+sizedBVSresize = sizedBVResizeWith sizedBVSext

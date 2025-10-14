@@ -1,3 +1,5 @@
+{-# LANGUAGE ImplicitParams #-}
+
 module Pantomime.Util
   ( foldM'
   , foldM_'
@@ -5,6 +7,7 @@ module Pantomime.Util
   , foldlBy
 
   , whyFail
+  , withCallStack
 
   , accumL
   , (%~~)
@@ -26,7 +29,7 @@ import Control.Monad.State (state, runState)
 import Lens.Micro (Lens)
 
 import Effectful (Eff, (:>))
-import Effectful.Error.Static (Error, throwError_)
+import Effectful.Error.Static (Error, CallStack, throwError_)
 
 -- | The usual 'foldM', but with its arguments switched.
 --
@@ -71,6 +74,10 @@ foldlBy acc xs f = foldl' f acc xs
 -- | Annotate why there was no result.
 whyFail :: HasCallStack => Error e :> es => e -> Maybe a -> Eff es a
 whyFail err = maybe (throwError_ err) pure
+
+-- | Fill a 'HasCallStack' constraint with a local call stack.
+withCallStack :: CallStack -> (HasCallStack => a) -> a
+withCallStack cs f = let ?callStack = cs in f
 
 -- | Accumulate a stateful function over a traversable input.
 accumL :: Traversable f => (a -> s -> (b, s)) -> f a -> s -> (f b, s)

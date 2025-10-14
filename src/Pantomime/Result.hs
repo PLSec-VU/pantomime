@@ -9,6 +9,7 @@ module Pantomime.Result
   , raise
   , embed
   , absurd
+  , location
 
   , Result
   , ok
@@ -21,7 +22,7 @@ import Data.Kind (Type)
 
 import GHC.TypeLits (TypeError, ErrorMessage (..))
 import GHC.Types (Any)
-import GHC.Stack (CallStack, HasCallStack, callStack)
+import GHC.Stack (CallStack, HasCallStack, callStack, withFrozenCallStack)
 
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -75,6 +76,10 @@ embed = Error (reifyIndex @e @es) callStack . unsafeCoerce
 absurd :: Error '[] -> a
 absurd !_ = error "unreachable"
 
+-- | Gather the location where the error happened.
+location :: Error es -> CallStack
+location (Error _ cs _) = cs
+
 -- | Synonym for using 'Error' within a monadic context.
 type Result es a = Either (Error es) a
 
@@ -84,13 +89,12 @@ ok :: Result '[] a -> a
 ok = either absurd id
 
 -- | Throw an error within the context of the result.
--- TODO: The callstack should just start with 'throw'.
 throw
   :: HasCallStack
   => e !> es
   => e
   -> Result es a
-throw = Left . embed
+throw = Left . withFrozenCallStack embed
 
 -- | Handle the top error in the result.
 handle
@@ -103,11 +107,10 @@ handle = \case
 
 -- | Convert a 'Maybe' value into a 'Result', with the given error for the
 -- 'Nothing' case.
--- TODO: The callstack should just start with 'failWith'.
 failWith
   :: HasCallStack
   => e !> es
   => e
   -> Maybe a
   -> Result es a
-failWith err = maybe (throw err) pure
+failWith err = maybe (withFrozenCallStack throw err) pure

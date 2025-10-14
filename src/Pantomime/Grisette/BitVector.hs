@@ -38,6 +38,7 @@ import Grisette
   , SymWordN
   , SymIntN
   , SymInteger
+  , SymBool
   , BitCast (..)
   , Solvable (..)
   , true
@@ -378,6 +379,12 @@ instance (DecideEvalMode mode, KnownNat n) => BitCast (WordN mode n) (IntN mode 
 instance BitCast (IntN mode n) (IntN mode n) where
   bitCast = id
 
+instance BitCast (IntN S 1) SymBool where
+  bitCast (IntP value) = bitCast value
+
+instance BitCast SymBool (IntN S 1) where
+  bitCast = IntP . bitCast
+
 instance KnownNat n => IsString (IntN S n) where
   fromString s = withSizeI @n $ fromString s
 
@@ -709,6 +716,12 @@ instance (DecideEvalMode mode, KnownNat n) => BitCast (IntN mode n) (WordN mode 
 
 instance BitCast (WordN mode n) (WordN mode n) where
   bitCast = id
+
+instance BitCast (WordN S 1) SymBool where
+  bitCast (WordP value) = bitCast value
+
+instance BitCast SymBool (WordN S 1) where
+  bitCast = WordP . bitCast
 
 instance KnownNat n => IsString (WordN S n) where
   fromString s = withSizeW @n $ fromString s

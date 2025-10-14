@@ -7,6 +7,7 @@ module Pantomime.Unification
   , unifyApps
   , unifyExprs
   , resolveInstances
+  , resolveCustomInstances
   ) where
 
 import Prelude hiding (break)
@@ -415,18 +416,26 @@ resolveInstances expr = do
   -- Get a mapping from constraints to instances.
   let theta = splitExprTy expr ^. _2
   results <- forM theta do
-    runErrorNoCallStack @(LookupError Type) . lookupClassInst
+    fmap rightToMaybe . runError @(LookupError Type) . lookupClassInst
   let instances = zip theta results
 
   -- Convert this mapping into a trie map.
   let dicts = foldlBy emptyTM instances \acc (ty, inst) -> do
           -- Alter the dictionary map if we found an instance.
-          alterTM ty (rightToMaybe inst <|>) acc
+          alterTM ty (inst <|>) acc
 
+  -- Resolve the instances with this mapping.
+  pure $ resolveCustomInstances dicts expr
+
+resolveCustomInstances
+  :: TypeMap CoreExpr
+  -> CoreExpr
+  -> CoreExpr
+resolveCustomInstances dicts expr = do
   -- Set this dictionary for a unification.
   let unif = emptyUnif & dictionaries .~ dicts
 
   -- Apply the unification using the resolved instances and close it.
-  evalContextLocal unif $ do
+  runPureEff $ evalContextLocal unif do
     expr' <- applyUnification expr
     closeExpr expr'

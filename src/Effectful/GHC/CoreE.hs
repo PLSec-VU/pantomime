@@ -19,6 +19,7 @@ module Effectful.GHC.CoreE
   , runDisplay
   , runThNameToGhcName
   , runHasAnnotations
+  , runHasUnique
   ) where
 
 import Effectful
@@ -43,6 +44,7 @@ import Effectful.GHC.External
 import Effectful.GHC.TyThing
 import Effectful.GHC.DynFlags
 import Effectful.GHC.Display
+import Effectful.GHC.Unique
 import Effectful.GHC.TH (THNameToGHCName(..))
 import Effectful.GHC.Annotations (HasAnnotations (..))
 
@@ -92,7 +94,7 @@ type instance DispatchOf CoreE = Static WithSideEffects
 --
 -- Note that 'CoreWriter' is not a true 'Monoid'. 'mempty' is dependent on the
 -- 'CoreReader' environment. As such, we implement the effect manually instead
--- using the provided 'Reader' and 'Writer'.
+-- of using the provided 'Reader' and 'Writer'.
 data instance StaticRep CoreE = CoreE CoreReader !CoreWriter
 
 -- | Lift a monadic operation of type 'CoreM' into the effect system.
@@ -198,7 +200,8 @@ runAllCoreE
   :: IOE :> es
   => CoreE :> es
   => Eff
-    ( THNameToGHCName
+    ( HasUnique
+    : THNameToGHCName
     : Display
     : HasThings
     : HasExternalPackageState
@@ -212,6 +215,7 @@ runAllCoreE
   . runHasThings
   . runDisplay
   . runThNameToGhcName
+  . runHasUnique
 
 -- | Run the 'ExtPackages' effect through the 'CoreE' effect.
 runHasExternalPackageState
@@ -263,6 +267,7 @@ runThNameToGhcName
 runThNameToGhcName = interpret_ \(THNameToGHCName name) -> do
   liftCore $ thNameToGhcName name
 
+-- | Run the 'HasAnnotations' effect through the 'CoreE' effect.
 runHasAnnotations
   :: IOE :> es
   => CoreE :> es
@@ -271,3 +276,12 @@ runHasAnnotations
   -> Eff es a
 runHasAnnotations guts = interpret_ \(GetAnnotations deserialise) -> do
   liftCore $ getAnnotations deserialise guts
+
+-- | Run the 'HasUnique' effect through the 'CoreE' effect.
+runHasUnique
+  :: IOE :> es
+  => CoreE :> es
+  => Eff (HasUnique : es) a
+  -> Eff es a
+runHasUnique = interpret_ \GetUniqueSupply -> do
+  liftCore getUniqueSupplyM
