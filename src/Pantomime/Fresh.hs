@@ -6,7 +6,13 @@ module Pantomime.Fresh
   , freshArgs
   ) where
 
-import GHC.Core.Reduction (Reduction(..))
+import GHC.Core.Reduction
+  ( Reduction(..)
+  , HetReduction (..)
+  , mkHetReduction
+  , mkReduction
+  , homogeniseHetRedn
+  )
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
 import GHC.Builtin.Types.Prim
   ( intPrimTy
@@ -22,8 +28,8 @@ import GHC.Builtin.Types.Prim
   )
 import GHC.Core.FamInstEnv
   ( FamInstEnvs
-  , topNormaliseType_maybe
   , topNormaliseType
+  , topReduceTyFamApp_maybe
   )
 import GHC.Types.Unique
   ( Uniquable(..)
@@ -44,6 +50,8 @@ import GHC.Plugins
   , HasCallStack
   , InScopeSet
   , Role (..)
+  , MCoercion (..)
+  , NormaliseStepResult (..)
   , dataConTagZ
   , mkSymCo
   , isDataTyCon
@@ -60,7 +68,12 @@ import GHC.Plugins
   , mkUnivCo
   , mkAppCos
   , mkReflCo
-  , coercionLKind
+  , coreFullView
+  , topNormaliseTypeX
+  , composeSteppers
+  , mkTransCo
+  , mkTransMCo
+  , unwrapNewTypeStepper, coercionRKind
   )
 
 import GHC.TypeLits (someNatVal)
@@ -86,6 +99,7 @@ import Pantomime.Expr
 import Pantomime.Primitive.GHC qualified as Primitive
 import Pantomime.Util (freshIds, freshTyVars, foldlBy)
 import Pantomime.Result (type (!>))
+import GHC.Core.TyCon.RecWalk (checkRecTc)
 
 data FreshInstEnv where
   FreshInstEnv ::
@@ -93,6 +107,65 @@ data FreshInstEnv where
     , fieUser :: TyConEnv TyCon
     , fiePrim :: Primitive.Types
     } -> FreshInstEnv
+
+-- | Adaptation of GHC's 'topNormaliseType_maybe'.
+--
+-- Whilst most of the function body remains the same, the key difference is on
+-- the reduction of newtypes. Specifically, we have a number of types that have
+-- either a primitive or user-defined interpretation within the symbolic solver.
+-- Normalising these newtypes normall would lose this mapping, thus producing
+-- incoherent results with respect to the rest of the solver.
+--
+-- This modification will special case the primitive and user-mapped TyCon in
+-- the reduction, to either skip or use the user-coercion respectively.
+topNormaliseInterpType_maybe :: FreshInstEnv -> Type -> Maybe Reduction
+topNormaliseInterpType_maybe FreshInstEnv { .. } ty = do
+  -- TODO: If we want to make the primitive newtypes, we should add a stepper
+  -- for them here!
+
+  -- User interpretation stepper. This will create plugin coercions when it
+  -- receives a TyCon that has a user-defined interpretation. Note that this
+  -- should be ordered before the normal newtype stepper.
+  let userInterpStepper recNts tc tys = either id id do
+        let returnWith r = maybe (Left r) pure
+
+        -- Check whether there exists a user-mapping.
+        tc' <- returnWith NS_Done $ lookupTyConEnv fieUser tc
+
+        -- Construct the coercion.
+        let prov = PluginProv "pantomime user-defined"
+        let tyL = mkTyConTy tc
+        let tyR = mkTyConTy tc'
+        let univ = mkUnivCo prov Representational tyL tyR
+        let co = mkAppCos univ $ mkReflCo Nominal <$> tys
+
+        -- Check the recursion counter before returning the step.
+        let ty' = coercionRKind co
+        recNts' <- returnWith NS_Abort $ checkRecTc recNts tc
+        pure $ NS_Step recNts' ty' (co, MRefl)
+
+  -- The newtype stepper, no changes w.r.t. original GHC function.
+  let unwrapNewTypeStepper' recNts tc tys = do
+        (, MRefl) <$> unwrapNewTypeStepper recNts tc tys
+
+  -- The type-family stepper, no changes w.r.t. original GHC function.
+  let tyFamStepper recNts tc tys = do
+        let step (HetReduction (Reduction co rhs) resCo) = do
+              NS_Step recNts rhs (co, resCo)
+
+        maybe NS_Done step $ topReduceTyFamApp_maybe fieFam tc tys
+
+  -- Normalise the type using a composition of the above defined steppers.
+  let stepper = foldl' composeSteppers userInterpStepper
+        [ unwrapNewTypeStepper'
+        , tyFamStepper
+        ]
+  let combine (c1, mc1) (c2, mc2) = (c1 `mkTransCo` c2, mc1 `mkTransMCo` mc2)
+  ((co, mkindCo), nty) <- topNormaliseTypeX stepper combine ty
+
+  -- Construct the final reduction and homogenise it.
+  let hredn = mkHetReduction (mkReduction co nty) mkindCo
+  pure $ homogeniseHetRedn Representational hredn
 
 data Variable es where
   Variable ::
@@ -157,7 +230,7 @@ freshExpr
   => FreshInstEnv
   -> Var
   -> EvalExpr es
-freshExpr FreshInstEnv { .. } root = go Variable
+freshExpr env@FreshInstEnv { .. } root = go Variable
   { varName = GHC.varName root
   , varAccessor = []
   , varType = GHC.varType root
@@ -166,11 +239,11 @@ freshExpr FreshInstEnv { .. } root = go Variable
   where
     go var = do
       -- TODO: I don't like the nesting this gives. Maybe we should move these
-      -- inwards somehow. The ty can actually be replaced by pattern match on
-      -- the var btw.
-      let ty = varType var
+      -- inwards somehow.
+      let ty = coreFullView $ varType var
       let symbolic :: Solvable (ConType s) s => s
           symbolic = symbolicVar var Field
+
       if
         -- Haskell Primitives:
         ----------------------
@@ -199,6 +272,7 @@ freshExpr FreshInstEnv { .. } root = go Variable
         -- IntN:
         | Just (tc, [arg]) <- splitTyConApp_maybe ty
         , tc == Primitive.tcIntN fiePrim
+        -- TODO: Is this topNormaliseType sensible?
         , Just nat <- isNumLitTy $ topNormaliseType fieFam arg
         , Just (SomeNat @n _) <- someNatVal nat -> do
           -- FIXME: Should we place a Cast for the type families on the inner
@@ -210,25 +284,9 @@ freshExpr FreshInstEnv { .. } root = go Variable
 
         -- TODO: Add remaining primitives
 
-        -- User Defined Coercion:
-        -------------------------
-        | Just (tc, args) <- splitTyConApp_maybe ty
-        , Just tc' <- lookupTyConEnv fieUser tc -> do
-          -- Construct the coercion
-          let prov = PluginProv "pantomime user-defined"
-          let tyL = mkTyConTy tc
-          let tyR = mkTyConTy tc'
-          let univ = mkSymCo $ mkUnivCo prov Representational tyL tyR
-          let co = mkAppCos univ $ mkReflCo Nominal <$> args
-
-          -- Construct the inner term and cast it using the coercion.
-          let var' = var { varType = coercionLKind co }
-          inner <- go var'
-          mkCast inner co
-
-        -- Type Family Reduction:
-        -------------------------
-        | Just reduction <- topNormaliseType_maybe fieFam ty -> do
+        -- Type Family, Newtype and User-Interpretations:
+        -------------------------------------------------
+        | Just reduction <- topNormaliseInterpType_maybe env ty -> do
           let co = mkSymCo $ reductionCoercion reduction
           let var' = var { varType = reductionReducedType reduction }
           inner <- go var'

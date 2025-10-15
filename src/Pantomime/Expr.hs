@@ -100,7 +100,6 @@ import GHC.Plugins
   , mkCoercionTy
   , tyCoVarsOfTypes
   , mkInScopeSet
-  , extendTCvSubst
   , splitTyConApp_maybe
   , dataConExTyCoVars
   , splitAtList
@@ -111,7 +110,6 @@ import GHC.Plugins
   , tyConRolesRepresentational
   , liftCoSubstWithEx
   , dataConRepArgTys
-  , mkEmptySubst
   , boolTyCon
   )
 
@@ -192,6 +190,8 @@ import Control.Monad
 
 import Debug.Trace qualified as Debug
 
+-- TODO: This should be removed at some point? Or perhaps it's usage should
+-- give an error? Idk, it is a really nice utility to have when debugging stuff.
 dbgE :: GHC.Outputable o => o -> Eval es ()
 dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
 
@@ -260,14 +260,21 @@ instance SimpleMergeable1 (Eval es) where
 -- How do we resolve this conflict?
 -- - We disregard branches that are never used, i.e. when the branch condition
 --   is a concrete value. This ensure we retain the lazy semantic.
+--
 -- - When we do require merging, we will first ensure both branches are void of
 --   any errors before merging the inner value.
+--
 -- - In the case there is at least one error, it is an arbitrary decision which
 --   error to propagate. We choose to propagate the error of the then-branch
---   over that of the else-branch, but either way is fine.
+--   over that of the else-branch, but either way is fine. Alternatively, we
+--   could choose to collect the errors from all branches instead of selecting
+--   an arbitrary one. For now, selecting one seems reasonable.
 instance SymBranching (Eval es) where
   mrgIfWithStrategy @a strategy scrut true false = case scrut of
     Con scrut'
+      -- NOTE: We want to specifically use the TryMerge instance of Eval here
+      -- (and not of EvalCoerce) as this one properly passes the strategy to the
+      -- inner Union.
       | scrut' -> tryMergeWithStrategy strategy true
       | otherwise -> tryMergeWithStrategy strategy false
     _ -> coerce go true false
@@ -656,7 +663,7 @@ mkType = Type
 mkCoercion
   :: Coercion
   -> Expr es
-mkCoercion co = Coercion co
+mkCoercion = Coercion
 
 mkLam
   :: Type
@@ -771,9 +778,7 @@ mkCast expr co = do
 
     _ -> pure $ Cast (pure expr) co
 
-mkVariant
-  :: Variant es
-  -> Eval es a
+mkVariant :: Variant es -> Eval es a
 mkVariant = Eval . pure . ExceptT . pure . Left
 
 mkUnreachable :: Eval es a
@@ -811,6 +816,7 @@ forceTyCo (Eval arg) = do
     -- The expression was not in the expected shape.
     _ -> throw ()
 
+-- | Force an expression into a type using 'forceTyCo'.
 forceTy
   :: HasCallStack
   => () !> es
@@ -818,6 +824,7 @@ forceTy
   -> Result es Type
 forceTy = forceTyCo >=> either pure (const $ throw ())
 
+-- | Force an expression into a coercion using 'forceTyCo'.
 forceCo
   :: HasCallStack
   => () !> es
@@ -882,7 +889,7 @@ exprType = \case
           Forced (Left ty) -> pure ty
           _ -> throw ()
         let scope = mkInScopeSet $ tyCoVarsOfTypes [aty, rty]
-        let subst = extendTCvSubst (mkEmptySubst scope) var aty
+        let subst = GHC.extendTCvSubst (GHC.mkEmptySubst scope) var aty
         pure $ GHC.substTy subst rty
 
       | Just (_, _, _, rty) <- splitFunTy_maybe fty -> pure rty
@@ -914,15 +921,14 @@ anyDataCon
   => IntN S n
   -> TyCon
   -> Maybe DataCon
-anyDataCon tag tc = do
-  let dcs = tyConDataCons tc
-  concreteDataCon tag tc <|> if
-    -- Enumeration TyCon all have the same type, so we just select the first
-    -- one. Note that it could be impossible to get a concrete DataCon here,
-    -- as enumeration DataCon can be created from an arithmetic expression.
-    | isEnumerationTyCon tc
-    , dc : _ <- dcs -> pure dc
-    | otherwise -> empty
+anyDataCon tag tc = concreteDataCon tag tc <|> if
+  -- Enumeration TyCon all have the same type, so we just select the first
+  -- one. We special case this as the tag of an enumeration may be an
+  -- arbitrary arithmetic expression from which we cannot extract a concrete
+  -- DataCon.
+  | isEnumerationTyCon tc
+  , dc : _ <- tyConDataCons tc -> pure dc
+  | otherwise -> empty
 
 -- | Attempts to concretise a tag to a DataCon.
 concreteDataCon

@@ -18,15 +18,21 @@ module Pantomime.Solve
   ) where
 
 import GHC.Plugins
-  ( CoreExpr
-  , CoreProgram
+  ( CoreProgram
   , Name
+  , TyCon
+  , Id
   , Role (..)
+  , HasDynFlags (..)
+  , Expr (..)
+  , CoreExpr
+  , Unfolding (..)
+  , InlinePragma (..)
+  , InlineSpec (..)
   , exprType
   , splitFunTys
   , showSDocUnsafe
   , targetPlatform
-  , HasDynFlags (..)
   , varType
   , vcat
   , emptyInScopeSet
@@ -34,17 +40,11 @@ import GHC.Plugins
   , mkUnivCo
   , dataConWorkId
   , mkApps
-  , Expr (..)
   , idUnfolding
-  , Unfolding (..)
   , idInlinePragma
-  , InlinePragma (..)
-  , InlineSpec (..)
   , hasCoreUnfolding
   , tyConKind
   , tyConRoles
-  , TyCon
-  , Id
   , coercibleDataCon
   )
 import GHC.Utils.Outputable
@@ -346,6 +346,7 @@ checkValid theory expr = do
   famInst <- getFamInstEnvs
   primTys <- Primitive.getTypes
   let userCo = mkTyConEnv $ tyInterp' theory'
+
   let freshEnv = Pantomime.FreshInstEnv
         { Pantomime.fieFam = famInst
         , Pantomime.fiePrim = primTys
