@@ -26,8 +26,8 @@ import GHC.Builtin.Types.Prim
   )
 import GHC.Core.FamInstEnv
   ( FamInstEnvs
-  , topNormaliseType
   , topReduceTyFamApp_maybe
+  , normaliseType
   )
 import GHC.Types.Unique
   ( Uniquable(..)
@@ -65,8 +65,10 @@ import GHC.Plugins
   , mkAppCos
   , mkReflCo
   , coreFullView
+  , coercionLKind
   , coercionRKind
   , instNewTyCon_maybe
+  , mkTyConAppCo
   )
 
 import GHC.TypeLits (someNatVal)
@@ -210,17 +212,16 @@ freshExpr FreshInstEnv { .. } root = go Variable
           pure $ mkLit value
 
         -- IntN:
-        | Just (tc, [arg]) <- splitTyConApp_maybe ty
+        | Just (tc, [narg]) <- splitTyConApp_maybe ty
         , tc == Primitive.tcIntN fiePrim
-        -- TODO: Is this topNormaliseType sensible? I don't think so...
-        , Just nat <- isNumLitTy $ topNormaliseType fieFam arg
-        , Just (SomeNat @n _) <- someNatVal nat -> do
-          -- FIXME: Should we place a Cast for the type families on the inner
-          -- value. I think yes? We'll have to test it, but my guess is that any
-          -- usage of will first have a cast for the type-level natural (only
-          -- if it is symbolic btw).
-          let value = mkIntN @n symbolic ty
-          pure $ mkLit value
+        , let Reduction nco nty = normaliseType fieFam Nominal narg
+        , Just (SomeNat @n _) <- isNumLitTy nty >>= someNatVal -> do
+          -- Coercion on the entire value for the type-level natural.
+          let co = mkTyConAppCo Representational tc [mkSymCo nco]
+
+          -- Construct the inner value and cast it.
+          let inner = mkLit $ mkIntN @n symbolic (coercionLKind co)
+          mkCast inner co
 
         -- TODO: Add remaining primitives
 
