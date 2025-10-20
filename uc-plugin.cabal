@@ -38,10 +38,12 @@ library
       Effectful.GHC.ModGuts
       Effectful.GHC.TH
       Effectful.GHC.TyThing
+      Effectful.GHC.Unique
       Effectful.Grisette.Fresh
       Effectful.Grisette.Solver
       Pantomime
       Pantomime.Annotation
+      Pantomime.Axiom
       Pantomime.Base
       Pantomime.Clash
       Pantomime.Clash.Bit
@@ -56,15 +58,27 @@ library
       Pantomime.DictMap
       Pantomime.Environment
       Pantomime.Evaluate
+      Pantomime.Expr
+      Pantomime.Fresh
       Pantomime.Grisette.BitVector
+      Pantomime.Grisette.Mergeable
       Pantomime.Grisette.SizedBV
+      Pantomime.Grisette.SomeBV
       Pantomime.Grisette.Union
-      Pantomime.Loopy
       Pantomime.MonadEval
+      Pantomime.Orphan.Effectful
+      Pantomime.Orphan.GHC
+      Pantomime.Orphan.Grisette
       Pantomime.Passes
       Pantomime.Primitive
+      Pantomime.Primitive.GHC
+      Pantomime.Primitive.Operation
+      Pantomime.Primitive.Reify
+      Pantomime.Result
       Pantomime.Runtime
       Pantomime.Solve
+      Pantomime.Subst
+      Pantomime.Symbolise
       Pantomime.Unification
       Pantomime.Util
       Pantomime.Value

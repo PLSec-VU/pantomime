@@ -1,12 +1,10 @@
 module Pantomime.Passes
   ( printAndLintPass
-  , symComparePass
-  , checkSpecPass
+  , checkValidityPass
   ) where
 
 import GHC.Plugins hiding (empty, (<>), thNameToGhcName, getFirstAnnotations)
 import GHC.Core.Lint
-import GHC.Core.Opt.OccurAnal (occurAnalyseExpr)
 import GHC.Driver.Config.Core.Lint (initLintConfig)
 
 import Grisette
@@ -17,15 +15,15 @@ import Grisette
   )
 
 import Data.Data
+import Data.Traversable (for)
 
-import Control.Monad (forM)
 import Control.Error
 
 import Language.Haskell.TH qualified as TH
 
-import Pantomime.Combinator qualified as Combinator
 import Pantomime.Unification
 import Pantomime.Solve
+import Pantomime.Axiom (resolvePluginAxioms)
 import Pantomime.Annotation
 
 import Effectful
@@ -42,20 +40,6 @@ import Effectful.GHC.Display
 import Effectful.GHC.TyThing
 import Effectful.GHC.External
 import Effectful.GHC.Annotations
-
-resolveTH
-  :: HasCallStack
-  => Error (LookupError TH.Name) :> es
-  => Error (LookupError Name) :> es
-  => Context Reader CoreProgram :> es
-  => THNameToGHCName :> es
-  => HasThings :> es
-  => TH.Name
-  -> Eff es Id
-resolveTH th = do
-  ghc <- thNameToGhcName th
-  result <- lookupIdAll ghc
-  pure result
 
 -- | An always non-recursive binder.
 data Bind' a = Bind' a (Expr a)
@@ -75,6 +59,8 @@ type CoreBind' = Bind' CoreBndr
 -- TODO: These passes do not modify the code. Should we make this less general
 -- on the modification side? It seems to me like we should have them return a
 -- unit?
+-- TODO: We now support recursive functions. We should modify this function to
+-- enable running them!
 -- | Run the given pass on all binders that have the given annotation.
 annBindsPass
   :: forall a es
@@ -87,33 +73,12 @@ annBindsPass pass guts = do
   -- TODO: We should probably run every annotation!
   (_, anns) <- getFirstAnnotations @a deserializeWithData
 
-  binds <- forM (mg_binds guts) $ \case
+  binds <- for (mg_binds guts) $ \case
     NonRec x e | Just ann <- lookupUFM anns $ varName x -> do
       nonRec <$> pass ann (Bind' x e)
     b -> pure b
 
   pure guts { mg_binds = binds }
-
--- | Lint an expression and panic on failure.
-lintPanic
-  :: HasDynFlagsE :> es
-  => InScopeSet
-  -> CoreExpr
-  -> Eff es ()
-lintPanic (InScope vars) expr = do
-  dflags <- getDynFlags
-  -- I think the in-scope set could also just come from the CoreProgram?
-  let vars' = nonDetEltsUniqSet vars
-  let cfg = initLintConfig dflags vars'
-  let result = lintExpr cfg expr
-  case result of
-    Nothing -> pure ()
-    -- TODO: This should probably not panic but just throw?
-    Just err -> pprPanic "Panic on linter warnings/errors" $ vcat
-      [ ppr expr
-      , ppr vars
-      , ppr err
-      ]
 
 printAndLintPass
   :: forall a
@@ -124,6 +89,8 @@ printAndLintPass = do
   let pass guts = runSymbolic guts $ annBindsPass (const @_ @a printAndLint) guts
   CoreDoPluginPass name pass
 
+-- TODO: I'm not sure if all these effects are actually used anymore. I should
+-- make work of checking this at some point!
 runSymbolic
   :: HasCallStack
   => ModGuts
@@ -133,6 +100,7 @@ runSymbolic
     , Error OversaturatedError
     , Error UnificationError
     , Error SolverError
+    , Error ()
     , Provider_ Solver ()
     , HasAnnotations
     , THNameToGHCName
@@ -160,7 +128,8 @@ runSymbolic guts
   . runHasThings
   . runThNameToGhcName
   . runHasAnnotations guts
-  . runProvider_ (const $ runSolver z3')
+  . runProvider_ (const $ runSolver solver)
+  . runErrorWith @() propagateErrorShow
   . runErrorWith @SolverError propagateErrorShow
   . runErrorWith @UnificationError propagateError
   . runErrorWith @OversaturatedError propagateError
@@ -168,7 +137,7 @@ runSymbolic guts
   . runErrorWith @(LookupError TH.Name) propagateErrorShow
   where
     -- TODO: We could let the user decide which solver no?
-    z3' = z3
+    solver = z3
       { sbvConfig = (sbvConfig z3)
         { verbose = True
         , timing = PrintTiming
@@ -195,21 +164,15 @@ runSymbolic guts
       -> Eff es a
     propagateErrorShow cs = propagateError cs . text @SDoc . show
 
-symComparePass :: CoreToDo
-symComparePass = do
-  let name = TH.nameBase 'symComparePass
-  let pass guts = runSymbolic guts $ annBindsPass symCompare guts
-  CoreDoPluginPass name pass
-
 -- TODO: Instead of just running a pass per binder, I want to accumulate the
 -- results for all checks. In fact, this isn't even a pass as we do not modify
 -- the CoreExpr. This is also true for the other 'passes' in this module.
 -- TODO: I think the name on this function should be different. It is not really
--- indicative what it checks now.
-checkSpecPass :: CoreToDo
-checkSpecPass = do
-  let name = TH.nameBase 'checkSpecPass
-  let pass guts = runSymbolic guts $ annBindsPass checkSpec guts
+-- indicative what it checks now. Or at least, the annotation it specialises to.
+checkValidityPass :: CoreToDo
+checkValidityPass = do
+  let name = TH.nameBase 'checkValidityPass
+  let pass guts = runSymbolic guts $ annBindsPass checkValidity guts
   CoreDoPluginPass name pass
 
 printAndLint
@@ -228,129 +191,23 @@ printAndLint bind = do
   debug res
   pure bind
 
-composeImpl
+checkValidity
   :: HasCallStack
-  => Error (LookupError TH.Name) :> es
-  => Error (LookupError Name) :> es
-  => Error UnificationError :> es
-  => Error OversaturatedError :> es
-  => Context Reader CoreProgram :> es
-  => THNameToGHCName :> es
-  => HasThings :> es
-  => Pantomime TH.Name
-  -> CoreExpr
-  -> Eff es CoreExpr
-composeImpl spec expr = do
-  let resolve name = Var <$> resolveTH name
-
-  compose <- resolve 'Combinator.composeI
-
-  obs <- resolve $ observation spec
-  proj <- resolve $ projection spec
-
-  expr' <- unifyApps compose [expr, obs, proj]
-
-  pure $ occurAnalyseExpr expr'
-
-composeSim
-  :: HasCallStack
-  => Error (LookupError TH.Name) :> es
-  => Error (LookupError Name) :> es
-  => Error UnificationError :> es
-  => Error OversaturatedError :> es
-  => Context Reader CoreProgram :> es
-  => THNameToGHCName :> es
-  => HasThings :> es
-  => Pantomime TH.Name
-  -> Eff es CoreExpr
-composeSim spec = do
-  let resolve name = Var <$> resolveTH name
-
-  compose <- resolve 'Combinator.composeS
-
-  sim <- resolve $ simulator spec
-  leak <- resolve $ leakage spec
-  proj <- resolve $ projection spec
-
-  expr' <- unifyApps compose [leak, sim, proj]
-
-  pure $ occurAnalyseExpr expr'
-
-checkSpec
-  :: HasCallStack
+  => Error () :> es
   => Error (LookupError Name) :> es
   => Error (LookupError TH.Name) :> es
   => Error SolverError :> es
-  => Error UnificationError :> es
-  => Error OversaturatedError :> es
   => Context Reader CoreProgram :> es
   => Provider_ Solver () :> es
-  => Fail :> es
-  => Display :> es
-  => HasInstEnvs :> es
   => HasFamInstEnvs :> es
-  => HasDynFlagsE :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Pantomime TH.Name
+  => Theory
   -> CoreBind'
   -> Eff es CoreBind'
-checkSpec spec (Bind' var expr) = do
-  program <- get @CoreProgram
-  let scope = extendInScopeSetBndrs emptyInScopeSet program
-
-  imp <- composeImpl spec expr
-  lintPanic scope imp
-
-  sim <- composeSim spec
-  lintPanic scope sim
-
-  (imp', sim') <- unifyExprs imp sim
-
-  imp'' <- resolveInstances imp'
-  sim'' <- resolveInstances sim'
-
-  lintPanic scope imp''
-  lintPanic scope sim''
-
-  result <- exprSymEq imp'' sim''
-
-  case result of
-    Right _ -> do
-      debugS "Expressions are equal!"
-    Left err -> do
-      debug err
-      fail "Expressions are **NOT** equal"
-
+-- TODO: The check itself permits recursive binders, so we should not restrict
+-- the input here really!
+checkValidity (Theory axioms) (Bind' var expr) = do
+  axioms' <- resolvePluginAxioms axioms
+  checkValid axioms' expr
   pure $ Bind' var expr
-
-symCompare
-  :: HasCallStack
-  => Error (LookupError Name) :> es
-  => Error (LookupError TH.Name) :> es
-  => Error SolverError :> es
-  => Context Reader CoreProgram :> es
-  => Provider_ Solver () :> es
-  => Fail :> es
-  => Display :> es
-  => HasFamInstEnvs :> es
-  => HasDynFlagsE :> es
-  => HasThings :> es
-  => THNameToGHCName :> es
-  => SymCompare TH.Name
-  -> CoreBind'
-  -> Eff es CoreBind'
-symCompare (SymCompare other) (Bind' var expr) = do
-  let resolve name = Var <$> resolveTH name
-
-  other' <- resolve other
-
-  result <- exprSymEq expr other'
-
-  case result of
-    Right _ -> do
-      debugS "Expressions were equal!"
-      pure $ Bind' var expr
-    Left err -> do
-      debug err
-      fail "Expressions were not equal"

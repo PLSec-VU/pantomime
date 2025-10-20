@@ -1,17 +1,15 @@
-{-# LANGUAGE TypeOperators #-}
 module Pantomime
   ( plugin
+
+  , Theory (..)
+  , Circuit
   , Pantomime (..)
-  , SymCompare (..)
-  , module Pantomime.Combinator
+  , pantomime
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
 
-import Language.Haskell.TH.Syntax qualified as TH
-
 import Pantomime.Annotation
-import Pantomime.Combinator
 import Pantomime.Passes
 
 plugin :: Plugin
@@ -26,18 +24,12 @@ install
   -> [CoreToDo]
   -> m [CoreToDo]
 install _ todo = do
-  let symComparePasses =
-        [ printAndLintPass @(SymCompare TH.Name)
-        , symComparePass
-        ]
-
-  let checkSpecPasses =
-        [ printAndLintPass @(Pantomime TH.Name)
-        , checkSpecPass
+  let validityPasses =
+        [ printAndLintPass @Theory
+        , checkValidityPass
         ]
 
   pure $ mconcat
-    [ symComparePasses
-    , checkSpecPasses
+    [ validityPasses
     , todo
     ]
