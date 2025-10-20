@@ -31,6 +31,7 @@ import Lens.Micro (Lens)
 import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, CallStack, throwError_)
 
+-- TODO: Wouldn't a better name be foldByM or foldMBy?
 -- | The usual 'foldM', but with its arguments switched.
 --
 -- The use for this is that one may use this to write an expression in the
@@ -94,7 +95,7 @@ infixr 4 %~~
 -- the computation additionally returns a value.
 --
 -- This is just an alias for lens application, but it can be confusing to apply
--- lenses directly. Especially since it would mean opaquely using a tuples as
+-- lenses directly. Especially since it would mean opaquely using a tuple as
 -- the running monad. Additionally, this has a nicer precedence when applied in
 -- the form:
 -- ```

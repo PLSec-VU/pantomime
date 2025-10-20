@@ -280,7 +280,7 @@ instance SymBranching (Eval es) where
     _ -> coerce go true false
     where
       go :: EvalCoerce es a -> EvalCoerce es a -> EvalCoerce es a
-      go t f = mrgIfWithStrategy strategy scrut <$> t <*> f
+      go = liftA2 $ mrgIfWithStrategy strategy scrut
 
   mrgIfPropagatedStrategy @a scrut = coerce go
     where
@@ -289,7 +289,7 @@ instance SymBranching (Eval es) where
         Con scrut'
           | scrut' -> true
           | otherwise -> false
-        _ -> mrgIfPropagatedStrategy scrut <$> true <*> false
+        _ -> liftA2 (mrgIfPropagatedStrategy scrut) true false
 
 instance EvalSym a => EvalSym (Eval es a) where
   evalSym = evalSym1

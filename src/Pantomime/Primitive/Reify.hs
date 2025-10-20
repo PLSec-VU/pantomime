@@ -3,6 +3,7 @@ module Pantomime.Primitive.Reify
   ( Reify (..)
   , ReifyBuiltin (..)
   , builtinReify
+  , builtinInterpret
   , Quantifier (..)
 
   -- | Lambdas and quantifiers.
@@ -27,6 +28,7 @@ module Pantomime.Primitive.Reify
   , RKnownNat
   , RNatural
   , RInteger
+  , RBool
 
   -- | Lifting function for ease of use.
   , liftF1'
@@ -49,9 +51,11 @@ import Pantomime.Expr
   , mkLit
   , mkIntN
   , mkDataCon
+  , mkEnumCon
   , mkWordN
   , mkCast
   , collectArgs
+  , forceTy
   , concreteDataCon
   , exprType
   , throwE
@@ -63,9 +67,10 @@ import Pantomime.Subst
   , substTy
   , mkEmptySubst
   )
-import Pantomime.Primitive.Operations qualified as Primitive
+import Pantomime.Primitive.Operation qualified as Primitive
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Grisette.SomeBV (SomeBV (..))
+import Pantomime.Grisette.SizedBV (sizedBVZresize)
 import Pantomime.Result (type (!>))
 
 import GHC.TypeNats (KnownNat, Nat, natVal)
@@ -114,8 +119,11 @@ import GHC.Plugins
   , integerINDataCon
   , integerISDataCon
   , integerIPDataCon
+  , boolTy
+  , boolTyCon
   , tYPETyCon
-  , boxedRepDataConTyCon, splitForAllTyCoVar_maybe
+  , boxedRepDataConTyCon
+  , splitForAllTyCoVar_maybe
   )
 
 import Language.Haskell.TH qualified as TH
@@ -129,7 +137,7 @@ import Control.Applicative (liftA3)
 import Control.Monad (unless)
 
 import Grisette.Unified (EvalModeTag(..))
-import Grisette (liftUnion)
+import Grisette (SymBool, BitCast (..), liftUnion)
 
 import Effectful
 import Effectful.Error.Static
@@ -146,8 +154,7 @@ class Reify a where
   type InterpRep (es :: [Kind.Type]) a
 
   reifiedType
-    :: forall es
-     . HasCallStack
+    :: HasCallStack
     => Error (LookupError TH.Name) :> es
     => Error (LookupError Name) :> es
     => HasThings :> es
@@ -165,13 +172,15 @@ class Reify a where
   -- could alternatively have a single error type that existentially wraps any
   -- error we might want to give. It could be a stop-gap solution...
   reify
-    :: () !> es
+    :: HasCallStack
+    => () !> es
     => Type
     -> Eval es (InterpRep es a)
     -> Eval es (Expr es)
 
   interpret
-    :: () !> es
+    :: HasCallStack
+    => () !> es
     => Type
     -> Eval es (Expr es)
     -> Eval es (InterpRep es a)
@@ -188,6 +197,16 @@ builtinReify
 builtinReify expr = do
   let ty = builtinReifiedType @a
   reify @a ty expr
+
+builtinInterpret
+  :: forall a es
+   . () !> es
+  => ReifyBuiltin a
+  => Eval es (Expr es)
+  -> Eval es (InterpRep es a)
+builtinInterpret expr = do
+  let ty = builtinReifiedType @a
+  interpret @a ty expr
 
 class Quantifier a where
   quantifier :: ForAllTyBinder
@@ -243,9 +262,7 @@ instance (Quantifier a, Reify b) => Reify (a +> b) where
 
       -- Compute the actual function.
       fun' <- fun
-      arg' <- arg >>= \case
-            Type ty' -> pure ty'
-            _ -> throwE ()
+      arg' <- liftR $ forceTy arg
 
       reify @b tbody' $ fun' arg'
 
@@ -367,7 +384,6 @@ instance Reify RNatural where
 
     expr >>= \case
       Left (SomeBV value) -> do
-
         -- FIXME: Give proper platform size
         let dc = mkLit $ mkDataCon @64 naturalNSDataCon
         let arg = pure $ mkLit (mkWordN value wordPrimTy)
@@ -485,6 +501,40 @@ instance Reify RInteger where
 
 instance ReifyBuiltin RInteger where
   builtinReifiedType = integerTy
+
+-- | Boolean reify marker.
+data RBool
+
+instance Reify RBool where
+  type InterpRep _ RBool = SymBool
+
+  reifiedType = pure $ builtinReifiedType @RBool
+
+  reify ty expr = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty boolTy) do
+      throwE ()
+
+    -- Convert the symbolic boolean into a tag.
+    value <- expr
+    let tag = sizedBVZresize @_ @1 $ bitCast value
+
+    -- FIXME: Provide proper tag size.
+    mkEnumCon @64 tag boolTy
+
+  interpret ty expr = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty boolTy) do
+      throwE ()
+
+    -- Convert the expression into a SymBool, if possible.
+    expr >>= \case
+      Lit (DataCon tag tc)
+        | tc == boolTyCon -> pure $ bitCast (sizedBVZresize @_ @_ @1 tag)
+      _ -> throwE ()
+
+instance ReifyBuiltin RBool where
+  builtinReifiedType = boolTy
 
 -- | Reify marker for Haskell sized integer primitives.
 data RHIntN (n :: Nat)

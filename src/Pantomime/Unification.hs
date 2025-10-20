@@ -7,7 +7,7 @@ module Pantomime.Unification
   , unifyApps
   , unifyExprs
   , resolveInstances
-  , resolveCustomInstances
+  , resolveInstancesWith
   ) where
 
 import Prelude hiding (break)
@@ -425,13 +425,13 @@ resolveInstances expr = do
           alterTM ty (inst <|>) acc
 
   -- Resolve the instances with this mapping.
-  pure $ resolveCustomInstances dicts expr
+  pure $ resolveInstancesWith dicts expr
 
-resolveCustomInstances
+resolveInstancesWith
   :: TypeMap CoreExpr
   -> CoreExpr
   -> CoreExpr
-resolveCustomInstances dicts expr = do
+resolveInstancesWith dicts expr = do
   -- Set this dictionary for a unification.
   let unif = emptyUnif & dictionaries .~ dicts
 

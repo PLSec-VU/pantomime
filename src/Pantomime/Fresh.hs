@@ -172,6 +172,7 @@ freshExpr FreshInstEnv { .. } root = go Variable
   , varArgs = []
   }
   where
+    -- TODO: Add note on callstack and recursion
     go var = do
       -- TODO: I don't like the nesting this gives. Maybe we should move these
       -- definitions inwards somehow.
@@ -247,6 +248,11 @@ freshExpr FreshInstEnv { .. } root = go Variable
 
         -- Newtype:
         -----------
+        -- NOTE: It is important we first do primitive and user lookups before
+        -- unfolding newtypes (i.e. the ordering of the guards are important).
+        -- The primitive and user definitions diverge from the normal Haskell
+        -- newtype definition. In all cases, we want the pick primitive and user
+        -- definitions over newtypes.
         | Just (tc, args) <- splitTyConApp_maybe ty
         , Just (ty', co) <- instNewTyCon_maybe tc args -> do
           mkReductionCast $ mkReduction co ty'
