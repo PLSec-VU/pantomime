@@ -44,20 +44,7 @@ library
       Pantomime
       Pantomime.Annotation
       Pantomime.Axiom
-      Pantomime.Base
-      Pantomime.Clash
-      Pantomime.Clash.Bit
-      Pantomime.Clash.BitVector
-      Pantomime.Clash.Signed
-      Pantomime.Clash.Unsigned
-      Pantomime.Clash.Util
-      Pantomime.Combinator
-      Pantomime.Concrete
-      Pantomime.Concrete.GrisetteOps
       Pantomime.Dict
-      Pantomime.DictMap
-      Pantomime.Environment
-      Pantomime.Evaluate
       Pantomime.Expr
       Pantomime.Fresh
       Pantomime.Grisette.BitVector
@@ -65,24 +52,19 @@ library
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.SomeBV
       Pantomime.Grisette.Union
-      Pantomime.MonadEval
       Pantomime.Orphan.Effectful
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes
-      Pantomime.Primitive
       Pantomime.Primitive.GHC
       Pantomime.Primitive.Operation
       Pantomime.Primitive.Reify
       Pantomime.Result
-      Pantomime.Runtime
       Pantomime.Solve
       Pantomime.Subst
       Pantomime.Symbolise
       Pantomime.Unification
       Pantomime.Util
-      Pantomime.Value
-      Pantomime.WordSize
   other-modules:
       Paths_uc_plugin
   autogen-modules:

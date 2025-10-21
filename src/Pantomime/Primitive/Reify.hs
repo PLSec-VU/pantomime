@@ -56,6 +56,7 @@ import Pantomime.Expr
   , mkCast
   , collectArgs
   , forceTy
+  , exprToBool
   , concreteDataCon
   , exprType
   , throwE
@@ -70,7 +71,7 @@ import Pantomime.Subst
 import Pantomime.Primitive.Operation qualified as Primitive
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Grisette.SizedBV (sizedBVZresize)
+import Pantomime.Grisette.SizedBV (sizedBVResizeZ)
 import Pantomime.Result (type (!>))
 
 import GHC.TypeNats (KnownNat, Nat, natVal)
@@ -120,7 +121,6 @@ import GHC.Plugins
   , integerISDataCon
   , integerIPDataCon
   , boolTy
-  , boolTyCon
   , tYPETyCon
   , boxedRepDataConTyCon
   , splitForAllTyCoVar_maybe
@@ -167,7 +167,7 @@ class Reify a where
   -- each, though I would rather not go there... In any case, I cannot write a
   -- type family of ReifyError a :: [Kind.Type] here, as Haskell type families
   -- are too slow to have a type family for (!>>). I would need to write
-  -- ReifyError es :: Kind.Constraint, which I think it much worse. With that
+  -- ReifyError a es :: Kind.Constraint, which I think it much worse. With that
   -- one, I'm also still a little bit worried about compile times... I guess we
   -- could alternatively have a single error type that existentially wraps any
   -- error we might want to give. It could be a stop-gap solution...
@@ -517,7 +517,7 @@ instance Reify RBool where
 
     -- Convert the symbolic boolean into a tag.
     value <- expr
-    let tag = sizedBVZresize @_ @1 $ bitCast value
+    let tag = sizedBVResizeZ @_ @1 $ bitCast value
 
     -- FIXME: Provide proper tag size.
     mkEnumCon @64 tag boolTy
@@ -528,10 +528,7 @@ instance Reify RBool where
       throwE ()
 
     -- Convert the expression into a SymBool, if possible.
-    expr >>= \case
-      Lit (DataCon tag tc)
-        | tc == boolTyCon -> pure $ bitCast (sizedBVZresize @_ @_ @1 tag)
-      _ -> throwE ()
+    expr >>= exprToBool
 
 instance ReifyBuiltin RBool where
   builtinReifiedType = boolTy

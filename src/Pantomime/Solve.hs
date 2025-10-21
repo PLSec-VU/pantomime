@@ -20,7 +20,6 @@ import GHC.Plugins
   , Name
   , CoreExpr
   , exprType
-  , showSDocUnsafe
   , varType
   , vcat
   , emptyInScopeSet
@@ -46,7 +45,7 @@ import Pantomime.Subst qualified as Pantomime
 import Pantomime.Fresh qualified as Pantomime
 import Pantomime.Primitive.GHC qualified as Primitive
 import Pantomime.Result (handle, ok)
-import Pantomime.Util (withCallStack)
+import Pantomime.Util (withCallStack, dbg)
 import Pantomime.Axiom (PluginAxiomsR (..))
 
 
@@ -59,10 +58,6 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
-import Effectful.Dispatch.Static (unsafeEff_)
-
-dbg :: forall o es. Outputable o => o -> Eff es ()
-dbg = unsafeEff_ . putStrLn . showSDocUnsafe . ppr
 
 checkValid
   :: forall es
@@ -86,11 +81,9 @@ checkValid PluginAxiomsR { .. } expr = do
   program <- get @CoreProgram
 
   reifiedIntN <- Primitive.reifiedIntN
-  reifiedBase <- Primitive.reifiedBase
 
   let subst = do
         subst0 <- Pantomime.extendIdSubstMany Pantomime.mkEmptySubst reifiedIntN
-        subst1 <- Pantomime.extendIdSubstMany subst0 reifiedBase
         -- TODO: I think there is an ordering problem here between user
         -- mappings and program definitions. I guess user mappings should
         -- go first? The problem is that we don't want local definitions to
@@ -99,9 +92,9 @@ checkValid PluginAxiomsR { .. } expr = do
         -- their defining module. Not the worst thing though, as the functions
         -- should truly be opaque outside of the defining module and they cannot
         -- be guaranteed to not be misused within the module.
-        let symAxioms = Pantomime.symbolise subst1 <$> termAxiomsR
-        let subst2 = Pantomime.extendIdSubstDirectly subst1 symAxioms
-        Pantomime.symboliseBindMany subst2 program
+        let symAxioms = Pantomime.symbolise subst0 <$> termAxiomsR
+        let subst1 = Pantomime.extendIdSubstDirectly subst0 symAxioms
+        Pantomime.symboliseBindMany subst1 program
 
   subst' <- case handle subst of
     Left (cs, ()) -> withCallStack cs throwError_ ()

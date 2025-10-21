@@ -9,8 +9,8 @@ module Pantomime.Grisette.SizedBV
   ( SizedBV (..)
   , sizedBVExtract
   , sizedBVResize
-  , sizedBVZresize
-  , sizedBVSresize
+  , sizedBVResizeZ
+  , sizedBVResizeS
   ) where
 
 import GHC.TypeNats (type (<=), type (+), type (-), KnownNat)
@@ -36,7 +36,7 @@ class SizedBV bv where
     -> bv (l + r)
 
   -- | Zero extension of a bit vector.
-  sizedBVZext
+  sizedBVExtZ
     :: forall l r
      . KnownNat l
     => KnownNat r
@@ -45,7 +45,7 @@ class SizedBV bv where
     -> bv r
 
   -- | Signed extension of a bit vector.
-  sizedBVSext
+  sizedBVExtS
     :: forall l r
      . KnownNat l
     => KnownNat r
@@ -132,23 +132,23 @@ sizedBVResize = sizedBVResizeWith sizedBVExt
 -- | Resize the given bitvector.
 --
 -- Will zero extend the bitvector if it is extended.
-sizedBVZresize
+sizedBVResizeZ
   :: forall bv l r
    . SizedBV bv
   => KnownNat l
   => KnownNat r
   => bv l
   -> bv r
-sizedBVZresize = sizedBVResizeWith sizedBVZext
+sizedBVResizeZ = sizedBVResizeWith sizedBVExtZ
 
 -- | Resize the given bitvector.
 --
 -- Will sign extend the bitvector if it is extended.
-sizedBVSresize
+sizedBVResizeS
   :: forall bv l r
    . SizedBV bv
   => KnownNat l
   => KnownNat r
   => bv l
   -> bv r
-sizedBVSresize = sizedBVResizeWith sizedBVSext
+sizedBVResizeS = sizedBVResizeWith sizedBVExtS

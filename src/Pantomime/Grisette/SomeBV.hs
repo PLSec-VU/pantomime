@@ -31,7 +31,6 @@ import Data.Typeable
   , eqT
   )
 
--- TODO: This thing should get its own module!
 data SomeBV bv where
   SomeBV :: KnownNat n => bv n -> SomeBV bv
 

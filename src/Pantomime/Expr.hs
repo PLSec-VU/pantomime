@@ -152,7 +152,7 @@ import Pantomime.Orphan.Grisette ()
 import Pantomime.Orphan.GHC ()
 import Pantomime.Result
 import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Grisette.SizedBV (sizedBVZresize)
+import Pantomime.Grisette.SizedBV (sizedBVResizeZ)
 import Pantomime.Grisette.Mergeable
   ( partialStrategy
   , ifStrategy
@@ -842,7 +842,7 @@ exprToBool = \case
   Lit (DataCon tag tc) | tc == boolTyCon -> do
     -- DataCon are checked at creation for correctness. Hence, we can simply
     -- cast the bit value.
-    pure $ bitCast (sizedBVZresize @_ @_ @1 tag)
+    pure $ bitCast (sizedBVResizeZ @_ @_ @1 tag)
 
   _ -> throwE ()
 

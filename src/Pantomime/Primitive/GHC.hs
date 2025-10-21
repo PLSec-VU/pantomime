@@ -14,7 +14,8 @@ module Pantomime.Primitive.GHC
   , ReifyMismatch (..)
   , reifiedIntN
 
-  , reifiedBase
+  , thNameToTyCon
+  , thNameToId
 
   -- , Operation
   -- , NumOps (..)
@@ -50,18 +51,18 @@ import GHC.Plugins
   , idInlinePragma
   )
 
-import Pantomime.Expr (Eval, EvalExpr, failWithE, throwE)
+import Pantomime.Expr (Eval, EvalExpr, failWithE)
 import Pantomime.Grisette.SomeBV (SomeBV(..))
 import Pantomime.Grisette.BitVector (IntN)
-import Pantomime.Primitive.Operations qualified as Primitive
+import Pantomime.Primitive.Operation qualified as Primitive
 import Pantomime.Primitive.Reify
+import Pantomime.Result (type (!>))
 
 import Data.Typeable (type (:~:) (..), eqT)
 
 import Control.Monad (unless, (>=>))
 
 import GHC.TypeLits (KnownNat)
-import GHC.Num (integerToInt#, integerToWord#)
 
 import Effectful
 import Effectful.Error.Static
@@ -70,8 +71,7 @@ import Effectful.GHC.TyThing
 import Effectful.Exception (throwIO)
 
 import Grisette.Unified (EvalModeTag (..))
-import Grisette (SignConversion(..))
-import Pantomime.Result (type (!>))
+import Grisette (SymBool, SymEq (..))
 
 thNameToTyCon
   :: HasCallStack
@@ -187,6 +187,25 @@ lookupReifyMany
 lookupReifyMany = traverse \(Interpretation @r name interp) -> do
   lookupReify @r name interp
 
+type UnaryIntN
+  =  AlphaNat
+  +> RKnownNat AlphaNat
+  ~> RIntN AlphaNat
+  ~> RIntN AlphaNat
+
+type BinaryIntN
+  =  AlphaNat
+  +> RKnownNat AlphaNat
+  ~> RIntN AlphaNat
+  ~> RIntN AlphaNat
+  ~> RIntN AlphaNat
+
+type CmpIntN
+  =  AlphaNat
+  +> RIntN AlphaNat
+  ~> RIntN AlphaNat
+  ~> RBool
+
 reifiedIntN
   :: forall es fs
    . HasCallStack
@@ -202,6 +221,7 @@ reifiedIntN = staticReifyError $ lookupReifyMany
   , unary 'Primitive.absIntN abs
   , unary 'Primitive.signumIntN signum
   , unary 'Primitive.negateIntN negate
+  , cmp 'Primitive.eqIntN (.==)
   -- , binary 'Primitive.fromIntegerIntN
   ]
   where
@@ -227,44 +247,17 @@ reifiedIntN = staticReifyError $ lookupReifyMany
       SomeBV x' <- x
       pure . SomeBV $ op x'
 
--- TODO: The only reason we need to reify these is because of the NOINLINE
--- pragma. Perhaps it makes more sense to use the user-interpretation stuff once
--- we have it implemented. The only thing we would need to do is to copy-paste
--- the code that has a NOINLINE pragma and then provide it as an interp for the
--- NOINLINE code.
---
--- If it ever happens that base is decoupled from GHC, we could even add the
--- expose-all-unfoldings flag to the compilation of base. This would remove the
--- need of adding the implementation elsewhere.
-reifiedBase
-  :: forall es fs
-   . HasCallStack
-  => Error (LookupError TH.Name) :> es
-  => Error (LookupError Name) :> es
-  => HasThings :> es
-  => THNameToGHCName :> es
-  => () !> fs
-  => Eff es [(Var, EvalExpr fs)]
-reifiedBase = staticReifyError $ lookupReifyMany
-  -- FIXME: Get proper architecture size.
-  [ Interpretation @(RInteger ~> RHIntPW 64) 'integerToInt# $ pure \x -> do
-    x' <- x
-    case x' of
-      Left (SomeBV @n value)
-        -- FIXME: Use proper architecture size on this comparison.
-        | Just Refl <- eqT @n @64 -> pure value
-      Left _ -> throwE ()
-      Right () -> undefined
-
-  , Interpretation @(RInteger ~> RHWordPW 64) 'integerToWord# $ pure \x -> do
-    x' <- x
-    case x' of
-      Left (SomeBV @n value)
-        -- FIXME: Use proper architecture size on this comparison.
-        | Just Refl <- eqT @n @64 -> pure $ toUnsigned value
-      Left _ -> throwE ()
-      Right () -> undefined
-  ]
+    cmp
+      :: TH.Name
+      -> (forall n. KnownNat n => IntN S n -> IntN S n -> SymBool)
+      -> Interpretation fs
+    cmp name op = Interpretation @CmpIntN name $ liftF3 \_n x y -> do
+      -- TODO: Should we check that the KnownNat is indeed equal to the size of
+      -- the bitvector?
+      SomeBV @n x' <- x
+      SomeBV @m y' <- y
+      Refl <- failWithE () $ eqT @n @m
+      pure $ op x' y'
 
 -- | Helper function to catch ReifyMismatch for constant interpretations that
 -- should never fail in the first place.
@@ -329,19 +322,6 @@ staticReifyError = runError >=> \case
 --   IntNOps ::
 --     { numIntN :: NumOps
 --     } -> IntNOps
-
-type UnaryIntN
-  =  AlphaNat
-  +> RKnownNat AlphaNat
-  ~> RIntN AlphaNat
-  ~> RIntN AlphaNat
-
-type BinaryIntN
-  =  AlphaNat
-  +> RKnownNat AlphaNat
-  ~> RIntN AlphaNat
-  ~> RIntN AlphaNat
-  ~> RIntN AlphaNat
 
 -- type FromIntegerIntN
 --   =  AlphaNat

@@ -271,7 +271,7 @@ resolvePluginAxioms PluginAxioms { .. } = do
       Opaque _ -> pure $ resolveInstancesWith dicts expr
 
       -- We only want to interpret no-inline if the unfolding was not available.
-      NoInline _ | hasCoreUnfolding $ idUnfolding orig' -> pure expr
+      NoInline _ | not . hasCoreUnfolding $ idUnfolding orig' -> pure expr
 
       -- It is fragile to interpret inlineable instances, as they may already
       -- have been optimised away.

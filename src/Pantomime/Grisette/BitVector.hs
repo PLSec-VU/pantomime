@@ -297,7 +297,7 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
       case unsafeDict @(1 <= l + r) of
         Dict -> IntP $ op lhs rhs
 
-  sizedBVZext @l @r = \case
+  sizedBVExtZ @l @r = \case
     IntZ -> do
       let op :: 1 <= r => GetIntN mode r
           op = withMode @mode
@@ -311,7 +311,7 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
             (Grisette.sizedBVZext @_ @l @r Proxy)
       withSizeI $ op value
 
-  sizedBVSext @l @r = \case
+  sizedBVExtS @l @r = \case
     IntZ -> do
       let op :: 1 <= r => GetIntN mode r
           op = withMode @mode
@@ -325,7 +325,7 @@ instance DecideEvalMode mode => SizedBV (IntN mode) where
             (Grisette.sizedBVSext @_ @l @r Proxy)
       withSizeI $ op value
 
-  sizedBVExt = sizedBVSext
+  sizedBVExt = sizedBVExtS
 
   sizedBVSelect @idx @width @n = \case
     IntZ -> case unsafeDict @(width ~ 0) of
@@ -635,7 +635,7 @@ instance DecideEvalMode mode => SizedBV (WordN mode) where
       case unsafeDict @(1 <= l + r) of
         Dict -> WordP $ op lhs rhs
 
-  sizedBVZext @l @r = \case
+  sizedBVExtZ @l @r = \case
     WordZ -> do
       let op :: 1 <= r => GetWordN mode r
           op = withMode @mode
@@ -649,7 +649,7 @@ instance DecideEvalMode mode => SizedBV (WordN mode) where
             (Grisette.sizedBVZext @_ @l @r Proxy)
       withSizeW $ op value
 
-  sizedBVSext @l @r = \case
+  sizedBVExtS @l @r = \case
     WordZ -> do
       let op :: 1 <= r => GetWordN mode r
           op = withMode @mode
@@ -663,7 +663,7 @@ instance DecideEvalMode mode => SizedBV (WordN mode) where
             (Grisette.sizedBVSext @_ @l @r Proxy)
       withSizeW $ op value
 
-  sizedBVExt = sizedBVZext
+  sizedBVExt = sizedBVExtZ
 
   sizedBVSelect @idx @width @n = \case
     WordZ -> case unsafeDict @(width ~ 0) of

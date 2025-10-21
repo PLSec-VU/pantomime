@@ -8,6 +8,7 @@ module Pantomime.Util
 
   , whyFail
   , withCallStack
+  , dbg
 
   , accumL
   , (%~~)
@@ -30,6 +31,7 @@ import Lens.Micro (Lens)
 
 import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, CallStack, throwError_)
+import Effectful.Dispatch.Static (unsafeEff_)
 
 -- TODO: Wouldn't a better name be foldByM or foldMBy?
 -- | The usual 'foldM', but with its arguments switched.
@@ -79,6 +81,10 @@ whyFail err = maybe (throwError_ err) pure
 -- | Fill a 'HasCallStack' constraint with a local call stack.
 withCallStack :: CallStack -> (HasCallStack => a) -> a
 withCallStack cs f = let ?callStack = cs in f
+
+-- | Unsafe debug output in effect monad.
+dbg :: Outputable o => o -> Eff es ()
+dbg = unsafeEff_ . putStrLn . showSDocUnsafe . ppr
 
 -- | Accumulate a stateful function over a traversable input.
 accumL :: Traversable f => (a -> s -> (b, s)) -> f a -> s -> (f b, s)
