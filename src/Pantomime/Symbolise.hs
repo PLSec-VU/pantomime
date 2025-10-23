@@ -592,23 +592,37 @@ symbolisePrimOp = \case
       -- The final result is defined only within the bounds.
       mrgIte inBounds result ub
 
-    tagToEnum = builtinReify @(AlphaType +> RHIntPW n ~> RPoly AlphaType) do
-      liftF2 \ty arg -> do
-        tag <- arg
-        mkEnumCon tag ty
+    tagToEnum = builtinReify @(TagToEnumType n) $ liftF2 \ty arg -> do
+      tag <- arg
+      mkEnumCon tag ty
 
-    dataToTag = builtinReify 
-      @(BetaLevity +> AlphaBoxed BetaLevity +> RPoly AlphaType ~> RHIntPW n) do
-        liftF3 \_lev ty arg -> do
-          -- Force the argument.
-          arg' <- arg
+    dataToTag = builtinReify @(DataToTagType n) $ liftF3 \_lev ty arg -> do
+      -- Force the argument.
+      arg' <- arg
 
-          -- Ensure the argument is of the correct type.
-          argTy <- liftR $ exprType arg'
-          unless (eqType ty argTy) do
-            throwE ()
+      -- Ensure the argument is of the correct type.
+      argTy <- liftR $ exprType arg'
+      unless (eqType ty argTy) do
+        throwE ()
 
-          -- Get the DataCon tag.
-          case fst $ collectArgs arg' of
-            Lit (DataCon @m tag _tc) | Just Refl <- eqT @n @m -> pure tag
-            _ -> throwE ()
+      -- Get the DataCon tag.
+      case fst $ collectArgs arg' of
+        Lit (DataCon @m tag _tc) | Just Refl <- eqT @n @m -> pure tag
+        _ -> throwE ()
+
+-- | Alias for the 'tagToEnum#' reified type.
+--
+-- forall a. Int# -> a
+type TagToEnumType n
+  =  RTyVar_ 0
+  +> RHIntPW n
+  ~> RTyVar_ 0
+
+-- | Alias for the 'dataToTag#' reified type.
+--
+-- forall (l :: Levity) (a :: TYPE (Boxed l)). l -> Int#
+type DataToTagType n
+  =  RTyVar 0 RLevity
+  +> RTyVar 1 (RBoxedRep (RTyVar 0 RLevity))
+  +> RTyVar 1 (RBoxedRep (RTyVar 0 RLevity))
+  ~> RHIntPW n

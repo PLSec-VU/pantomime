@@ -53,7 +53,7 @@ import GHC.Plugins
 
 import Pantomime.Expr (Eval, EvalExpr, failWithE)
 import Pantomime.Grisette.SomeBV (SomeBV(..))
-import Pantomime.Grisette.BitVector (IntN)
+import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Primitive.Operation qualified as Primitive
 import Pantomime.Primitive.Reify
 import Pantomime.Result (type (!>))
@@ -62,7 +62,7 @@ import Data.Typeable (type (:~:) (..), eqT)
 
 import Control.Monad (unless, (>=>))
 
-import GHC.TypeLits (KnownNat)
+import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal)
 
 import Effectful
 import Effectful.Error.Static
@@ -71,7 +71,9 @@ import Effectful.GHC.TyThing
 import Effectful.Exception (throwIO)
 
 import Grisette.Unified (EvalModeTag (..))
-import Grisette (SymBool, SymEq (..))
+import Grisette (SymBool, SymEq (..), SymOrd (..), ToCon (..))
+import Pantomime.Grisette.SizedBV (sizedBVResize)
+import Data.Bits (Bits(..))
 
 thNameToTyCon
   :: HasCallStack
@@ -162,7 +164,7 @@ lookupReify name interp = do
     _ -> undefined
 
   -- Lookup the type info for reification.
-  ty <- reifiedType @a
+  ty <- coreType @a
 
   -- Ensure that the interpretation has a proper reified type.
   unless (eqType ty $ varType var) do
@@ -187,6 +189,8 @@ lookupReifyMany
 lookupReifyMany = traverse \(Interpretation @r name interp) -> do
   lookupReify @r name interp
 
+type AlphaNat = RTyVar 0 RNatural
+
 type UnaryIntN
   =  AlphaNat
   +> RKnownNat AlphaNat
@@ -200,11 +204,24 @@ type BinaryIntN
   ~> RIntN AlphaNat
   ~> RIntN AlphaNat
 
-type CmpIntN
+type EqIntN
   =  AlphaNat
   +> RIntN AlphaNat
   ~> RIntN AlphaNat
   ~> RBool
+
+type CmpIntN
+  =  AlphaNat
+  +> RKnownNat AlphaNat
+  ~> RIntN AlphaNat
+  ~> RIntN AlphaNat
+  ~> RBool
+
+type FromIntegerIntN
+  =  AlphaNat
+  +> RKnownNat AlphaNat
+  ~> RInteger
+  ~> RIntN AlphaNat
 
 reifiedIntN
   :: forall es fs
@@ -221,10 +238,42 @@ reifiedIntN = staticReifyError $ lookupReifyMany
   , unary 'Primitive.absIntN abs
   , unary 'Primitive.signumIntN signum
   , unary 'Primitive.negateIntN negate
-  , cmp 'Primitive.eqIntN (.==)
-  -- , binary 'Primitive.fromIntegerIntN
+  , fromI 'Primitive.fromIntegerIntN
+  , eq 'Primitive.eqIntN (.==)
+  , cmp 'Primitive.leIntN (.<=)
+  , binary 'Primitive.andIntN (.&.)
+  , binary 'Primitive.orIntN (.|.)
+  , binary 'Primitive.xorIntN xor
+  , unary 'Primitive.complementIntN complement
+  -- , undefined 'Primitive.shiftLIntN
+  -- , undefined 'Primitive.shiftRIntN
+  -- , undefined 'Primitive.rotateLIntN
+  -- , undefined 'Primitive.rotateRIntN
+  -- , undefined 'Primitive.sizedBVConcatIntN
+  -- , undefined 'Primitive.sizedBVExtZIntN
+  -- , undefined 'Primitive.sizedBVExtSIntN
+  -- , undefined 'Primitive.sizedBVExtIntN
+  -- , undefined 'Primitive.sizedBVSelectIntN
   ]
   where
+    fromI
+      :: TH.Name
+      -> Interpretation fs
+    fromI name = Interpretation @FromIntegerIntN name $ liftF3 \_n c i -> do
+      -- Convert the symbolic KnownNat constraint into a concrete Natural, if
+      -- possible.
+      nat <- c >>= \case
+        Left (SomeBV @n value) -> do
+          concrete <- failWithE () $ toCon @_ @(WordN C n) value
+          pure $ fromIntegral concrete
+        Right _ -> undefined
+
+      -- Use the concrete natural for a KnownNat constraint.
+      SomeNat @n _ <- pure $ someNatVal nat
+      i >>= \case
+        Left (SomeBV value) -> pure $ SomeBV @n (sizedBVResize value)
+        Right _ -> undefined
+
     binary
       :: TH.Name
       -> (forall n. KnownNat n => IntN S n -> IntN S n -> IntN S n)
@@ -232,7 +281,8 @@ reifiedIntN = staticReifyError $ lookupReifyMany
     binary name op = Interpretation @BinaryIntN name $ liftF4 \_n c x y -> do
       _ <- c
       -- TODO: Should we check that the KnownNat is indeed equal to the size of
-      -- the bitvector?
+      -- the bitvector? If yes, we should do this for all other operations as
+      -- well!
       SomeBV @n x' <- x
       SomeBV @m y' <- y
       Refl <- failWithE () $ eqT @n @m
@@ -247,13 +297,22 @@ reifiedIntN = staticReifyError $ lookupReifyMany
       SomeBV x' <- x
       pure . SomeBV $ op x'
 
+    eq
+      :: TH.Name
+      -> (forall n. KnownNat n => IntN S n -> IntN S n -> SymBool)
+      -> Interpretation fs
+    eq name op = Interpretation @EqIntN name $ liftF3 \_n x y -> do
+      SomeBV @n x' <- x
+      SomeBV @m y' <- y
+      Refl <- failWithE () $ eqT @n @m
+      pure $ op x' y'
+
     cmp
       :: TH.Name
       -> (forall n. KnownNat n => IntN S n -> IntN S n -> SymBool)
       -> Interpretation fs
-    cmp name op = Interpretation @CmpIntN name $ liftF3 \_n x y -> do
-      -- TODO: Should we check that the KnownNat is indeed equal to the size of
-      -- the bitvector?
+    cmp name op = Interpretation @CmpIntN name $ liftF4 \_n c x y -> do
+      _ <- c
       SomeBV @n x' <- x
       SomeBV @m y' <- y
       Refl <- failWithE () $ eqT @n @m

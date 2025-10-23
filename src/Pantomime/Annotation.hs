@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 module Pantomime.Annotation
   ( Theory (..)
   , Circuit
@@ -7,11 +5,9 @@ module Pantomime.Annotation
   , pantomime
   ) where
 
-import Data.Typeable
-import Data.Data
-
 import Data.Bifunctor (Bifunctor(..))
 import Data.Composition ((.:))
+import Data.Data (Data, Typeable)
 
 import Pantomime.Axiom (PluginAxioms)
 
