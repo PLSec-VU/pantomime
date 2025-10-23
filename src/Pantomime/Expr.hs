@@ -411,6 +411,9 @@ data Literal where
     => IntN S n
     -> TyCon
     -> Literal
+  -- TODO: Does it make sense to differentiate between IntN and WordN? I think
+  -- the solver just has a single bitvector. This just seems like it adds
+  -- maintanence burden without actually adding anything...
   Int
     :: KnownNat n
     => IntN S n

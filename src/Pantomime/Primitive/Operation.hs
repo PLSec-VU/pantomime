@@ -30,7 +30,6 @@ module Pantomime.Primitive.Operation
   , sizedBVConcatIntN
   , sizedBVExtZIntN
   , sizedBVExtSIntN
-  , sizedBVExtIntN
   , sizedBVSelectIntN
 
   , Integer
@@ -209,16 +208,6 @@ sizedBVExtSIntN
   -> IntN r
 sizedBVExtSIntN = coerce $ sizedBVExtS @(Pantomime.IntN C)
 
-{-# OPAQUE sizedBVExtIntN #-}
-sizedBVExtIntN
-  :: forall l r
-   . KnownNat l
-  => KnownNat r
-  => l <= r
-  => IntN l
-  -> IntN r
-sizedBVExtIntN = coerce $ sizedBVExt @(Pantomime.IntN C)
-
 {-# OPAQUE sizedBVSelectIntN #-}
 sizedBVSelectIntN
   :: forall idx width n
@@ -234,7 +223,7 @@ instance SizedBV IntN where
   sizedBVConcat = sizedBVConcatIntN
   sizedBVExtZ = sizedBVExtZIntN
   sizedBVExtS = sizedBVExtSIntN
-  sizedBVExt = sizedBVExtIntN
+  sizedBVExt = sizedBVExtSIntN
   sizedBVSelect @idx = sizedBVSelectIntN @idx
 
 -- TODO:
@@ -242,7 +231,6 @@ instance SizedBV IntN where
 -- - Real
 -- - Enum
 -- - Integral
--- - Bits
 --
 -- Should I implement some direct conversion functions for e.g. IntN to WordN?
 -- My intuition says that going through Integer should yield the same result, so

@@ -3,8 +3,6 @@
 -- can perform the interpretations. I think we will at some point remove all
 -- bindings of base. For this reason, perhaps 'Builtin' might be a good name for
 -- this module.
-{-# LANGUAGE ImplicitParams #-}
-{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Pantomime.Primitive.GHC
@@ -53,16 +51,19 @@ import GHC.Plugins
 
 import Pantomime.Expr (Eval, EvalExpr, failWithE)
 import Pantomime.Grisette.SomeBV (SomeBV(..))
+import Pantomime.Grisette.SizedBV (SizedBV (..), sizedBVResize)
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Primitive.Operation qualified as Primitive
 import Pantomime.Primitive.Reify
 import Pantomime.Result (type (!>))
+import Pantomime.Dict (typeAdd, SomeNat' (..), Dict (..), leqNat)
 
+import Data.Bits (Bits(..))
 import Data.Typeable (type (:~:) (..), eqT)
 
 import Control.Monad (unless, (>=>))
 
-import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal)
+import GHC.TypeNats (type (<=), KnownNat, SomeNat (..), someNatVal)
 
 import Effectful
 import Effectful.Error.Static
@@ -71,9 +72,14 @@ import Effectful.GHC.TyThing
 import Effectful.Exception (throwIO)
 
 import Grisette.Unified (EvalModeTag (..))
-import Grisette (SymBool, SymEq (..), SymOrd (..), ToCon (..))
-import Pantomime.Grisette.SizedBV (sizedBVResize)
-import Data.Bits (Bits(..))
+import Grisette
+  ( SymBool
+  , SymEq (..)
+  , SymOrd (..)
+  , ToCon (..)
+  , SymShift (..)
+  , SymRotate (..)
+  )
 
 thNameToTyCon
   :: HasCallStack
@@ -189,7 +195,8 @@ lookupReifyMany
 lookupReifyMany = traverse \(Interpretation @r name interp) -> do
   lookupReify @r name interp
 
-type AlphaNat = RTyVar 0 RNatural
+type NatTv n = RTyVar n RNatural
+type AlphaNat = NatTv 0
 
 type UnaryIntN
   =  AlphaNat
@@ -223,6 +230,71 @@ type FromIntegerIntN
   ~> RInteger
   ~> RIntN AlphaNat
 
+-- | Type alias for the following type:
+--
+-- forall n. KnownNat n => IntN n -> Int -> IntN n
+type ShiftIntN n
+  =  AlphaNat
+  +> RKnownNat AlphaNat
+  ~> RIntN AlphaNat
+  ~> RInt n
+  ~> RIntN AlphaNat
+
+-- | Type alias for the following type:
+--
+-- :: forall l r
+--  . KnownNat l
+-- => KnownNat r
+-- => IntN l
+-- -> IntN r
+-- -> IntN (l + r)
+type ConcatIntN
+  =  NatTv 0
+  +> NatTv 1
+  +> RKnownNat (NatTv 0)
+  ~> RKnownNat (NatTv 1)
+  ~> RIntN (NatTv 0)
+  ~> RIntN (NatTv 1)
+  ~> RIntN (RPlus (NatTv 0) (NatTv 1))
+
+-- | Type alias for the following type:
+--
+-- :: forall l r
+--  . KnownNat l
+-- => KnownNat r
+-- => l <= r
+-- => IntN l
+-- -> IntN r
+type ExtIntN
+  =  NatTv 0
+  +> NatTv 1
+  +> RKnownNat (NatTv 0)
+  ~> RKnownNat (NatTv 1)
+  ~> RLEq (NatTv 0) (NatTv 1)
+  ~> RIntN (NatTv 0)
+  ~> RIntN (NatTv 1)
+
+-- | Type alias for the following type:
+--
+-- :: forall idx width n
+--  . KnownNat idx
+-- => KnownNat width
+-- => KnownNat n
+-- => idx + width <= n
+-- => IntN n
+-- -> IntN width
+type SelIntN
+  =  NatTv 0
+  +>  NatTv 1
+  +>  NatTv 2
+  +> RKnownNat (NatTv 0)
+  ~> RKnownNat (NatTv 1)
+  ~> RKnownNat (NatTv 2)
+  ~> RLEq (RPlus (NatTv 0) (NatTv 1)) (NatTv 2)
+  ~> RIntN (NatTv 2)
+  ~> RIntN (NatTv 1)
+
+-- TODO: Clean up this code! It works for now though...
 reifiedIntN
   :: forall es fs
    . HasCallStack
@@ -245,31 +317,22 @@ reifiedIntN = staticReifyError $ lookupReifyMany
   , binary 'Primitive.orIntN (.|.)
   , binary 'Primitive.xorIntN xor
   , unary 'Primitive.complementIntN complement
-  -- , undefined 'Primitive.shiftLIntN
-  -- , undefined 'Primitive.shiftRIntN
-  -- , undefined 'Primitive.rotateLIntN
-  -- , undefined 'Primitive.rotateRIntN
-  -- , undefined 'Primitive.sizedBVConcatIntN
-  -- , undefined 'Primitive.sizedBVExtZIntN
-  -- , undefined 'Primitive.sizedBVExtSIntN
-  -- , undefined 'Primitive.sizedBVExtIntN
-  -- , undefined 'Primitive.sizedBVSelectIntN
+  , shft 'Primitive.shiftLIntN symShift
+  , shft 'Primitive.shiftRIntN symShiftNegated
+  , shft 'Primitive.rotateLIntN symRotate
+  , shft 'Primitive.rotateRIntN symRotateNegated
+  , conc 'Primitive.sizedBVConcatIntN
+  , ext 'Primitive.sizedBVExtZIntN sizedBVExtZ
+  , ext 'Primitive.sizedBVExtSIntN sizedBVExtS
+  , sel 'Primitive.sizedBVSelectIntN
   ]
   where
     fromI
       :: TH.Name
       -> Interpretation fs
     fromI name = Interpretation @FromIntegerIntN name $ liftF3 \_n c i -> do
-      -- Convert the symbolic KnownNat constraint into a concrete Natural, if
-      -- possible.
-      nat <- c >>= \case
-        Left (SomeBV @n value) -> do
-          concrete <- failWithE () $ toCon @_ @(WordN C n) value
-          pure $ fromIntegral concrete
-        Right _ -> undefined
-
       -- Use the concrete natural for a KnownNat constraint.
-      SomeNat @n _ <- pure $ someNatVal nat
+      SomeNat @n _ <- c >>= concreteKnownNat
       i >>= \case
         Left (SomeBV value) -> pure $ SomeBV @n (sizedBVResize value)
         Right _ -> undefined
@@ -317,6 +380,70 @@ reifiedIntN = staticReifyError $ lookupReifyMany
       SomeBV @m y' <- y
       Refl <- failWithE () $ eqT @n @m
       pure $ op x' y'
+
+    shft
+      :: TH.Name
+      -> (forall n. KnownNat n => IntN S n -> IntN S n -> IntN S n)
+      -> Interpretation fs
+    -- FIXME: Add proper platform size!
+    shft name op = Interpretation @(ShiftIntN 64) name $ liftF4 \_n c x idx -> do
+      _ <- c
+      SomeBV @n x' <- x
+      idx' <- sizedBVResize @_ @_ @n <$> idx
+      pure . SomeBV $ op x' idx'
+
+    conc
+      :: TH.Name
+      -> Interpretation fs
+    conc name = Interpretation @ConcatIntN name $ liftF6 \_l _r cl cr x y -> do
+      _ <- cl
+      _ <- cr
+      SomeBV @l x' <- x
+      SomeBV @r y' <- y
+      let result = sizedBVConcat x' y'
+      -- TODO: I don't particularly like this typeAdd thing. We should see if
+      -- we could clean this up slightly!
+      SomeNat' <- pure $ typeAdd @l @r
+      pure $ SomeBV result
+
+    ext
+      :: TH.Name
+      -> (forall l r. KnownNat l => KnownNat r => l <= r => IntN S l -> IntN S r)
+      -> Interpretation fs
+    ext name op = Interpretation @ExtIntN name $ liftF6 \_l _r cl cr cle x -> do
+      _ <- cl
+      SomeNat @r _ <- cr >>= concreteKnownNat
+      _ <- cle
+      SomeBV @l x' <- x
+      -- TODO: Clean up the dict stuff!
+      Dict <- failWithE () $ leqNat @l @r
+      pure . SomeBV @r $ op x'
+
+    sel
+      :: TH.Name
+      -> Interpretation fs
+    sel name = Interpretation @SelIntN name $ liftF8 \_i _w _n ci cw cn cle x -> do
+      SomeNat @idx _ <- ci >>= concreteKnownNat
+      SomeNat @width _ <- cw >>= concreteKnownNat
+      _ <- cn
+      _ <- cle
+      SomeBV @n x' <- x
+      SomeNat' @sum <- pure $ typeAdd @idx @width
+      Dict <- failWithE () $ leqNat @sum @n
+      pure . SomeBV $ sizedBVSelect @_ @idx @width x'
+
+concreteKnownNat
+  :: () !> es
+  => Either (SomeBV (WordN S)) ()
+  -> Eval es SomeNat
+concreteKnownNat value = do
+  nat <- case value of
+    Left (SomeBV @n value') -> do
+      concrete <- failWithE () $ toCon @_ @(WordN C n) value'
+      pure $ fromIntegral concrete
+    Right _ -> undefined
+
+  pure $ someNatVal nat
 
 -- | Helper function to catch ReifyMismatch for constant interpretations that
 -- should never fail in the first place.

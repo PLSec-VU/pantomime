@@ -1,5 +1,7 @@
 -- TODO: Write a note on why we use marker types instead of the real one.
 {-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE PatternSynonyms #-}
+
 module Pantomime.Primitive.Reify
   -- | Reify typeclasses.
   ( CoreType (..)
@@ -19,6 +21,8 @@ module Pantomime.Primitive.Reify
   , RTypeKind
   , RBoxedRep
   , RLevity
+  , RPlus
+  , RLEq
 
   -- | Pantomime primitives.
   , RIntN
@@ -34,6 +38,7 @@ module Pantomime.Primitive.Reify
   , RNatural
   , RInteger
   , RBool
+  , RInt
 
   -- | Lifting function for ease of use.
   , liftF1'
@@ -43,6 +48,14 @@ module Pantomime.Primitive.Reify
   , liftF3'
   , liftF4
   , liftF4'
+  , liftF5
+  , liftF5'
+  , liftF6
+  , liftF6'
+  , liftF7
+  , liftF7'
+  , liftF8
+  , liftF8'
   ) where
 
 import Pantomime.Expr
@@ -79,7 +92,8 @@ import Pantomime.Grisette.SomeBV (SomeBV (..))
 import Pantomime.Grisette.SizedBV (sizedBVResizeZ)
 import Pantomime.Result (type (!>))
 
-import GHC.TypeNats (KnownNat, Nat, natVal)
+import GHC.TypeNats (type (<=), KnownNat, Nat, natVal)
+import GHC.Builtin.Types.Literals (typeNatAddTyCon)
 import GHC.Builtin.Types.Prim
   ( wordPrimTy
   , intPrimTy
@@ -96,13 +110,17 @@ import GHC.Builtin.Types.Prim
   , alphaTyVars
   )
 import GHC.Data.Pair (Pair(..))
+import GHC.Core.TyCo.Rep (LevityType)
+import GHC.Core.FamInstEnv (normaliseType, emptyFamInstEnvs)
+import GHC.Core.Reduction (Reduction(..))
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Plugins qualified as GHC
 import GHC.Plugins
   ( Name
   , Kind
   , ForAllTyFlag (..)
   , VarBndr (..)
+  , Role (..)
+  , FunTyFlag (..)
   , mkTyConApp
   , mkSymCo
   , mkFunTy
@@ -124,12 +142,17 @@ import GHC.Plugins
   , integerISDataCon
   , integerIPDataCon
   , boolTy
+  , intTy
+  , intTyCon
+  , intDataCon
   , tYPETyCon
   , levityTy
   , boxedRepDataConTyCon
   , splitForAllTyCoVar_maybe
   , liftedTypeKind
   , getTyVar
+  , typeKind
+  , pattern ManyTy
   )
 
 import Language.Haskell.TH qualified as TH
@@ -149,7 +172,6 @@ import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.TyThing
 import Effectful.GHC.TH
-import GHC.Core.TyCo.Rep (LevityType)
 
 -- | Any marker type that represents some type within GHC Core.
 class CoreType a where
@@ -337,13 +359,13 @@ instance (CoreType a, CoreType b) => CoreType (a ~> b) where
   coreType = do
     argTy <- coreType @a
     resTy <- coreType @b
-    pure $ mkFunTy GHC.FTF_T_T GHC.ManyTy argTy resTy
+    pure $ mkFunTy FTF_T_T ManyTy argTy resTy
 
 instance (CoreTypeBuiltin a, CoreTypeBuiltin b) => CoreTypeBuiltin (a ~> b) where
   coreTypeBuiltin = do
     let argTy = coreTypeBuiltin @a
     let resTy = coreTypeBuiltin @b
-    mkFunTy GHC.FTF_T_T GHC.ManyTy argTy resTy
+    mkFunTy FTF_T_T ManyTy argTy resTy
 
 instance (Reify a, Reify b) => Reify (a ~> b) where
   type InterpRep es (a ~> b) = Eval es (InterpRep es a) -> Eval es (InterpRep es b)
@@ -383,12 +405,30 @@ instance CoreType n => Reify (RIntN n) where
   type InterpRep es (RIntN n) = SomeBV (IntN S)
 
   reify ty value = do
-    SomeBV value' <- value
-    pure $ mkLit (mkIntN value' ty)
+    -- Reduction for type-level naturals.
+    let reduction = normaliseType emptyFamInstEnvs Representational ty
 
-  interpret ty value = value >>= \case
-    Lit (Int value' ty') | eqType ty ty' -> pure $ SomeBV value'
-    _ -> throwE ()
+    -- Create the inner type.
+    SomeBV value' <- value
+    let ty' = reductionReducedType reduction
+    let inner =  mkLit $ mkIntN value' ty'
+
+    -- Apply the reduction coercion.
+    let co = mkSymCo $ reductionCoercion reduction
+    mkCast inner co
+
+  interpret ty expr = do
+    -- Reduction for type-level naturals.
+    let reduction = normaliseType emptyFamInstEnvs Representational ty
+
+    -- Apply the reduction coercion.
+    let co = reductionCoercion reduction
+    value <- expr >>= flip mkCast co
+
+    -- After the coercion, the value should be just a literal.
+    case value of
+      Lit (Int value' ty') | eqType ty ty' -> pure $ SomeBV value'
+      _ -> throwE ()
 
 -- | KnownNat constraint reify marker.
 data RKnownNat n
@@ -583,6 +623,36 @@ instance Reify RBool where
     -- Convert the expression into a SymBool, if possible.
     expr >>= exprToBool
 
+-- | Haskell boxed integer marker.
+data RInt (n :: Nat)
+
+instance CoreType (RInt n)
+
+instance CoreTypeBuiltin (RInt n) where
+  coreTypeBuiltin = intTy
+
+instance KnownNat n => Reify (RInt n) where
+  type InterpRep es (RInt n) = IntN S n
+
+  reify _ty expr = do
+    let spine = mkLit $ mkDataCon @n intDataCon
+    let arg = reify @(RHIntPW n) intPrimTy expr
+    mkApp spine arg
+
+  interpret _ty expr = do
+    (spine, args) <- collectArgs <$> expr
+
+    -- Check the spine to be the correct type.
+    case spine of
+      Lit (DataCon _ tc) | tc == intTyCon -> pure ()
+      _ -> throwE ()
+
+    arg <- case args of
+      [arg] -> pure arg
+      _ -> throwE ()
+
+    interpret @(RHIntPW n) intPrimTy arg
+
 -- | Reify marker for Haskell sized integer primitives.
 data RHIntN (n :: Nat)
 
@@ -748,6 +818,60 @@ instance CoreType RLevity
 instance CoreTypeBuiltin RLevity where
   coreTypeBuiltin = levityTy
 
+-- | Reify marker for adding two type-level naturals.
+data RPlus n m
+
+instance (CoreType n, CoreType m) => CoreType (RPlus n m) where
+  coreType = do
+    l <- coreType @n
+    r <- coreType @m
+    pure $ mkTyConApp typeNatAddTyCon [l, r]
+
+instance (CoreTypeBuiltin n, CoreTypeBuiltin m) => CoreTypeBuiltin (RPlus n m) where
+  coreTypeBuiltin = do
+    let l = coreTypeBuiltin @n
+    let r = coreTypeBuiltin @m
+    mkTyConApp typeNatAddTyCon [l, r]
+
+-- | Reify marker less than or equal constraint.
+data RLEq n m
+
+instance (CoreType n, CoreType m) => CoreType (RLEq n m) where
+  coreType = do
+    name <- thNameToGhcName ''(<=)
+    tc <- lookupTyCon name
+    l <- coreType @n
+    r <- coreType @m
+    -- TODO: Isn't there a better way to get the kind? At least one that fails
+    -- slightly more gracefully?
+    let kind = typeKind l
+    pure $ mkTyConApp tc [kind, l, r]
+
+instance (CoreType n, CoreType m) => Reify (RLEq n m) where
+  type InterpRep es (RLEq n m) = Expr es
+
+  -- TODO: This implementation doesn't really do anything. We should make it
+  -- more accurate sometime!
+  reify ty expr = do
+    expr' <- expr
+    ty' <- liftR $ exprType expr'
+
+    -- Ensure the expression has the correct type.
+    unless (eqType ty ty') do
+      throwE ()
+
+    pure expr'
+
+  interpret ty expr = do
+    expr' <- expr
+    ty' <- liftR $ exprType expr'
+
+    -- Ensure the expression has the correct type.
+    unless (eqType ty ty') do
+      throwE ()
+
+    pure expr'
+
 liftF1'
   :: Applicative f
   => (a -> b)
@@ -795,3 +919,75 @@ liftF4'
   => (a -> b -> c -> d -> e)
   -> f (f a -> f (f b -> f (f c -> f (f d -> f e))))
 liftF4' = liftF4 . liftA4
+
+liftA5
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g)
+  -> (f a -> f b -> f c -> f d -> f e -> f g)
+liftA5 f a b c d e = f <$> a <*> b <*> c <*> d <*> e
+
+liftF5
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g)
+  -> f (a -> f (b -> f (c -> f (d -> f (e -> g)))))
+liftF5 f = pure $ liftF4 . f
+
+liftF5'
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g)
+  -> f (f a -> f (f b -> f (f c -> f (f d -> f (f e -> f g)))))
+liftF5' = liftF5 . liftA5
+
+liftA6
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h)
+  -> (f a -> f b -> f c -> f d -> f e -> f g -> f h)
+liftA6 f a b c d e g = f <$> a <*> b <*> c <*> d <*> e <*> g
+
+liftF6
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h)
+  -> f (a -> f (b -> f (c -> f (d -> f (e -> f (g -> h))))))
+liftF6 f = pure $ liftF5 . f
+
+liftF6'
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h)
+  -> f (f a -> f (f b -> f (f c -> f (f d -> f (f e -> f (f g -> f h))))))
+liftF6' = liftF6 . liftA6
+
+liftA7
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h -> i)
+  -> (f a -> f b -> f c -> f d -> f e -> f g -> f h -> f i)
+liftA7 f a b c d e g i = f <$> a <*> b <*> c <*> d <*> e <*> g <*> i
+
+liftF7
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h -> i)
+  -> f (a -> f (b -> f (c -> f (d -> f (e -> f (g -> f (h -> i)))))))
+liftF7 f = pure $ liftF6 . f
+
+liftF7'
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h -> i)
+  -> f (f a -> f (f b -> f (f c -> f (f d -> f (f e -> f (f g -> f (f h -> f i)))))))
+liftF7' = liftF7 . liftA7
+
+liftA8
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h -> i -> j)
+  -> (f a -> f b -> f c -> f d -> f e -> f g -> f h -> f i -> f j)
+liftA8 f a b c d e g i j = f <$> a <*> b <*> c <*> d <*> e <*> g <*> i <*> j
+
+liftF8
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h -> i -> j)
+  -> f (a -> f (b -> f (c -> f (d -> f (e -> f (g -> f (h -> f (i -> j))))))))
+liftF8 f = pure $ liftF7 . f
+
+liftF8'
+  :: Applicative f
+  => (a -> b -> c -> d -> e -> g -> h -> i -> j)
+  -> f (f a -> f (f b -> f (f c -> f (f d -> f (f e -> f (f g -> f (f h -> f (f i -> f j))))))))
+liftF8' = liftF8 . liftA8

@@ -18,6 +18,7 @@ module Pantomime.Dict
   , someTyNat
   , SomeNat' (..)
   , typeSub
+  , typeAdd
   , withSize
   ) where
 
@@ -109,6 +110,15 @@ typeSub = runIdentity $ do
   SomeNat @n _ <- pure . someNatVal $ lhs' - rhs'
   Dict <- pure $ unsafeDict @(lhs - rhs ~ n)
   pure $ SomeNat' @n @(lhs - rhs)
+
+-- | Type-level subtraction.
+typeAdd :: forall lhs rhs. KnownNat lhs => KnownNat rhs => SomeNat' (lhs + rhs)
+typeAdd = runIdentity $ do
+  let lhs' = natVal $ Proxy @lhs
+  let rhs' = natVal $ Proxy @rhs
+  SomeNat @n _ <- pure . someNatVal $ lhs' + rhs'
+  Dict <- pure $ unsafeDict @(lhs + rhs ~ n)
+  pure $ SomeNat' @n @(lhs + rhs)
 
 -- TODO: Move this thing to Pantomime.Grisette.BitVector
 withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
