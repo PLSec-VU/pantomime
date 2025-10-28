@@ -8,18 +8,19 @@ module Pantomime.Axiom
 
 import Language.Haskell.TH qualified as TH
 
+import GHC.Utils.Outputable (Outputable (..), IsDoc (..), hang)
 import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
 import GHC.Core.TyCon.Env (TyConEnv, mkTyConEnv)
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Data.TrieMap (insertTM, TrieMap (..))
+import GHC.Data.TrieMap (TrieMap (..), insertTM)
 import GHC.Plugins
   ( Unfolding (..)
   , InlineSpec (..)
   , TyCon (..)
   , Name
+  , Id
   , CoreExpr
   , CoreProgram
-  , IdEnv
   , Role (..)
   , Expr (..)
   , Var (..)
@@ -33,7 +34,6 @@ import GHC.Plugins
   , hasCoreUnfolding
   , idUnfolding
   , idInlinePragma
-  , mkVarEnv
   )
 
 import GHC.Exts (IsList(..))
@@ -54,11 +54,6 @@ import Effectful.Context
 
 import Pantomime.Unification (resolveInstancesWith)
 import Pantomime.Util (foldM')
-import GHC.Utils.Outputable
-  ( Outputable (..)
-  , IsDoc (..)
-  , hang
-  )
 
 -- | User axioms only visible to the plugin.
 --
@@ -128,7 +123,10 @@ data PluginAxioms where
     -- plugin between the given 'TyCon'. This instance is used within the solver
     -- when constructing fresh symbolic values and when resolving instances
     -- for term-axioms.
-    , termAxioms :: Map TH.Name TH.Name
+    -- TODO: Term axioms should allow for recursive definitions also. It
+    -- probably won't be used much, but it would be good! I guess we would want
+    -- a 'Bind' from GHC, but for template haskell names.
+    , termAxioms :: [(TH.Name, TH.Name)]
     -- ^ Term-level representational equivalence axioms.
     --
     -- Both the key and value of these mappings should be resolvable to 'Id'.
@@ -136,6 +134,10 @@ data PluginAxioms where
     -- axioms via 'typeAxioms'. The types should match exactly between both
     -- 'Id's, with the exception of 'Coercible' instances that may be resolved
     -- using the 'typeAxioms'.
+    --
+    -- Note that this is a list because the ordering of the definitions does
+    -- matter: any later definitions may use ones defined earlier. Duplicate
+    -- definitions are considered an error.
     } -> PluginAxioms
   deriving (Show, Data, Typeable)
 
@@ -156,7 +158,7 @@ data PluginAxiomsR where
   PluginAxiomsR ::
     { typeAxiomsR :: TyConEnv TyCon
     -- ^ Type-level axioms, mainly used to construct symbolic values.
-    , termAxiomsR :: IdEnv CoreExpr
+    , termAxiomsR :: [(Id, CoreExpr)]
     -- ^ Term-level axioms, these already have their 'Coercible' instances
     -- resolved by the type-axioms, where applicable.
     --
@@ -250,9 +252,12 @@ resolvePluginAxioms PluginAxioms { .. } = do
     -- Add both directions of the coercion to the dictionary map.
     insertCo orig interp >=> insertCo interp orig $ dicts
 
+  -- TODO: We should first ensure that termAxioms do not contain duplicate
+  -- definitions.
+
   -- Gather a binder mapping for a substitution. This will use the dictionary
   -- map to supply coercions to any Opaque values that require it.
-  termAxiomsRList <- for (toList termAxioms) \(orig, interp) -> do
+  termAxiomsR <- for termAxioms \(orig, interp) -> do
     -- Resolve the names as identifiers.
     let resolve = thNameToGhcName >=> lookupIdAll
     orig' <- resolve orig
@@ -275,9 +280,20 @@ resolvePluginAxioms PluginAxioms { .. } = do
 
       -- It is fragile to interpret inlineable instances, as they may already
       -- have been optimised away.
-      _ -> throwError_ ()
+      -- FIXME: It seems that the 'noinline' function has a NOINLINE pragma
+      -- but when testing it here, it doesn't. I feel like this test is the
+      -- correct one but it doesn't work in this case. I'll leave it like this
+      -- for now.
+      -- _ -> throwError_ ()
+      _ -> pure expr
 
     -- Check whether the interpretation matches.
+    -- TODO: We should allow types that require less dictionaries. The CoreExpr
+    -- should be adjusted to have them as arguments, but leave them unused.
+    -- Very likely, we can use the unification code we already have. We just
+    -- want to see after unifying and applying all dictionaries from both of
+    -- them, that the type is actually the same as the original. This also
+    -- immediately shapes the expression into the correct form!
     unless (varType orig' `eqType` exprType expr') do
       throwError_ ()
 
@@ -287,5 +303,5 @@ resolvePluginAxioms PluginAxioms { .. } = do
   -- Collect the resolved type and term mappings.
   pure PluginAxiomsR
     { typeAxiomsR = mkTyConEnv typeAxiomsRList
-    , termAxiomsR = mkVarEnv termAxiomsRList
+    , termAxiomsR
     }

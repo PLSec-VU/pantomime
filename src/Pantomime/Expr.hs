@@ -307,9 +307,13 @@ instance EvalSym1 (Eval es) where
 data Variant es where
   UB :: Variant es
   Unreachable :: Variant es
-  -- TODO: Should this not contain an Eval Expr? In any case, we haven't really
-  -- implemented errors yet, so we should just look into this still.
-  Raise :: Expr es -> Variant es
+  -- TODO: Should this not contain an Expr or EvalExpr? In any case, we haven't
+  -- really implemented errors yet, so we should just look into this still.
+  --
+  -- Future reference, we have implemented raise# using the EvalExpr for now.
+  -- I guess we'll have to see if this actually makes sense, but we don't do
+  -- much with errors anyway still.
+  Raise :: EvalExpr es -> Variant es
   deriving Generic
   deriving Mergeable via Default (Variant es)
   deriving EvalSym via Default (Variant es)
@@ -547,7 +551,7 @@ pprEval addParens f = coerce go
       Right union -> flip (pprUnion addParens) (runExceptT union) \p -> \case
         Left UB -> "UB"
         Left Unreachable -> "Unreachable"
-        Left (Raise expr) -> "raise#" <+> pprExpr p expr
+        Left (Raise expr) -> "raise#" <+> pprArg p expr
         Right expr -> f p expr
 
 pprUnion
@@ -790,7 +794,7 @@ mkUnreachable = mkVariant Unreachable
 mkUB :: Eval es a
 mkUB = mkVariant UB
 
-mkRaise :: Expr es -> Eval es a
+mkRaise :: EvalExpr es -> Eval es a
 mkRaise = mkVariant . Raise
 
 -- | Force an expression into a type or coercion.

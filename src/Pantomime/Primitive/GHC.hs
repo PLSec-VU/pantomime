@@ -10,27 +10,17 @@ module Pantomime.Primitive.GHC
   , getTypes
 
   , ReifyMismatch (..)
-  , reifiedIntN
+  , reifiedUnsafeRefl
+  , reifiedBitVector
 
   , thNameToTyCon
   , thNameToId
-
-  -- , Operation
-  -- , NumOps (..)
-
-  -- , IntNOps (..)
-  -- , getIntNOps
-
-  -- , IntegerOps (..)
-  -- , getIntegerOps
-
-  -- , Operations (..)
-  -- , getOperations
   ) where
 
 import Language.Haskell.TH qualified as TH
 
 import GHC.Tc.Utils.TcType (eqType)
+import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
 import GHC.Plugins
   ( TyCon
   , Name
@@ -43,33 +33,59 @@ import GHC.Plugins
   , Type
   , InlinePragma (..)
   , InlineSpec (..)
+  , Role (..)
   , varType
   , prettyCallStackDoc
   , callStackDoc
   , idInlinePragma
+  , mkUnivCo
   )
 
 import Pantomime.Expr (Eval, EvalExpr, failWithE)
 import Pantomime.Grisette.SomeBV (SomeBV(..))
-import Pantomime.Grisette.SizedBV (SizedBV (..), sizedBVResize)
-import Pantomime.Grisette.BitVector (IntN, WordN)
+import Pantomime.Grisette.SizedBV
+  ( SizedBV (..)
+  , sizedBVResize
+  , sizedBVResizeZ
+  , sizedBVResizeS
+  )
+import Pantomime.Grisette.BitVector (WordN, IntN)
 import Pantomime.Primitive.Operation qualified as Primitive
+import Pantomime.Primitive.BitVector qualified as BitVector
+import Pantomime.Primitive.BitVector (BitVector)
 import Pantomime.Primitive.Reify
 import Pantomime.Result (type (!>))
-import Pantomime.Dict (typeAdd, SomeNat' (..), Dict (..), leqNat)
+import Pantomime.Dict
+  ( SomeNat' (..)
+  , Dict (..)
+  , leqNat
+  , typeAdd
+  , typeSub
+  , unsafeDict
+  )
 
 import Data.Bits (Bits(..))
-import Data.Typeable (type (:~:) (..), eqT)
+import Data.Typeable (type (:~:) (..), eqT, Proxy (..))
 
 import Control.Monad (unless, (>=>))
 
-import GHC.TypeNats (type (<=), KnownNat, SomeNat (..), someNatVal)
+import Unsafe.Coerce (unsafeEqualityProof)
+
+import GHC.TypeNats
+  ( type (+)
+  , type (<=)
+  , KnownNat
+  , SomeNat (..)
+  , someNatVal
+  , natVal
+  )
 
 import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.TH
 import Effectful.GHC.TyThing
 import Effectful.Exception (throwIO)
+import Effectful.GHC.External
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -79,6 +95,7 @@ import Grisette
   , ToCon (..)
   , SymShift (..)
   , SymRotate (..)
+  , BitCast (..)
   )
 
 thNameToTyCon
@@ -107,7 +124,7 @@ thNameToId th = do
 
 data Types where
   Types ::
-    { tcIntN :: TyCon
+    { tcBitVector :: TyCon
     , tcInteger :: TyCon
     } -> Types
 
@@ -119,7 +136,7 @@ getTypes
   => THNameToGHCName :> es
   => Eff es Types
 getTypes = do
-  tcIntN <- thNameToTyCon ''Primitive.IntN
+  tcBitVector <- thNameToTyCon ''BitVector
   tcInteger <- thNameToTyCon ''Primitive.Integer
   pure Types { .. }
 
@@ -153,6 +170,7 @@ lookupReify
   => Error ReifyMismatch :> es
   => HasThings :> es
   => THNameToGHCName :> es
+  => HasFamInstEnvs :> es
   => () !> fs
   => Reify a
   => TH.Name
@@ -176,8 +194,9 @@ lookupReify name interp = do
   unless (eqType ty $ varType var) do
     throwError_ $ ReifyMismatch var ty
 
+  fam <- getFamInstEnvs
   -- Get the expression reified from the intepretation.
-  let expr = reify @a ty interp
+  let expr = reify @a fam ty interp
   pure (var, expr)
 
 lookupReifyMany
@@ -188,6 +207,7 @@ lookupReifyMany
   => Error ReifyMismatch :> es
   => HasThings :> es
   => THNameToGHCName :> es
+  => HasFamInstEnvs :> es
   => () !> fs
   => Traversable f
   => f (Interpretation fs)
@@ -195,154 +215,207 @@ lookupReifyMany
 lookupReifyMany = traverse \(Interpretation @r name interp) -> do
   lookupReify @r name interp
 
-type NatTv n = RTyVar n RNatural
-type AlphaNat = NatTv 0
+type UnsafeEqProof
+  =  RTyVar_ 0
+  +> RTyVar 1 (RTyVar_ 0)
+  +> RTyVar 2 (RTyVar_ 0)
+  +> RUnsafeEquality (RTyVar_ 0) (RTyVar 1 (RTyVar_ 0)) (RTyVar 2 (RTyVar_ 0 ))
 
-type UnaryIntN
-  =  AlphaNat
-  +> RKnownNat AlphaNat
-  ~> RIntN AlphaNat
-  ~> RIntN AlphaNat
-
-type BinaryIntN
-  =  AlphaNat
-  +> RKnownNat AlphaNat
-  ~> RIntN AlphaNat
-  ~> RIntN AlphaNat
-  ~> RIntN AlphaNat
-
-type EqIntN
-  =  AlphaNat
-  +> RIntN AlphaNat
-  ~> RIntN AlphaNat
-  ~> RBool
-
-type CmpIntN
-  =  AlphaNat
-  +> RKnownNat AlphaNat
-  ~> RIntN AlphaNat
-  ~> RIntN AlphaNat
-  ~> RBool
-
-type FromIntegerIntN
-  =  AlphaNat
-  +> RKnownNat AlphaNat
-  ~> RInteger
-  ~> RIntN AlphaNat
-
--- | Type alias for the following type:
---
--- forall n. KnownNat n => IntN n -> Int -> IntN n
-type ShiftIntN n
-  =  AlphaNat
-  +> RKnownNat AlphaNat
-  ~> RIntN AlphaNat
-  ~> RInt n
-  ~> RIntN AlphaNat
-
--- | Type alias for the following type:
---
--- :: forall l r
---  . KnownNat l
--- => KnownNat r
--- => IntN l
--- -> IntN r
--- -> IntN (l + r)
-type ConcatIntN
-  =  NatTv 0
-  +> NatTv 1
-  +> RKnownNat (NatTv 0)
-  ~> RKnownNat (NatTv 1)
-  ~> RIntN (NatTv 0)
-  ~> RIntN (NatTv 1)
-  ~> RIntN (RPlus (NatTv 0) (NatTv 1))
-
--- | Type alias for the following type:
---
--- :: forall l r
---  . KnownNat l
--- => KnownNat r
--- => l <= r
--- => IntN l
--- -> IntN r
-type ExtIntN
-  =  NatTv 0
-  +> NatTv 1
-  +> RKnownNat (NatTv 0)
-  ~> RKnownNat (NatTv 1)
-  ~> RLEq (NatTv 0) (NatTv 1)
-  ~> RIntN (NatTv 0)
-  ~> RIntN (NatTv 1)
-
--- | Type alias for the following type:
---
--- :: forall idx width n
---  . KnownNat idx
--- => KnownNat width
--- => KnownNat n
--- => idx + width <= n
--- => IntN n
--- -> IntN width
-type SelIntN
-  =  NatTv 0
-  +>  NatTv 1
-  +>  NatTv 2
-  +> RKnownNat (NatTv 0)
-  ~> RKnownNat (NatTv 1)
-  ~> RKnownNat (NatTv 2)
-  ~> RLEq (RPlus (NatTv 0) (NatTv 1)) (NatTv 2)
-  ~> RIntN (NatTv 2)
-  ~> RIntN (NatTv 1)
-
--- TODO: Clean up this code! It works for now though...
-reifiedIntN
+reifiedUnsafeRefl
   :: forall es fs
    . HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
+  => HasFamInstEnvs :> es
+  => () !> fs
+  => Eff es (Var, EvalExpr fs)
+reifiedUnsafeRefl = staticReifyError do
+  lookupReify @UnsafeEqProof 'unsafeEqualityProof $ liftF3 \_k tyL tyR -> do
+    let prov = PluginProv "pantomime reified 'unsafeEqualityProof'"
+    pure $ mkUnivCo prov Nominal tyR tyL
+
+type NatTv n = RTyVar n RNatural
+
+type AlphaNat = NatTv 0
+
+type WithNatBitVector
+  =  NatTv 0
+  +> RTyVar_ 1
+  +> RBitVector (NatTv 0)
+  ~> (RKnownNat (NatTv 0) ~> RTyVar_ 1)
+  ~> RTyVar_ 1
+
+type FromIntegerBitVector
+  =  AlphaNat
+  +> RKnownNat AlphaNat
+  ~> RInteger
+  ~> RBitVector AlphaNat
+
+type ToIntegerBitVector
+  =  AlphaNat
+  +> RBitVector AlphaNat
+  ~> RInteger
+
+type UnaryBitVector
+  =  AlphaNat
+  +> RBitVector AlphaNat
+  ~> RBitVector AlphaNat
+
+type BinaryBitVector
+  =  AlphaNat
+  +> RBitVector AlphaNat
+  ~> RBitVector AlphaNat
+  ~> RBitVector AlphaNat
+
+type CmpBitVector
+  =  AlphaNat
+  +> RBitVector AlphaNat
+  ~> RBitVector AlphaNat
+  ~> RBool
+
+type ShiftBitVector n
+  =  AlphaNat
+  +> RBitVector AlphaNat
+  ~> RInt n
+  ~> RBitVector AlphaNat
+
+type ConcatBitVector
+  =  NatTv 0
+  +> NatTv 1
+  +> RBitVector (NatTv 0)
+  ~> RBitVector (NatTv 1)
+  ~> RBitVector (RAdd (NatTv 0) (NatTv 1))
+
+type ExtBitVector
+  =  NatTv 0
+  +> NatTv 1
+  +> RKnownNat (NatTv 1)
+  ~> RLEq (NatTv 0) (NatTv 1)
+  ~> RBitVector (NatTv 0)
+  ~> RBitVector (NatTv 1)
+
+type SelBitVector
+  =  NatTv 0
+  +> NatTv 1
+  +> NatTv 2
+  +> RKnownNat (NatTv 0)
+  ~> RKnownNat (NatTv 1)
+  ~> RLEq (RAdd (NatTv 0) (NatTv 1)) (NatTv 2)
+  ~> RBitVector (NatTv 2)
+  ~> RBitVector (NatTv 1)
+
+-- :: forall upper top idx
+--  . KnownNat upper
+-- => KnownNat idx
+-- => BitVector (upper + 1 + top)
+-- -> BitVector (upper + 1 - idx)
+type SlcBitVector
+  =  NatTv 0
+  +> NatTv 1
+  +> NatTv 2
+  +> RKnownNat (NatTv 0)
+  ~> RKnownNat (NatTv 2)
+  ~> RBitVector (RAdd (RAdd (NatTv 0) (RTyNat 1)) (NatTv 1))
+  ~> RBitVector (RSub (RAdd (NatTv 0) (RTyNat 1)) (NatTv 2))
+
+type ResBitVector
+  =  NatTv 0
+  +> NatTv 1
+  +> RKnownNat (NatTv 1)
+  ~> RBitVector (NatTv 0)
+  ~> RBitVector (NatTv 1)
+
+-- TODO: Clean up this code! It works for now though...
+reifiedBitVector
+  :: forall es fs
+   . HasCallStack
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => HasThings :> es
+  => HasFamInstEnvs :> es
+  => THNameToGHCName :> es
   => () !> fs
   => Eff es [(Var, EvalExpr fs)]
-reifiedIntN = staticReifyError $ lookupReifyMany
-  [ binary 'Primitive.plusIntN (+)
-  , binary 'Primitive.timesIntN (*)
-  , unary 'Primitive.absIntN abs
-  , unary 'Primitive.signumIntN signum
-  , unary 'Primitive.negateIntN negate
-  , fromI 'Primitive.fromIntegerIntN
-  , eq 'Primitive.eqIntN (.==)
-  , cmp 'Primitive.leIntN (.<=)
-  , binary 'Primitive.andIntN (.&.)
-  , binary 'Primitive.orIntN (.|.)
-  , binary 'Primitive.xorIntN xor
-  , unary 'Primitive.complementIntN complement
-  , shft 'Primitive.shiftLIntN symShift
-  , shft 'Primitive.shiftRIntN symShiftNegated
-  , shft 'Primitive.rotateLIntN symRotate
-  , shft 'Primitive.rotateRIntN symRotateNegated
-  , conc 'Primitive.sizedBVConcatIntN
-  , ext 'Primitive.sizedBVExtZIntN sizedBVExtZ
-  , ext 'Primitive.sizedBVExtSIntN sizedBVExtS
-  , sel 'Primitive.sizedBVSelectIntN
+reifiedBitVector = staticReifyError $ lookupReifyMany
+  [ binary 'BitVector.add (+)
+  , binary 'BitVector.mul (*)
+  , unary 'BitVector.abs abs
+  , unary 'BitVector.signum signum
+  , unary 'BitVector.negate negate
+  , fromI 'BitVector.fromInteger
+  , toI 'BitVector.toInteger
+  , cmp 'BitVector.eq (.==)
+  , cmp 'BitVector.leZ (.<=)
+  , cmp 'BitVector.leS leS
+  , binary 'BitVector.and (.&.)
+  , binary 'BitVector.or (.|.)
+  , binary 'BitVector.xor xor
+  , unary 'BitVector.complement complement
+  , shft 'BitVector.shiftL symShift
+  , shft 'BitVector.shiftRL symShiftNegated
+  -- TODO: Add arithmetic shift!
+  , shft 'BitVector.shiftRA undefined
+  , shft 'BitVector.rotateL symRotate
+  , shft 'BitVector.rotateRL symRotateNegated
+  -- TODO: Add arithmetic rotate!
+  , shft 'BitVector.rotateRA undefined
+  , conc 'BitVector.concat
+  , ext 'BitVector.extendZ sizedBVExtZ
+  , ext 'BitVector.extendS sizedBVExtS
+  , sel 'BitVector.select
+  , res 'BitVector.resizeZ sizedBVResizeZ
+  , res 'BitVector.resizeS sizedBVResizeS
+  , withN 'BitVector.withNat
+
+  -- TODO: I want to nuke this one at some point!
+  , slc 'BitVector.stupidSlice
   ]
   where
+    leS :: forall n. KnownNat n => WordN S n -> WordN S n -> SymBool
+    leS x y = bitCast @_ @(IntN S n) x .<= bitCast y
+
+    withN
+      :: TH.Name
+      -> Interpretation fs
+    withN name = Interpretation @WithNatBitVector name $ liftF4 \_n _a x f -> do
+      f' <- f
+      let x' = (\(SomeBV @n _) -> symbolicKnownNat @n) <$> x
+      f' x'
+
     fromI
       :: TH.Name
       -> Interpretation fs
-    fromI name = Interpretation @FromIntegerIntN name $ liftF3 \_n c i -> do
+    fromI name = Interpretation @FromIntegerBitVector name $ liftF3 \_n c i -> do
       -- Use the concrete natural for a KnownNat constraint.
       SomeNat @n _ <- c >>= concreteKnownNat
       i >>= \case
-        Left (SomeBV value) -> pure $ SomeBV @n (sizedBVResize value)
+        Left (SomeBV @m value) -> pure . SomeBV . sizedBVResize @_ @m @n $ bitCast value
         Right _ -> undefined
+
+    toI
+      :: TH.Name
+      -> Interpretation fs
+    toI name = Interpretation @ToIntegerBitVector name $ liftF2 \_n x -> do
+      -- Use the concrete natural for a KnownNat constraint.
+      -- SomeNat @n _ <- c >>= concreteKnownNat
+      SomeBV x' <- x
+      -- FIXME: Use proper platform size!
+      -- FIXME: We should convert to a big integer when out of bounds!
+      pure . Left . SomeBV @64 . bitCast . sizedBVResize @_ @_ @64 $ x'
+      -- case leqNat @n @64 of
+      --   Just Dict -> pure . Left . SomeBV . sizedBVResize @_ @n @64 $ x'
+      --   Nothing -> undefined
+      -- i >>= \case
+      --   Left (SomeBV @m value) -> pure . SomeBV . sizedBVResize @_ @m @n $ bitCast value
+      --   Right _ -> undefined
 
     binary
       :: TH.Name
-      -> (forall n. KnownNat n => IntN S n -> IntN S n -> IntN S n)
+      -> (forall n. KnownNat n => WordN S n -> WordN S n -> WordN S n)
       -> Interpretation fs
-    binary name op = Interpretation @BinaryIntN name $ liftF4 \_n c x y -> do
-      _ <- c
+    binary name op = Interpretation @BinaryBitVector name $ liftF3 \_n x y -> do
       -- TODO: Should we check that the KnownNat is indeed equal to the size of
       -- the bitvector? If yes, we should do this for all other operations as
       -- well!
@@ -353,29 +426,17 @@ reifiedIntN = staticReifyError $ lookupReifyMany
 
     unary
       :: TH.Name
-      -> (forall n. KnownNat n => IntN S n -> IntN S n)
+      -> (forall n. KnownNat n => WordN S n -> WordN S n)
       -> Interpretation fs
-    unary name op = Interpretation @UnaryIntN name $ liftF3 \_n c x -> do
-      _ <- c
+    unary name op = Interpretation @UnaryBitVector name $ liftF2 \_n x -> do
       SomeBV x' <- x
       pure . SomeBV $ op x'
 
-    eq
-      :: TH.Name
-      -> (forall n. KnownNat n => IntN S n -> IntN S n -> SymBool)
-      -> Interpretation fs
-    eq name op = Interpretation @EqIntN name $ liftF3 \_n x y -> do
-      SomeBV @n x' <- x
-      SomeBV @m y' <- y
-      Refl <- failWithE () $ eqT @n @m
-      pure $ op x' y'
-
     cmp
       :: TH.Name
-      -> (forall n. KnownNat n => IntN S n -> IntN S n -> SymBool)
+      -> (forall n. KnownNat n => WordN S n -> WordN S n -> SymBool)
       -> Interpretation fs
-    cmp name op = Interpretation @CmpIntN name $ liftF4 \_n c x y -> do
-      _ <- c
+    cmp name op = Interpretation @CmpBitVector name $ liftF3 \_n x y -> do
       SomeBV @n x' <- x
       SomeBV @m y' <- y
       Refl <- failWithE () $ eqT @n @m
@@ -383,21 +444,18 @@ reifiedIntN = staticReifyError $ lookupReifyMany
 
     shft
       :: TH.Name
-      -> (forall n. KnownNat n => IntN S n -> IntN S n -> IntN S n)
+      -> (forall n. KnownNat n => WordN S n -> WordN S n -> WordN S n)
       -> Interpretation fs
     -- FIXME: Add proper platform size!
-    shft name op = Interpretation @(ShiftIntN 64) name $ liftF4 \_n c x idx -> do
-      _ <- c
+    shft name op = Interpretation @(ShiftBitVector 64) name $ liftF3 \_n x idx -> do
       SomeBV @n x' <- x
-      idx' <- sizedBVResize @_ @_ @n <$> idx
+      idx' <- bitCast . sizedBVResize @_ @_ @n <$> idx
       pure . SomeBV $ op x' idx'
 
     conc
       :: TH.Name
       -> Interpretation fs
-    conc name = Interpretation @ConcatIntN name $ liftF6 \_l _r cl cr x y -> do
-      _ <- cl
-      _ <- cr
+    conc name = Interpretation @ConcatBitVector name $ liftF4 \_l _r x y -> do
       SomeBV @l x' <- x
       SomeBV @r y' <- y
       let result = sizedBVConcat x' y'
@@ -408,10 +466,9 @@ reifiedIntN = staticReifyError $ lookupReifyMany
 
     ext
       :: TH.Name
-      -> (forall l r. KnownNat l => KnownNat r => l <= r => IntN S l -> IntN S r)
+      -> (forall l r. KnownNat l => KnownNat r => l <= r => WordN S l -> WordN S r)
       -> Interpretation fs
-    ext name op = Interpretation @ExtIntN name $ liftF6 \_l _r cl cr cle x -> do
-      _ <- cl
+    ext name op = Interpretation @ExtBitVector name $ liftF5 \_l _r cr cle x -> do
       SomeNat @r _ <- cr >>= concreteKnownNat
       _ <- cle
       SomeBV @l x' <- x
@@ -422,14 +479,39 @@ reifiedIntN = staticReifyError $ lookupReifyMany
     sel
       :: TH.Name
       -> Interpretation fs
-    sel name = Interpretation @SelIntN name $ liftF8 \_i _w _n ci cw cn cle x -> do
+    sel name = Interpretation @SelBitVector name $ liftF7 \_i _w _n ci cw cle x -> do
       SomeNat @idx _ <- ci >>= concreteKnownNat
       SomeNat @width _ <- cw >>= concreteKnownNat
-      _ <- cn
       _ <- cle
       SomeBV @n x' <- x
       SomeNat' @sum <- pure $ typeAdd @idx @width
       Dict <- failWithE () $ leqNat @sum @n
+      pure . SomeBV $ sizedBVSelect @_ @idx @width x'
+
+    res
+      :: TH.Name
+      -> (forall l r. KnownNat l => KnownNat r => WordN S l -> WordN S r)
+      -> Interpretation fs
+    res name op = Interpretation @ResBitVector name $ liftF4 \_l _r cr x -> do
+      SomeNat @r _ <- cr >>= concreteKnownNat
+      SomeBV x' <- x
+      pure . SomeBV @r $ op x'
+
+    slc
+      :: TH.Name
+      -> Interpretation fs
+    slc name = Interpretation @SlcBitVector name $ liftF6 \_u _t _i cu ci x -> do
+      SomeNat @upper _ <- cu >>= concreteKnownNat
+      SomeNat @idx _ <- ci >>= concreteKnownNat
+
+      SomeNat' @upper1 <- pure $ typeAdd @upper @1
+      SomeNat' @width <- pure $ typeSub @upper1 @idx
+
+      SomeBV @n x' <- x
+
+      -- Is this actually true?
+      Dict <- pure $ unsafeDict @(idx + width <= n)
+
       pure . SomeBV $ sizedBVSelect @_ @idx @width x'
 
 concreteKnownNat
@@ -444,6 +526,19 @@ concreteKnownNat value = do
     Right _ -> undefined
 
   pure $ someNatVal nat
+
+symbolicKnownNat
+  :: forall n
+   . KnownNat n
+  => Either (SomeBV (WordN S)) ()
+symbolicKnownNat = do
+  let value = natVal @n Proxy
+  -- FIXME: Add in proper platform size!
+  let upper = fromIntegral $ maxBound @(WordN C 64)
+  if
+    -- FIXME: Add in proper platform size!
+    | value < upper -> Left . SomeBV @64 $ fromIntegral value
+    | otherwise -> undefined
 
 -- | Helper function to catch ReifyMismatch for constant interpretations that
 -- should never fail in the first place.
@@ -460,120 +555,3 @@ staticReifyError = runError >=> \case
     , prettyCallStackDoc cs
     , callStackDoc
     ]
-
--- data Operation where
---   Operation
---     :: Typeable a
---     => Var
---     -> TypeInfo a
---     -> Operation
-
--- getOperation
---   :: forall a es
---    . HasCallStack
---   => Typeable a
---   => Reify a
---   => Error (LookupError TH.Name) :> es
---   => Error (LookupError Name) :> es
---   => Error ReifyMismatch :> es
---   => HasThings :> es
---   => THNameToGHCName :> es
---   => TH.Name
---   -> Eff es Operation
--- getOperation name = do
---   -- Lookup the identifier.
---   var <- thNameToId name
-
---   -- Lookup the type info for reification.
---   info <- typeInfo @a
-
---   -- Ensure that the interpretation has a proper reified type.
---   let reifyTy = reifiedTy info
---   unless (eqType reifyTy $ varType var) do
---     throwError_ $ ReifyMismatch var reifyTy
-
---   pure $ Operation var info
-
--- data NumOps where
---   NumOps ::
---     { opAdd :: Operation
---     , opMul :: Operation
---     , opAbs :: Operation
---     , opSignum :: Operation
---     , opNegate :: Operation
---     , opFromInteger :: Operation
---     } -> NumOps
-
--- data IntNOps where
---   IntNOps ::
---     { numIntN :: NumOps
---     } -> IntNOps
-
--- type FromIntegerIntN
---   =  AlphaNat
---   +> RKnownNat AlphaNat
---   ~> RInteger
---   ~> RIntN AlphaNat
-
--- getIntNOps
---   :: HasCallStack
---   => Error (LookupError TH.Name) :> es
---   => Error (LookupError Name) :> es
---   => Error ReifyMismatch :> es
---   => HasThings :> es
---   => THNameToGHCName :> es
---   => Eff es IntNOps
--- getIntNOps = do
---   opAdd <- getOperation @BinaryIntN 'Primitive.plusIntN
---   opMul <- getOperation @BinaryIntN 'Primitive.timesIntN
---   opAbs <- getOperation @UnaryIntN 'Primitive.absIntN
---   opSignum <- getOperation @UnaryIntN 'Primitive.signumIntN
---   opNegate <- getOperation @UnaryIntN 'Primitive.negateIntN
---   opFromInteger <- getOperation @FromIntegerIntN 'Primitive.fromIntegerIntN
-
---   let numIntN = NumOps { .. }
-
---   pure IntNOps { .. }
-
--- data IntegerOps where
---   IntegerOps ::
---     { numInteger :: NumOps
---     } -> IntegerOps
-
--- getIntegerOps
---   :: HasCallStack
---   => Error (LookupError TH.Name) :> es
---   => Error (LookupError Name) :> es
---   => HasThings :> es
---   => THNameToGHCName :> es
---   => Eff es IntegerOps
--- getIntegerOps = do
---   opAdd <- getOperation 'Primitive.plusInteger
---   opMul <- thNameToId 'Primitive.timesInteger
---   opAbs <- thNameToId 'Primitive.absInteger
---   opSignum <- thNameToId 'Primitive.signumInteger
---   opNegate <- thNameToId 'Primitive.negateInteger
---   opFromInteger <- thNameToId 'Primitive.fromIntegerInteger
-
---   let numInteger = NumOps { .. }
-
---   pure IntegerOps { .. }
-
--- data Operations where
---   Operations ::
---     { opsIntN :: IntNOps
---     -- , opsInteger :: IntegerOps
---     } -> Operations
-
--- getOperations
---   :: HasCallStack
---   => Error (LookupError TH.Name) :> es
---   => Error (LookupError Name) :> es
---   => Error ReifyMismatch :> es
---   => HasThings :> es
---   => THNameToGHCName :> es
---   => Eff es Operations
--- getOperations = do
---   opsIntN <- getIntNOps
---   -- opsInteger <- getIntegerOps
---   pure Operations { .. }

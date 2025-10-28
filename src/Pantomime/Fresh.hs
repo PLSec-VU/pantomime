@@ -212,16 +212,16 @@ freshExpr FreshInstEnv { .. } root = go Variable
           let value = mkInteger symbolic ty
           pure $ mkLit value
 
-        -- IntN:
+        -- BitVector:
         | Just (tc, [narg]) <- splitTyConApp_maybe ty
-        , tc == Primitive.tcIntN fiePrim
+        , tc == Primitive.tcBitVector fiePrim
         , let Reduction nco nty = normaliseType fieFam Nominal narg
         , Just (SomeNat @n _) <- isNumLitTy nty >>= someNatVal -> do
           -- Coercion on the entire value for the type-level natural.
           let co = mkTyConAppCo Representational tc [mkSymCo nco]
 
           -- Construct the inner value and cast it.
-          let inner = mkLit $ mkIntN @n symbolic (coercionLKind co)
+          let inner = mkLit $ mkWordN @n symbolic (coercionLKind co)
           mkCast inner co
 
         -- TODO: Add remaining primitives

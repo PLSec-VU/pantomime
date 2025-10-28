@@ -18,14 +18,20 @@ module Pantomime.Primitive.Reify
 
   -- | Kinds for type variables.
   , RTyVar_
+  , RTYPE
+  , RRuntimeRep
   , RTypeKind
   , RBoxedRep
   , RLevity
-  , RPlus
+
+  -- | Type natural families and literals.
+  , RTyNat
+  , RAdd
+  , RSub
   , RLEq
 
   -- | Pantomime primitives.
-  , RIntN
+  , RBitVector
 
   -- | Haskell primitives.
   , RHIntN
@@ -39,6 +45,7 @@ module Pantomime.Primitive.Reify
   , RInteger
   , RBool
   , RInt
+  , RUnsafeEquality
 
   -- | Lifting function for ease of use.
   , liftF1'
@@ -72,8 +79,11 @@ import Pantomime.Expr
   , mkEnumCon
   , mkWordN
   , mkCast
+  , mkApps
+  , mkCoercion
   , collectArgs
   , forceTy
+  , forceCo
   , exprToBool
   , concreteDataCon
   , exprType
@@ -86,14 +96,14 @@ import Pantomime.Subst
   , substTy
   , mkEmptySubst
   )
-import Pantomime.Primitive.Operation qualified as Primitive
+import Pantomime.Primitive.BitVector (BitVector)
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Grisette.SomeBV (SomeBV (..))
 import Pantomime.Grisette.SizedBV (sizedBVResizeZ)
 import Pantomime.Result (type (!>))
 
 import GHC.TypeNats (type (<=), KnownNat, Nat, natVal)
-import GHC.Builtin.Types.Literals (typeNatAddTyCon)
+import GHC.Builtin.Types.Literals (typeNatAddTyCon, typeNatSubTyCon)
 import GHC.Builtin.Types.Prim
   ( wordPrimTy
   , intPrimTy
@@ -111,7 +121,7 @@ import GHC.Builtin.Types.Prim
   )
 import GHC.Data.Pair (Pair(..))
 import GHC.Core.TyCo.Rep (LevityType)
-import GHC.Core.FamInstEnv (normaliseType, emptyFamInstEnvs)
+import GHC.Core.FamInstEnv (FamInstEnvs, normaliseType)
 import GHC.Core.Reduction (Reduction(..))
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Plugins
@@ -119,6 +129,7 @@ import GHC.Plugins
   , Kind
   , ForAllTyFlag (..)
   , VarBndr (..)
+  , CoercionN
   , Role (..)
   , FunTyFlag (..)
   , mkTyConApp
@@ -126,11 +137,16 @@ import GHC.Plugins
   , mkFunTy
   , mkTyVarTy
   , mkForAllTy
+  , mkNumLitTy
   , setTyVarKind
   , splitForAllCoVar_maybe
   , splitFunTy_maybe
   , splitTyConApp_maybe
-  , instNewTyCon_maybe
+  , tyConDataCons_maybe
+  , coercionLKind
+  , coercionRKind
+  , coercionRole
+  , topNormaliseNewType_maybe
   , coercionKind
   , naturalTy
   , naturalTyCon
@@ -147,6 +163,7 @@ import GHC.Plugins
   , intDataCon
   , tYPETyCon
   , levityTy
+  , runtimeRepTy
   , boxedRepDataConTyCon
   , splitForAllTyCoVar_maybe
   , liftedTypeKind
@@ -172,6 +189,7 @@ import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.TyThing
 import Effectful.GHC.TH
+import Unsafe.Coerce (UnsafeEquality)
 
 -- | Any marker type that represents some type within GHC Core.
 class CoreType a where
@@ -212,14 +230,16 @@ class CoreType a => Reify a where
   reify
     :: HasCallStack
     => () !> es
-    => Type
+    => FamInstEnvs
+    -> Type
     -> Eval es (InterpRep es a)
     -> Eval es (Expr es)
 
   interpret
     :: HasCallStack
     => () !> es
-    => Type
+    => FamInstEnvs
+    -> Type
     -> Eval es (Expr es)
     -> Eval es (InterpRep es a)
 
@@ -229,21 +249,23 @@ builtinReify
   :: forall a es
    . () !> es
   => ReifyBuiltin a
-  => Eval es (InterpRep es a)
+  => FamInstEnvs
+  -> Eval es (InterpRep es a)
   -> Eval es (Expr es)
-builtinReify expr = do
+builtinReify fam expr = do
   let ty = coreTypeBuiltin @a
-  reify @a ty expr
+  reify @a fam ty expr
 
 builtinInterpret
   :: forall a es
    . () !> es
   => ReifyBuiltin a
-  => Eval es (Expr es)
+  => FamInstEnvs
+  -> Eval es (Expr es)
   -> Eval es (InterpRep es a)
-builtinInterpret expr = do
+builtinInterpret fam expr = do
   let ty = coreTypeBuiltin @a
-  interpret @a ty expr
+  interpret @a fam ty expr
 
 -- | Reify marker for type variables.
 --
@@ -276,7 +298,7 @@ instance (KnownNat n, CoreTypeBuiltin k) => CoreTypeBuiltin (RTyVar n k) where
 instance (KnownNat n, CoreType k) => Reify (RTyVar n k) where
   type InterpRep es (RTyVar n k) = Expr es
 
-  reify ty expr = do
+  reify _ ty expr = do
     expr' <- expr
     ty' <- liftR $ exprType expr'
 
@@ -286,7 +308,7 @@ instance (KnownNat n, CoreType k) => Reify (RTyVar n k) where
 
     pure expr'
 
-  interpret ty expr = do
+  interpret _ ty expr = do
     expr' <- expr
     ty' <- liftR $ exprType expr'
 
@@ -325,7 +347,7 @@ instance
 instance (KnownNat n, CoreType k, Reify b) => Reify (RTyVar n k +> b) where
   type InterpRep es (RTyVar n k +> b) = Type -> Eval es (InterpRep es b)
 
-  reify ty fun = do
+  reify fam ty fun = do
     (tvar, tbody) <- failWithE () $ splitForAllTyCoVar_maybe ty
     pure $ mkLam ty \arg -> do
       -- Get the type of the body.
@@ -336,9 +358,9 @@ instance (KnownNat n, CoreType k, Reify b) => Reify (RTyVar n k +> b) where
       fun' <- fun
       arg' <- liftR $ forceTy arg
 
-      reify @b tbody' $ fun' arg'
+      reify @b fam tbody' $ fun' arg'
 
-  interpret ty fun = do
+  interpret fam ty fun = do
     (tvar, tbody) <- failWithE () $ splitForAllCoVar_maybe ty
     pure \arg -> do
       -- Compute the actual function.
@@ -349,7 +371,7 @@ instance (KnownNat n, CoreType k, Reify b) => Reify (RTyVar n k +> b) where
       subst <- liftR $ extendSubst mkEmptySubst tvar arg'
       let tbody' = substTy subst tbody
 
-      interpret @b tbody' $ mkApp fun' arg'
+      interpret @b fam tbody' $ mkApp fun' arg'
 
 -- | Function arrow reify marker.
 data a ~> b
@@ -370,56 +392,61 @@ instance (CoreTypeBuiltin a, CoreTypeBuiltin b) => CoreTypeBuiltin (a ~> b) wher
 instance (Reify a, Reify b) => Reify (a ~> b) where
   type InterpRep es (a ~> b) = Eval es (InterpRep es a) -> Eval es (InterpRep es b)
 
-  reify ty fun = do
+  reify fam ty fun = do
     (_flag, _mult, argTy, resTy) <- failWithE () $ splitFunTy_maybe ty
     pure $ mkLam ty \arg -> do
       fun' <- fun
-      let arg' = interpret @a argTy arg
-      reify @b resTy $ fun' arg'
+      let arg' = interpret @a fam argTy arg
+      reify @b fam resTy $ fun' arg'
 
-  interpret ty fun = do
+  interpret fam ty fun = do
     (_flag, _mult, argTy, resTy) <- failWithE () $ splitFunTy_maybe ty
     pure \arg -> do
       fun' <- fun
-      let arg' = reify @a argTy arg
-      interpret @b resTy $ mkApp fun' arg'
+      let arg' = reify @a fam argTy arg
+      interpret @b fam resTy $ mkApp fun' arg'
 
--- | Sized integer primitive reify marker.
+-- | Bit vector primitive reify marker.
 --
 -- Note that this is not restricted to just machine words (i.e. it can be any
 -- size).
 -- TODO: It is not clear that this is a Pantomime primitive... Perhaps change
--- the name a bit? 'RPIntN' maybe works (similar to how the Haskell version is
--- 'RHIntN'). Idk, it's mostly an issue for other types e.g. Integer and the
+-- the name a bit? 'RPWordN' maybe works (similar to how the Haskell version is
+-- 'RHWordN'). Idk, it's mostly an issue for other types e.g. Integer and the
 -- Pantomime symbolic Integer primitive.
-data RIntN n
+data RBitVector n
 
-instance CoreType n => CoreType (RIntN n) where
+instance CoreType n => CoreType (RBitVector n) where
   coreType = do
-    name <- thNameToGhcName ''Primitive.IntN
+    name <- thNameToGhcName ''BitVector
     tc <- lookupTyCon name
     size <- coreType @n
     pure $ mkTyConApp tc [size]
 
-instance CoreType n => Reify (RIntN n) where
-  type InterpRep es (RIntN n) = SomeBV (IntN S)
+instance CoreType n => Reify (RBitVector n) where
+  type InterpRep es (RBitVector n) = SomeBV (WordN S)
 
-  reify ty value = do
+  reify fam ty value = do
     -- Reduction for type-level naturals.
-    let reduction = normaliseType emptyFamInstEnvs Representational ty
+    let reduction = normaliseType fam Representational ty
 
     -- Create the inner type.
     SomeBV value' <- value
     let ty' = reductionReducedType reduction
-    let inner =  mkLit $ mkIntN value' ty'
+    let inner =  mkLit $ mkWordN value' ty'
 
     -- Apply the reduction coercion.
     let co = mkSymCo $ reductionCoercion reduction
     mkCast inner co
 
-  interpret ty expr = do
+  -- TODO: For now, I modified the function signature of interpret such that we
+  -- also pass in the FamInstEnvs. I don't quite like it though, as this is the
+  -- only place where we actually use it... Maybe there is a nicer way to do
+  -- this than to require this for every call when it isn't used for most
+  -- of them...
+  interpret fam ty expr = do
     -- Reduction for type-level naturals.
-    let reduction = normaliseType emptyFamInstEnvs Representational ty
+    let reduction = normaliseType fam Representational ty
 
     -- Apply the reduction coercion.
     let co = reductionCoercion reduction
@@ -427,7 +454,7 @@ instance CoreType n => Reify (RIntN n) where
 
     -- After the coercion, the value should be just a literal.
     case value of
-      Lit (Int value' ty') | eqType ty ty' -> pure $ SomeBV value'
+      Lit (Word value' _) -> pure $ SomeBV value'
       _ -> throwE ()
 
 -- | KnownNat constraint reify marker.
@@ -443,13 +470,12 @@ instance CoreType n => CoreType (RKnownNat n) where
 instance CoreType n => Reify (RKnownNat n) where
   type InterpRep es (RKnownNat n) = InterpRep es RNatural
 
-  reify ty value = do
-    (tc, targs) <- failWithE () $ splitTyConApp_maybe ty
-    (ty', co) <- failWithE () $ instNewTyCon_maybe tc targs
-    inner <- reify @RNatural ty' value
+  reify fam ty value = do
+    (co, ty') <- failWithE () $ topNormaliseNewType_maybe ty
+    inner <- reify @RNatural fam ty' value
     mkCast inner $ mkSymCo co
 
-  interpret ty value = do
+  interpret fam ty value = do
     -- Unwrap the KnownNat typeclass (which is a cast over a Natural).
     (tyL, body) <- value >>= \case
       Cast body co
@@ -457,7 +483,7 @@ instance CoreType n => Reify (RKnownNat n) where
         , eqType ty tyR -> pure (tyL, liftUnion body)
       _ -> throwE ()
 
-    interpret @RNatural tyL body
+    interpret @RNatural fam tyL body
 
 -- | Natural reify marker.
 data RNatural
@@ -470,7 +496,7 @@ instance CoreTypeBuiltin RNatural where
 instance Reify RNatural where
   type InterpRep es RNatural = Either (SomeBV (WordN S)) ()
 
-  reify ty expr = do
+  reify _ ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty naturalTy) do
       throwE ()
@@ -489,7 +515,7 @@ instance Reify RNatural where
         -- FIXME: Implement this once we have byte array primitives.
         undefined
 
-  interpret ty expr = do
+  interpret _ ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty naturalTy) do
       throwE ()
@@ -536,7 +562,7 @@ instance CoreTypeBuiltin RInteger where
 instance Reify RInteger where
   type InterpRep es RInteger = Either (SomeBV (IntN S)) ()
 
-  reify ty expr = do
+  reify _ ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty integerTy) do
       throwE ()
@@ -554,7 +580,7 @@ instance Reify RInteger where
         -- FIXME: Implement this once we have byte array primitives.
         undefined
 
-  interpret ty expr = do
+  interpret _ ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty integerTy) do
       throwE ()
@@ -603,7 +629,7 @@ instance CoreTypeBuiltin RBool where
 instance Reify RBool where
   type InterpRep _ RBool = SymBool
 
-  reify ty expr = do
+  reify _ ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty boolTy) do
       throwE ()
@@ -615,7 +641,7 @@ instance Reify RBool where
     -- FIXME: Provide proper tag size.
     mkEnumCon @64 tag boolTy
 
-  interpret ty expr = do
+  interpret _ ty expr = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty boolTy) do
       throwE ()
@@ -634,12 +660,20 @@ instance CoreTypeBuiltin (RInt n) where
 instance KnownNat n => Reify (RInt n) where
   type InterpRep es (RInt n) = IntN S n
 
-  reify _ty expr = do
+  reify fam ty expr = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty intTy) do
+      throwE ()
+
     let spine = mkLit $ mkDataCon @n intDataCon
-    let arg = reify @(RHIntPW n) intPrimTy expr
+    let arg = reify @(RHIntPW n) fam intPrimTy expr
     mkApp spine arg
 
-  interpret _ty expr = do
+  interpret fam ty expr = do
+    -- Though not strictly necessary, we ensure we have the correct type.
+    unless (eqType ty intTy) do
+      throwE ()
+
     (spine, args) <- collectArgs <$> expr
 
     -- Check the spine to be the correct type.
@@ -651,7 +685,67 @@ instance KnownNat n => Reify (RInt n) where
       [arg] -> pure arg
       _ -> throwE ()
 
-    interpret @(RHIntPW n) intPrimTy arg
+    interpret @(RHIntPW n) fam intPrimTy arg
+
+data RUnsafeEquality k a b
+
+instance (CoreType k, CoreType a, CoreType b) => CoreType (RUnsafeEquality k a b) where
+  coreType = do
+    kind <- coreType @k
+    tyL <- coreType @a
+    tyR <- coreType @b
+
+    name <- thNameToGhcName ''UnsafeEquality
+    tc <- lookupTyCon name
+    pure $ mkTyConApp tc [kind, tyL, tyR]
+
+instance (CoreType k, CoreType a, CoreType b) => Reify (RUnsafeEquality k a b) where
+  type InterpRep es (RUnsafeEquality k a b) = CoercionN
+
+  reify _ ty co = do
+    (tc, args) <- failWithE () $ splitTyConApp_maybe ty
+
+    -- Fetch the 'UnsafeRefl' DataCon.
+    dc <- case tyConDataCons_maybe tc of
+      Just [dc] -> pure dc
+      _ -> throwE ()
+
+    -- Fetch the type arguments directly.
+    (kind, tyL, tyR) <- case args of
+      [kind, tyL, tyR] -> pure (kind, tyL, tyR)
+      _ -> throwE ()
+
+    -- Get the spine of this expression.
+    let spine = mkLit $ mkDataCon @64 dc
+
+    -- Force the coercion.
+    co' <- co
+
+    -- Check whether the coercion matches the expected type.
+    let coerces = and
+          [ eqType tyL $ coercionRKind co'
+          , eqType tyR $ coercionLKind co'
+          , coercionRole co' == Nominal
+          ]
+    unless coerces do
+      throwE ()
+
+    -- Return the final expression.
+    mkApps spine $ pure <$> [mkType kind, mkType tyL, mkType tyR, mkCoercion co']
+
+  interpret _ ty expr = do
+    expr' <- expr
+    ty' <- liftR $ exprType expr'
+
+    -- Ensure the expression has the correct type.
+    unless (eqType ty ty') do
+      throwE ()
+
+    -- Gather just the coercion argument.
+    let (_spine, args) = collectArgs expr'
+    case args of
+      [_kind, _ty, co] -> liftR $ forceCo co
+      _ -> throwE ()
 
 -- | Reify marker for Haskell sized integer primitives.
 data RHIntN (n :: Nat)
@@ -678,7 +772,7 @@ instance
   ) => Reify (RHIntN n) where
   type InterpRep es (RHIntN n) = IntN S n
 
-  reify ty value = do
+  reify _ ty value = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty $ coreTypeBuiltin @(RHIntN n)) do
       throwE ()
@@ -686,7 +780,7 @@ instance
     value' <- value
     pure $ mkLit (mkIntN value' ty)
 
-  interpret ty value = value >>= \case
+  interpret _ ty value = value >>= \case
     Lit (Int @m value' ty')
       | Just Refl <- eqT @n @m
       , eqType ty ty' -> pure value'
@@ -703,7 +797,7 @@ instance CoreTypeBuiltin (RHIntPW n) where
 instance KnownNat n => Reify (RHIntPW n) where
   type InterpRep es (RHIntPW n) = IntN S n
 
-  reify ty value = do
+  reify _ ty value = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty $ coreTypeBuiltin @(RHIntPW n)) do
       throwE ()
@@ -711,7 +805,7 @@ instance KnownNat n => Reify (RHIntPW n) where
     value' <- value
     pure $ mkLit (mkIntN value' ty)
 
-  interpret ty value = value >>= \case
+  interpret _ ty value = value >>= \case
     Lit (Int @m value' ty')
       | Just Refl <- eqT @n @m
       , eqType ty ty' -> pure value'
@@ -743,7 +837,7 @@ instance
   ) => Reify (RHWordN n) where
   type InterpRep es (RHWordN n) = WordN S n
 
-  reify ty value = do
+  reify _ ty value = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty $ coreTypeBuiltin @(RHWordN n)) do
       throwE ()
@@ -751,7 +845,7 @@ instance
     value' <- value
     pure $ mkLit (mkWordN value' ty)
 
-  interpret ty value = value >>= \case
+  interpret _ ty value = value >>= \case
     Lit (Word @m value' ty')
       | Just Refl <- eqT @n @m
       , eqType ty ty' -> pure value'
@@ -768,7 +862,7 @@ instance CoreTypeBuiltin (RHWordPW n) where
 instance KnownNat n => Reify (RHWordPW n) where
   type InterpRep es (RHWordPW n) = WordN S n
 
-  reify ty value = do
+  reify _ ty value = do
     -- Though not strictly necessary, we ensure we have the correct type.
     unless (eqType ty $ coreTypeBuiltin @(RHWordPW n)) do
       throwE ()
@@ -776,7 +870,7 @@ instance KnownNat n => Reify (RHWordPW n) where
     value' <- value
     pure $ mkLit (mkWordN value' ty)
 
-  interpret ty value = value >>= \case
+  interpret _ ty value = value >>= \case
     Lit (Word @m value' ty')
       | Just Refl <- eqT @n @m
       , eqType ty ty' -> pure value'
@@ -784,6 +878,27 @@ instance KnownNat n => Reify (RHWordPW n) where
 
 -- | Alias for the most common kinded type variables.
 type RTyVar_ n = RTyVar n RTypeKind
+
+-- | Reify marker for 'TYPE'.
+data RTYPE r
+
+instance CoreType r => CoreType (RTYPE r) where
+  coreType = do
+    rep <- coreType @r
+    pure $ mkTyConApp tYPETyCon [rep]
+
+instance CoreTypeBuiltin r => CoreTypeBuiltin (RTYPE r) where
+  coreTypeBuiltin = do
+    let rep = coreTypeBuiltin @r
+    mkTyConApp tYPETyCon [rep]
+
+-- | Reify marker for 'RuntimeRep'.
+data RRuntimeRep
+
+instance CoreType RRuntimeRep
+
+instance CoreTypeBuiltin RRuntimeRep where
+  coreTypeBuiltin = runtimeRepTy
 
 -- | Reify marker with kind 'Type'. I.e. the kind of lifted types.
 data RTypeKind
@@ -793,6 +908,8 @@ instance CoreType RTypeKind
 instance CoreTypeBuiltin RTypeKind where
   coreTypeBuiltin = liftedTypeKind
 
+-- TODO: I guess this name is not great. RBoxedRep should just be the inner
+-- thing. We could then make a type alias using RTYPE.
 -- | Reify marker with kind 'TYPE (BoxedRep l)'.
 data RBoxedRep l
 
@@ -818,20 +935,45 @@ instance CoreType RLevity
 instance CoreTypeBuiltin RLevity where
   coreTypeBuiltin = levityTy
 
--- | Reify marker for adding two type-level naturals.
-data RPlus n m
+-- | Reify marker for type-naturals.
+data RTyNat (n :: Nat)
 
-instance (CoreType n, CoreType m) => CoreType (RPlus n m) where
+instance KnownNat n => CoreType (RTyNat n) where
+
+instance KnownNat n => CoreTypeBuiltin (RTyNat n) where
+  coreTypeBuiltin = do
+    let value = natVal @n Proxy
+    mkNumLitTy $ toInteger value
+
+-- | Reify marker for adding two type-level naturals.
+data RAdd n m
+
+instance (CoreType n, CoreType m) => CoreType (RAdd n m) where
   coreType = do
     l <- coreType @n
     r <- coreType @m
     pure $ mkTyConApp typeNatAddTyCon [l, r]
 
-instance (CoreTypeBuiltin n, CoreTypeBuiltin m) => CoreTypeBuiltin (RPlus n m) where
+instance (CoreTypeBuiltin n, CoreTypeBuiltin m) => CoreTypeBuiltin (RAdd n m) where
   coreTypeBuiltin = do
     let l = coreTypeBuiltin @n
     let r = coreTypeBuiltin @m
     mkTyConApp typeNatAddTyCon [l, r]
+
+-- | Reify marker for adding two type-level naturals.
+data RSub n m
+
+instance (CoreType n, CoreType m) => CoreType (RSub n m) where
+  coreType = do
+    l <- coreType @n
+    r <- coreType @m
+    pure $ mkTyConApp typeNatSubTyCon [l, r]
+
+instance (CoreTypeBuiltin n, CoreTypeBuiltin m) => CoreTypeBuiltin (RSub n m) where
+  coreTypeBuiltin = do
+    let l = coreTypeBuiltin @n
+    let r = coreTypeBuiltin @m
+    mkTyConApp typeNatSubTyCon [l, r]
 
 -- | Reify marker less than or equal constraint.
 data RLEq n m
@@ -852,7 +994,7 @@ instance (CoreType n, CoreType m) => Reify (RLEq n m) where
 
   -- TODO: This implementation doesn't really do anything. We should make it
   -- more accurate sometime!
-  reify ty expr = do
+  reify _ ty expr = do
     expr' <- expr
     ty' <- liftR $ exprType expr'
 
@@ -862,7 +1004,7 @@ instance (CoreType n, CoreType m) => Reify (RLEq n m) where
 
     pure expr'
 
-  interpret ty expr = do
+  interpret _ ty expr = do
     expr' <- expr
     ty' <- liftR $ exprType expr'
 

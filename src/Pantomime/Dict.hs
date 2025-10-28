@@ -1,12 +1,6 @@
 -- TODO: We redefine Dict here, but there is the 'constraints' package which has
 -- utils for manipulating it. I guess it's better to just import that!
 
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE TypeAbstractions #-}
-
 module Pantomime.Dict
   ( Dict (..)
   , unsafeDict
@@ -14,6 +8,7 @@ module Pantomime.Dict
   , leqNat
   , posNat
   , cmpNat'
+  , geqToLeq
   , normNumLitTy
   , someTyNat
   , SomeNat' (..)
@@ -75,6 +70,11 @@ cmpNat'
   => OrderingI l r
 cmpNat' = cmpNat @l @r Proxy Proxy
 
+geqToLeq :: forall (n :: Nat) m. n >= m => Dict (m <= n)
+--We only match on the dictionary such that the constraint 'n >= m' does not
+-- give a warning about being unused.
+geqToLeq = case Dict @(n >= m) of Dict -> unsafeDict
+
 normNumLitTy :: Type -> Maybe Integer
 normNumLitTy ty = if
   | Just value <- isNumLitTy ty -> pure value
@@ -99,12 +99,14 @@ someTyNat ty = do
   guard $ num >= 0
   pure $ someNatVal (fromInteger num)
 
+-- TODO: This one feels a bit obsolote no? Can't we just split any usage of this
+-- into a normal SomeNat and a Dict?
 data SomeNat' eq where
   SomeNat' :: forall n eq. (KnownNat n, n ~ eq) => SomeNat' eq
 
 -- | Type-level subtraction.
 typeSub :: forall lhs rhs. KnownNat lhs => KnownNat rhs => SomeNat' (lhs - rhs)
-typeSub = runIdentity $ do
+typeSub = runIdentity do
   let lhs' = natVal $ Proxy @lhs
   let rhs' = natVal $ Proxy @rhs
   SomeNat @n _ <- pure . someNatVal $ lhs' - rhs'
@@ -113,7 +115,7 @@ typeSub = runIdentity $ do
 
 -- | Type-level subtraction.
 typeAdd :: forall lhs rhs. KnownNat lhs => KnownNat rhs => SomeNat' (lhs + rhs)
-typeAdd = runIdentity $ do
+typeAdd = runIdentity do
   let lhs' = natVal $ Proxy @lhs
   let rhs' = natVal $ Proxy @rhs
   SomeNat @n _ <- pure . someNatVal $ lhs' + rhs'

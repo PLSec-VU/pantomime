@@ -110,6 +110,11 @@ instance KnownNat n => Ord (IntN C n) where
     (IntZ, IntZ) -> EQ
     (IntP lhs, IntP rhs) -> compare lhs rhs
 
+instance (DecideEvalMode mode, KnownNat n) => Bounded (IntN mode n) where
+  minBound = withSizeI $ withMode @mode minBound minBound
+
+  maxBound = withSizeI $ withMode @mode maxBound maxBound
+
 instance (DecideEvalMode mode, KnownNat n) => Show (IntN mode n) where
   show = \case
     IntZ -> "0x"
@@ -448,6 +453,13 @@ instance KnownNat n => Ord (WordN C n) where
   compare = curry $ \case
     (WordZ, WordZ) -> EQ
     (WordP lhs, WordP rhs) -> compare lhs rhs
+
+instance (DecideEvalMode mode, KnownNat n) => Bounded (WordN mode n) where
+  minBound = do
+    withSizeW $ withMode @mode minBound (con $ minBound @(GetWordN C n))
+
+  maxBound = do
+    withSizeW $ withMode @mode maxBound (con $ maxBound @(GetWordN C n))
 
 instance (DecideEvalMode mode, KnownNat n) => Show (WordN mode n) where
   show = \case

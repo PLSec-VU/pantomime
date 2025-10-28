@@ -7,6 +7,7 @@ module Pantomime.Symbolise
   ) where
 
 import GHC.Plugins qualified as GHC
+import GHC.Core.FamInstEnv (FamInstEnvs)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
   ( intPrimTy
@@ -57,10 +58,23 @@ import Data.Typeable (Proxy (..), type (:~:) (..), eqT)
 symbolise
   :: HasCallStack
   => () !> es
-  => Subst es
+  => FamInstEnvs
+  -> Subst es
   -> GHC.CoreExpr
   -> EvalExpr es
-symbolise = go
+-- TODO: I'm now threading in the family instance environment for the primitive
+-- reify functions. There's two annoying things here:
+-- 1. I'm not using the inst environment in any of those calls actually
+-- 2. Even if it would be required, we still only use it there. Threading
+--    through seems not so clean...
+--
+-- For 1, I'll have to look at Reify of BitVector to see if I cannot get rid of
+-- it in some smart way.
+--
+-- For 2, I could add the PrimOps to the substitution map instead of this
+-- lookup. I feel like this one has merits in it's own right. Maybe we should do
+-- this anyway, even if we end up fixing issue 1.
+symbolise fam = go
   where
     -- TODO: I think we should add notes where we add helper functions like this
     -- to signify it is to ensure the callstack doesn't grow.
@@ -68,7 +82,14 @@ symbolise = go
       GHC.Var var
         | Just expr <- lookupIdSubst subst var -> expr
 
-        | Just expr <- GHC.maybeUnfoldingTemplate $ GHC.idUnfolding var -> do
+        | Just expr <- GHC.maybeUnfoldingTemplate $ GHC.idUnfolding var
+        -- TODO: I have this check for now, as it makes debugging a bit easier.
+        -- Still, I don't think we want to keep this on the long haul. I guess
+        -- a user could always write an axiom that says "use the original impl",
+        -- so this isn't that bad. Maybe we should keep it? It is a lot nicer
+        -- for users IMO! If we do, we should have an error that tells the user
+        -- specifically the two options!
+        , not . GHC.isOpaquePragma $ GHC.idInlinePragma var -> do
           -- TODO: As unfoldings are closed, should we be using the subst0 that
           -- was given at the initial call of this function? It would ensure
           -- the substitution grows a lot less in size. I'm not sure if this
@@ -77,7 +98,7 @@ symbolise = go
 
         | Just op <- GHC.isPrimOpId_maybe var -> do
           -- FIXME: Give proper platform size.
-          symbolisePrimOp @64 op
+          symbolisePrimOp @64 fam op
 
         | Just dc <- GHC.isDataConId_maybe var -> do
           -- FIXME: This should get the proper platform size.
@@ -116,7 +137,7 @@ symbolise = go
           go subst' body
 
       GHC.Let bind body -> do
-        subst' <- liftR $ symboliseBind subst bind
+        subst' <- liftR $ symboliseBind fam subst bind
         go subst' body
 
       GHC.Case scrut bndr _ty alts -> do
@@ -188,19 +209,20 @@ symboliseBind
    . HasCallStack
   => () !> es
   => () !> fs
-  => Subst fs
+  => FamInstEnvs
+  -> Subst fs
   -> GHC.CoreBind
   -> Result es (Subst fs)
-symboliseBind subst = \case
+symboliseBind fam subst = \case
   GHC.NonRec bndr rhs -> do
-    let rhs' = symbolise subst rhs
+    let rhs' = symbolise fam subst rhs
     extendIdSubst subst bndr rhs'
 
   GHC.Rec pairs -> do
     let subst' :: forall gs. () !> gs => Result gs (Subst fs)
         subst' = extendIdSubstMany subst pairs'
         pairs' = second symbolise' <$> pairs
-        symbolise' rhs = liftR subst' >>= flip symbolise rhs
+        symbolise' rhs = liftR subst' >>= \s -> symbolise fam s rhs
     subst'
 
 symboliseBindMany
@@ -209,10 +231,11 @@ symboliseBindMany
   => () !> es
   => () !> fs
   => Foldable f
-  => Subst fs
+  => FamInstEnvs
+  -> Subst fs
   -> f GHC.CoreBind
   -> Result es (Subst fs)
-symboliseBindMany = foldM symboliseBind
+symboliseBindMany = foldM . symboliseBind
 
 symboliseLit
   :: () !> es
@@ -258,9 +281,10 @@ symbolisePrimOp
    . HasCallStack
   => () !> es
   => KnownNat n
-  => PrimOp
+  => FamInstEnvs
+  -> PrimOp
   -> EvalExpr es
-symbolisePrimOp = \case
+symbolisePrimOp fam = \case
   -- Char operations:
   -------------------
   -- ChrOp -> throwE ()
@@ -521,7 +545,7 @@ symbolisePrimOp = \case
 
   -- Error handling:
   ------------------
-  -- RaiseOp -> undefined
+  RaiseOp -> raiseOp
   -- RaiseDivZeroOp -> undefined
   -- RaiseUnderflowOp -> undefined
   -- RaiseOverflowOp -> undefined
@@ -535,28 +559,28 @@ symbolisePrimOp = \case
       => ReifyBuiltin b
       => (InterpRep es a -> InterpRep es b)
       -> EvalExpr es
-    convert = builtinReify @(a ~> b) . liftF1'
+    convert = builtinReify @(a ~> b) fam . liftF1'
 
     binary
       :: forall a
        . ReifyBuiltin a
       => (InterpRep es a -> InterpRep es a -> InterpRep es a)
       -> EvalExpr es
-    binary = builtinReify @(a ~> a ~> a) . liftF2'
+    binary = builtinReify @(a ~> a ~> a) fam . liftF2'
 
     unary
       :: forall a
        . ReifyBuiltin a
       => (InterpRep es a -> InterpRep es a)
       -> EvalExpr es
-    unary = builtinReify @(a ~> a) . liftF1'
+    unary = builtinReify @(a ~> a) fam . liftF1'
 
     cmp
       :: forall a
        . ReifyBuiltin a
       => (InterpRep es a -> InterpRep es a -> SymBool)
       -> EvalExpr es
-    cmp f = builtinReify @(a ~> a ~> RHIntPW n) $ liftF2' \l r -> do
+    cmp f = builtinReify @(a ~> a ~> RHIntPW n) fam $ liftF2' \l r -> do
       mrgIte (f l r) 1 0
 
     -- TODO: I need to think of a good way to do arithmetic/logical shift as
@@ -573,7 +597,7 @@ symbolisePrimOp = \case
       => GenSymSimple () (bv m)
       => (bv m -> bv m -> bv m)
       -> EvalExpr es
-    shft f = builtinReify @(a ~> RHIntPW n ~> a) $ liftF2' \val idx -> do
+    shft f = builtinReify @(a ~> RHIntPW n ~> a) fam $ liftF2' \val idx -> do
       -- The bit-size of platform words.
       let size = fromIntegral $ natVal (Proxy @m)
 
@@ -584,6 +608,8 @@ symbolisePrimOp = \case
       -- TODO: Perhaps there is a better way to name this such that we ensure we
       -- do not get name clashes? Ideally we use the unique of every shift
       -- operation we interpret to instantiate this function!
+      -- FIXME: This doesn't take the arguments into account when shifting, so
+      -- is actually a bit too permissive.
       let ub = genSymSimple () "UB.shift"
 
       -- The normal, within bounds computation
@@ -592,11 +618,14 @@ symbolisePrimOp = \case
       -- The final result is defined only within the bounds.
       mrgIte inBounds result ub
 
-    tagToEnum = builtinReify @(TagToEnumType n) $ liftF2 \ty arg -> do
+    tagToEnum = builtinReify @(TagToEnumType n) fam $ liftF2 \ty arg -> do
       tag <- arg
       mkEnumCon tag ty
 
-    dataToTag = builtinReify @(DataToTagType n) $ liftF3 \_lev ty arg -> do
+    raiseOp = builtinReify @RaiseType fam $ liftF5 \_l _r _a _b x -> do
+      mkRaise x
+
+    dataToTag = builtinReify @(DataToTagType n) fam $ liftF3 \_lev ty arg -> do
       -- Force the argument.
       arg' <- arg
 
@@ -626,3 +655,18 @@ type DataToTagType n
   +> RTyVar 1 (RBoxedRep (RTyVar 0 RLevity))
   +> RTyVar 1 (RBoxedRep (RTyVar 0 RLevity))
   ~> RHIntPW n
+
+-- :: forall
+--    {l :: Levity}
+--    {r :: RuntimeRep}
+--    (a :: TYPE ('BoxedRep l))
+--    (b :: TYPE r)
+--  . a
+-- -> b
+type RaiseType
+  =  RTyVar 0 RLevity
+  +> RTyVar 1 RRuntimeRep
+  +> RTyVar 2 (RBoxedRep (RTyVar 0 RLevity))
+  +> RTyVar 3 (RTYPE (RTyVar 1 RRuntimeRep))
+  +> RTyVar 2 (RBoxedRep (RTyVar 0 RLevity))
+  ~> RTyVar 3 (RTYPE (RTyVar 1 RRuntimeRep))

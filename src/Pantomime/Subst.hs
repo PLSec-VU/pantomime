@@ -5,7 +5,6 @@ module Pantomime.Subst
   , extendSubstMany
   , extendIdSubst
   , extendIdSubstMany
-  , extendIdSubstDirectly
   , lookupIdSubst
   , substTy
   , substTyVar
@@ -32,7 +31,6 @@ import GHC.Plugins
   , isId
   , extendVarEnv
   , lookupVarEnv
-  , plusVarEnv
   )
 
 import Control.Monad (foldM)
@@ -124,15 +122,6 @@ extendIdSubstMany
   -> f (Id, EvalExpr fs)
   -> Result es (Subst fs)
 extendIdSubstMany = foldM $ uncurry . extendIdSubst
-
--- | Extend the identifier substitution with a mapping directly.
-extendIdSubstDirectly
-  :: Subst es
-  -> IdEnv (EvalExpr es)
-  -> Subst es
-extendIdSubstDirectly subst ids = subst
-  { idSubst = plusVarEnv ids $ idSubst subst
-  }
 
 -- | Lookup a variable in the current substitution environment.
 lookupIdSubst

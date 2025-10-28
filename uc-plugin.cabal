@@ -44,6 +44,8 @@ library
       Pantomime
       Pantomime.Annotation
       Pantomime.Axiom
+      Pantomime.Base
+      Pantomime.Clash
       Pantomime.Dict
       Pantomime.Expr
       Pantomime.Fresh
@@ -56,6 +58,7 @@ library
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes
+      Pantomime.Primitive.BitVector
       Pantomime.Primitive.GHC
       Pantomime.Primitive.Operation
       Pantomime.Primitive.Reify

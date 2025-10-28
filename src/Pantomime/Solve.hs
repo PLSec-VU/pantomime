@@ -19,6 +19,7 @@ import GHC.Plugins
   ( CoreProgram
   , Name
   , CoreExpr
+  , Bind (..)
   , exprType
   , varType
   , vcat
@@ -47,7 +48,6 @@ import Pantomime.Primitive.GHC qualified as Primitive
 import Pantomime.Result (handle, ok)
 import Pantomime.Util (withCallStack, dbg)
 import Pantomime.Axiom (PluginAxiomsR (..))
-
 
 import Effectful
 import Effectful.Context
@@ -80,10 +80,13 @@ checkValid PluginAxiomsR { .. } expr = do
   -- TODO: Somehow this code doesn't read very nice. I think I should review it.
   program <- get @CoreProgram
 
-  reifiedIntN <- Primitive.reifiedIntN
+  reifiedBitVector <- Primitive.reifiedBitVector
+  reifiedUnsafeRefl <- Primitive.reifiedUnsafeRefl
+
+  fam <- getFamInstEnvs
 
   let subst = do
-        subst0 <- Pantomime.extendIdSubstMany Pantomime.mkEmptySubst reifiedIntN
+        subst0 <- Pantomime.extendIdSubstMany Pantomime.mkEmptySubst $ reifiedUnsafeRefl : reifiedBitVector
         -- TODO: I think there is an ordering problem here between user
         -- mappings and program definitions. I guess user mappings should
         -- go first? The problem is that we don't want local definitions to
@@ -92,26 +95,24 @@ checkValid PluginAxiomsR { .. } expr = do
         -- their defining module. Not the worst thing though, as the functions
         -- should truly be opaque outside of the defining module and they cannot
         -- be guaranteed to not be misused within the module.
-        let symAxioms = Pantomime.symbolise subst0 <$> termAxiomsR
-        let subst1 = Pantomime.extendIdSubstDirectly subst0 symAxioms
-        Pantomime.symboliseBindMany subst1 program
+        let axioms' = uncurry NonRec <$> termAxiomsR
+        subst1 <- Pantomime.symboliseBindMany fam subst0 axioms'
+        Pantomime.symboliseBindMany fam subst1 program
 
   subst' <- case handle subst of
     Left (cs, ()) -> withCallStack cs throwError_ ()
     Right value -> pure $ ok value
 
-  famInst <- getFamInstEnvs
   primTys <- Primitive.getTypes
-
   let freshEnv = Pantomime.FreshInstEnv
-        { Pantomime.fieFam = famInst
+        { Pantomime.fieFam = fam
         , Pantomime.fiePrim = primTys
         , Pantomime.fieUser = typeAxiomsR
         }
 
   let ty = exprType expr
   let (args, _scope) = Pantomime.freshArgs freshEnv ty emptyInScopeSet
-  let fun = Pantomime.symbolise subst' expr
+  let fun = Pantomime.symbolise fam subst' expr
   let result = fun >>= flip Pantomime.mkApps (snd <$> args)
 
   -- TODO: I was thinking of making a 'handleE' function for 'Eval', but it
