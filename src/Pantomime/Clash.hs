@@ -186,7 +186,7 @@ leSigned
 leSigned = go
   where
     go :: Coercible bv Pantomime.BitVector => bv n -> bv n -> Bool
-    go = coerce $ (<=) @(Pantomime.BitVector n)
+    go = coerce Pantomime.leS
 
 gtSigned
   :: forall n
