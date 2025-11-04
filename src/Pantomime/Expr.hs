@@ -58,8 +58,8 @@ module Pantomime.Expr
 import GHC.Plugins qualified as GHC
 import GHC.Core.Type qualified as GHC
 import GHC.Core.TyCo.Compare (eqType)
-import GHC.Core.Ppr (pprOptCo)
 import GHC.Core.TyCo.Rep (scaledThing)
+import GHC.Core.Ppr (pprOptCo)
 import GHC.Core.Opt.Arity (pushCoTyArg, pushCoValArg)
 import GHC.Utils.Outputable
   ( Outputable (..)
@@ -139,13 +139,10 @@ import Grisette
   , EvalSym1 (..)
   , Default (..)
   , wrapStrategy
-  , rootStrategy1
   , liftUnion
   , mrgIf
-  , evalSym1
   , pattern Single
   , pattern If
-  , pattern Con
   )
 
 import Pantomime.Orphan.Grisette ()
@@ -154,15 +151,14 @@ import Pantomime.Result
 import Pantomime.Grisette.SomeBV (SomeBV (..))
 import Pantomime.Grisette.SizedBV (sizedBVResizeZ)
 import Pantomime.Grisette.Mergeable
-  ( partialStrategy
+  ( NoEval (..)
+  , NoMerge (..)
+  , partialStrategy
   , ifStrategy
   , tupleStrategy
   , impossible
   )
-import Pantomime.Grisette.BitVector
-  ( IntN
-  , WordN
-  )
+import Pantomime.Grisette.BitVector (IntN, WordN)
 
 import Data.Composition ((.:))
 import Data.Coerce (coerce)
@@ -175,17 +171,12 @@ import Data.Typeable
   )
 
 import Control.Arrow (Arrow(..))
-import Control.Applicative (Alternative(..), liftA)
-import Control.Monad.Except
-  ( ExceptT (..)
-  , runExceptT
-  )
+import Control.Applicative (Alternative(..))
+import Control.Monad.Except (ExceptT (..))
 import Control.Monad
   ( (>=>)
   , foldM
   , unless
-  , join
-  , ap
   )
 
 import Debug.Trace qualified as Debug
@@ -196,109 +187,26 @@ dbgE :: GHC.Outputable o => o -> Eval es ()
 dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
 
 newtype Eval es a where
-  Eval :: EvalCoerce es a -> Eval es a
+  Eval :: ExceptT (Result es (Variant es)) Union a -> Eval es a
+  deriving Functor
+  deriving Applicative
+  deriving Monad
+  deriving TryMerge via (EvalMerge es)
+  deriving Mergeable via (EvalMerge es a)
+  deriving Mergeable1 via (EvalMerge es)
+  deriving SimpleMergeable via (EvalMerge es a)
+  deriving SimpleMergeable1 via (EvalMerge es)
+  deriving SymBranching via (EvalMerge es)
+  deriving EvalSym via (EvalSymEval es a)
+  deriving EvalSym1 via (EvalSymEval es)
 
--- | Inner value of 'Eval' monad, which is useful as a shorthand when writing
--- coercions.
-type EvalCoerce es a = Result es (ExceptT (Variant es) Union a)
+-- | Mergeable coercion for inner value of 'Eval' monad, useful for derivations
+-- and coercions.
+type EvalMerge es = ExceptT (Either (NoMerge (Error es)) (Variant es)) Union
 
-instance Functor (Eval es) where
-  fmap = liftA
-
-instance Applicative (Eval es) where
-  (<*>) = ap
-  pure = Eval . Right . pure
-
--- TODO: I'm using an orphan implementation for Traversable on Union. Should
--- I just make a pull requist for it's implementation at this point?
-instance Monad (Eval es) where
-  (>>=) @a @b = coerce go
-    where
-      go :: EvalCoerce es a -> (a -> EvalCoerce es b) -> EvalCoerce es b
-      go m f = do
-        union <- m
-        fmap join $ for union f
-
-instance TryMerge (Eval es) where
-  tryMergeWithStrategy @a strategy = coerce go
-    where
-      go :: EvalCoerce es a -> EvalCoerce es a
-      go = fmap $ tryMergeWithStrategy strategy
-
-instance Mergeable a => Mergeable (Eval es a) where
-  rootStrategy = rootStrategy1
-
-instance Mergeable1 (Eval es) where
-  liftRootStrategy = SimpleStrategy . mrgIfWithStrategy
-
-instance Mergeable a => SimpleMergeable (Eval es a) where
-  mrgIte = mrgIf
-
-instance SimpleMergeable1 (Eval es) where
-  liftMrgIte = mrgIfWithStrategy . SimpleStrategy
-
--- WARNING: The implementation of symbolic branching for 'Eval' is very nuanced,
--- careless changes could harm how expressions are merged.
---
--- There are two slightly conflicting requirements on the 'Eval' monad.
--- 1. If any branch gives an error, we just want to kill the entire computation.
---    That is, there is no real reason to track the full union of values anymore
---    if an error occurred.
--- 2. We need expressions to be lazily evaluated and lazily merged, such that
---    it follows Haskell's evaluation semantic exactly.
---    - For lazy evaluation: Branches that remain unevaluated thus should
---      not propagate their errors. If they did, we would actually still
---      be evaluating (most of) the branch making it so we cannot evaluate
---      (bounded) recursive expressions.
---    - For lazy merging: For merging to be lazy, 'Arg' needs to implement
---      'SimpleMergeable'. Otherwise, we would be evaluating the entire
---      expression to sort the arguments when merging. Since 'Expr' is really
---      only 'Mergeable', we require 'Eval' to implement 'SymBranching'. Note
---      that it is also much more effecient for the constraint general if the
---      arguments are simple mergeable.
---
--- How do we resolve this conflict?
--- - We disregard branches that are never used, i.e. when the branch condition
---   is a concrete value. This ensure we retain the lazy semantic.
---
--- - When we do require merging, we will first ensure both branches are void of
---   any errors before merging the inner value.
---
--- - In the case there is at least one error, it is an arbitrary decision which
---   error to propagate. We choose to propagate the error of the then-branch
---   over that of the else-branch, but either way is fine. Alternatively, we
---   could choose to collect the errors from all branches instead of selecting
---   an arbitrary one. For now, selecting one seems reasonable.
-instance SymBranching (Eval es) where
-  mrgIfWithStrategy @a strategy scrut true false = case scrut of
-    Con scrut'
-      -- NOTE: We want to specifically use the TryMerge instance of Eval here
-      -- (and not of EvalCoerce) as this one properly passes the strategy to the
-      -- inner Union.
-      | scrut' -> tryMergeWithStrategy strategy true
-      | otherwise -> tryMergeWithStrategy strategy false
-    _ -> coerce go true false
-    where
-      go :: EvalCoerce es a -> EvalCoerce es a -> EvalCoerce es a
-      go = liftA2 $ mrgIfWithStrategy strategy scrut
-
-  mrgIfPropagatedStrategy @a scrut = coerce go
-    where
-      go :: EvalCoerce es a -> EvalCoerce es a -> EvalCoerce es a
-      go true false = case scrut of
-        Con scrut'
-          | scrut' -> true
-          | otherwise -> false
-        _ -> liftA2 (mrgIfPropagatedStrategy scrut) true false
-
-instance EvalSym a => EvalSym (Eval es a) where
-  evalSym = evalSym1
-
-instance EvalSym1 (Eval es) where
-  liftEvalSym @a f fill model = coerce go
-    where
-      go :: EvalCoerce es a -> EvalCoerce es a
-      go = fmap $ liftEvalSym f fill model
+-- | SymEval coercion for inner value of 'Eval' monad, useful for derivations
+-- and coercions.
+type EvalSymEval es = ExceptT (Either (NoEval (Error es)) (Variant es)) Union
 
 -- TODO: I'm not sure if I like this name. Perhaps we can think about what other
 -- options these have. Unlike the other error types, these ones don't need a
@@ -334,6 +242,15 @@ data Expr es where
     -> (Arg es -> EvalExpr es)
     -- ^ Closure
     -> Expr es
+  -- TODO: I guess the only time App is used is for DataCon. Maybe having it
+  -- in here is too general and it should just be part of DataCon? I guess
+  -- technically a Cast might also be at the root no? Whilst we do fold casts
+  -- over FunCo, we don't actually handle the case where a Cast occurs and it is
+  -- not over a FunCo as root right now. I'll have to think about what's best.
+  --
+  -- I guess if the cast is not a FunCo or ForAllCo, at some point the execution
+  -- will halt anyway once we want to pattern match on it though. Maybe indeed,
+  -- only DataCon needs arguments.
   App
     :: Expr es
     -> Thunk es
@@ -410,6 +327,16 @@ data Thunk es where
 data Literal where
   -- TODO: I think it makes sense to place the universal type arguments of a
   -- DataCon inside of the literal.
+  -- TODO: Does it not make sense to seperate enumeration DataCon from normal
+  -- DataCon? I.e. we can have the following two cases:
+  -- DataCon :: DataCon -> Literal
+  -- EnumCon :: KnownNat n => SymIntN n -> TyCon -> Literal
+  --
+  -- If we do it this way, we don't need a manual implementation of Mergeable.
+  -- (Actually, I guess we still do because of the existential on the bitvector)
+  -- Also, there are many edge-cases right now in the code for when it is, or is
+  -- not an EnumCon. In this way, the distinction is a little bit more explicit!
+  -- I think we should change this!
   DataCon
     :: KnownNat n
     => IntN S n
@@ -418,6 +345,7 @@ data Literal where
   -- TODO: Does it make sense to differentiate between IntN and WordN? I think
   -- the solver just has a single bitvector. This just seems like it adds
   -- maintanence burden without actually adding anything...
+  -- We should make a single BitVector field!
   Int
     :: KnownNat n
     => IntN S n
@@ -514,6 +442,9 @@ pprExpr addParens = \case
     [ pprUnion parens pprExpr expr
     , "`cast`" <+> pprOptCo co
     ]
+  -- TODO: This one is a bit more difficult. Really the only way to print a
+  -- lambda is to provide it with fresh arguments. The problem is that we need
+  -- a lot more context for printing in that way.
   Lam {} -> "TODO lambda"
     -- (result, args) <- saturateLam @64 $ mkExpr expr
     -- let bndrs = fst <$> args
@@ -522,8 +453,6 @@ pprExpr addParens = \case
     -- pure . addParens $ hang bndr 2 body
   expr@App {} -> do
     let (fun, args) = collectArgs expr
-    -- args' <- sequenceA args
-    -- args'' <- for args' $ pprExpr parens
     let header = pprExpr parens fun
     let body = sep $ pprArg parens <$> args
     addParens $ hang header 2 body
@@ -541,18 +470,13 @@ pprEval
   -> ((SDoc -> SDoc) -> a -> SDoc)
   -> Eval es a
   -> SDoc
-pprEval addParens f = coerce go
-  where
-    go :: EvalCoerce es a -> SDoc
-    go = \case
-      -- TODO: How should I actually emit the error...
-      Left err -> GHC.prettyCallStackDoc $ location err
-      -- TODO: This has a bit too much nesting for me, I should reduce it!
-      Right union -> flip (pprUnion addParens) (runExceptT union) \p -> \case
-        Left UB -> "UB"
-        Left Unreachable -> "Unreachable"
-        Left (Raise expr) -> "raise#" <+> pprArg p expr
-        Right expr -> f p expr
+pprEval addParens f = coerce $ pprUnion addParens \p -> \case
+  Left (Left (NoMerge err)) -> GHC.prettyCallStackDoc $ location err
+  Left (Right alt) -> case alt of
+    UB -> "UB"
+    Unreachable -> "Unreachable"
+    Raise expr -> "raise#" <+> pprArg p expr
+  Right expr -> f p expr
 
 pprUnion
   :: Mergeable a
@@ -630,6 +554,12 @@ mkEnumCon tag ty = do
   unless (isEnumerationTyCon tc) do
     throwE ()
 
+  -- TODO: I don't think it makes sense to put this check here. Really, we only
+  -- get UB if we actually try to use the tag for a pattern match. Already, we
+  -- use UB in case expressions, so I think this could just be removed.
+  --
+  -- If we do, do make sure to adjust exprToBool accordingly: we actually do
+  -- need to assert no UB occurred!
   -- Check to ensure we have a proper tag.
   let upper = fromIntegral $ length (tyConDataCons boolTyCon)
   let inBounds = 0 .<= tag .&& tag .< upper
@@ -786,7 +716,7 @@ mkCast expr co = do
     _ -> pure $ Cast (pure expr) co
 
 mkVariant :: Variant es -> Eval es a
-mkVariant = Eval . pure . ExceptT . pure . Left
+mkVariant = Eval . ExceptT . pure . Left . Right
 
 mkUnreachable :: Eval es a
 mkUnreachable = mkVariant Unreachable
@@ -810,11 +740,16 @@ forceTyCo
   => () !> es
   => Arg es
   -> Result es (Either Type Coercion)
-forceTyCo (Eval arg) = do
+forceTyCo (Eval (ExceptT arg)) = do
   -- Simply pass an already existing error, if possible.
-  arg' <- arg
+  -- TODO: We use an orphan Traversable instance for Union here. We should
+  -- really make a pull request to Grisette for it!
+  arg' <- for arg \case
+    Left (Left err) -> Left err
+    Left (Right alt) -> Right $ Left alt
+    Right expr -> Right $ Right expr
 
-  case runExceptT arg' of
+  case arg' of
     -- Attempt to get a single 'Type' or 'Coercion'.
     Single (Right value)
       | Type ty <- value -> pure $ Left ty
@@ -1087,7 +1022,7 @@ throwE
   => e !> es
   => e
   -> Eval es a
-throwE = Eval . withFrozenCallStack throw
+throwE = Eval . ExceptT . pure . Left . withFrozenCallStack throw
 
 -- | Throw the given error on 'Nothing' within the 'Eval' monadic context.
 failWithE
@@ -1100,4 +1035,4 @@ failWithE = liftR .: withFrozenCallStack failWith
 
 -- | Lift a result into the evaluation context.
 liftR :: Result es a -> Eval es a
-liftR = Eval . fmap pure
+liftR = Eval . ExceptT . pure . either (Left . Left) Right

@@ -116,7 +116,7 @@ infixr 4 %~~
 -- Creates a new identifier and adds it to the in-scope set of the given
 -- substitution.
 freshId
-  :: String
+  :: FastString
   -> Scaled Type
   -> InScopeSet
   -> (Id, InScopeSet)
@@ -125,7 +125,7 @@ freshId name (Scaled mult ty) scope = do
   let unique = unsafeGetFreshLocalUnique scope
 
   -- Create the fresh identifier.
-  let name' = mkSystemName unique $ mkVarOcc name
+  let name' = mkSystemName unique $ mkVarOccFS name
   let identifier = mkLocalId name' mult ty
 
   -- Extend the scope and return it, together with the fresh identifier.
@@ -135,7 +135,7 @@ freshId name (Scaled mult ty) scope = do
 -- | Get multiple fresh identifiers via 'freshId'.
 freshIds
   :: Traversable f
-  => f (String, Scaled Type)
+  => f (FastString, Scaled Type)
   -> InScopeSet
   -> (f Id, InScopeSet)
 freshIds = accumL $ uncurry freshId
@@ -146,7 +146,7 @@ freshIds = accumL $ uncurry freshId
 -- Creates a new type variable and adds it to the in-scope set of the given
 -- substitution.
 freshTyVar
-  :: String
+  :: FastString
   -> Kind
   -> InScopeSet
   -> (TyVar, InScopeSet)
@@ -155,7 +155,7 @@ freshTyVar name kind scope = do
   let unique = unsafeGetFreshLocalUnique scope
 
   -- Create the fresh identifier.
-  let name' = mkSystemName unique $ mkVarOcc name
+  let name' = mkSystemName unique $ mkVarOccFS name
   let tyVar = mkTyVar name' kind
 
   -- Extend the scope and return it, together with the fresh identifier.
@@ -165,7 +165,7 @@ freshTyVar name kind scope = do
 -- | Get multiple fresh type variables via 'freshTyVar'.
 freshTyVars
   :: Traversable f
-  => f (String, Kind)
+  => f (FastString, Kind)
   -> InScopeSet
   -> (f TyVar, InScopeSet)
 freshTyVars = accumL $ uncurry freshTyVar

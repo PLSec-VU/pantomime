@@ -32,7 +32,7 @@ import GHC.Plugins
   , mkApps
   , exprType
   , hasCoreUnfolding
-  , idUnfolding
+  , realIdUnfolding
   , idInlinePragma
   )
 
@@ -265,7 +265,7 @@ resolvePluginAxioms PluginAxioms { .. } = do
 
     -- Gather the expression of the interpretation.
     -- TODO: Should we also attempt to get it from the local bindings?
-    expr <- case idUnfolding interp' of
+    expr <- case realIdUnfolding interp' of
       CoreUnfolding { uf_tmpl } -> pure uf_tmpl
       _ -> throwError_ ()
 
@@ -276,7 +276,7 @@ resolvePluginAxioms PluginAxioms { .. } = do
       Opaque _ -> pure $ resolveInstancesWith dicts expr
 
       -- We only want to interpret no-inline if the unfolding was not available.
-      NoInline _ | not . hasCoreUnfolding $ idUnfolding orig' -> pure expr
+      NoInline _ | not . hasCoreUnfolding $ realIdUnfolding orig' -> pure expr
 
       -- It is fragile to interpret inlineable instances, as they may already
       -- have been optimised away.
@@ -284,6 +284,11 @@ resolvePluginAxioms PluginAxioms { .. } = do
       -- but when testing it here, it doesn't. I feel like this test is the
       -- correct one but it doesn't work in this case. I'll leave it like this
       -- for now.
+      --
+      -- Actually, I ran into an issue where the function I wanted to call had
+      -- a NOINLINE on an inner value (that was not exported). Perhaps it still
+      -- makes sense to overwrite definitions, even if they can be inlined? I
+      -- guess it is still pretty fragile...
       -- _ -> throwError_ ()
       _ -> pure expr
 

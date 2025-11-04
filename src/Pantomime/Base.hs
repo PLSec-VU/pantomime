@@ -47,6 +47,11 @@ noinline' = id
 patError' :: forall q (a :: TYPE q). Addr# -> a
 patError' _ = raise# ()
 
+{-# INLINE map' #-}
+map' :: (a -> b) -> [a] -> [b]
+map' _ []     = []
+map' f (x:xs) = f x : map' f xs
+
 axioms :: PluginAxioms
 axioms =  PluginAxioms
   { typeAxioms = mempty
@@ -55,5 +60,6 @@ axioms =  PluginAxioms
     , ('integerToWord#, 'integerToWord')
     , ('noinline, 'noinline')
     , ('patError, 'patError')
+    , ('map, 'map')
     ]
   }

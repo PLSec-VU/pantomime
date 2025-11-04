@@ -34,7 +34,7 @@ import GHC.Utils.Outputable
 
 import Grisette (LogicalOp (..), EvalSym (..), onUnion)
 
-import Control.Monad.Except (runExceptT)
+import Control.Monad.Except (ExceptT (..))
 
 import Data.Foldable (for_)
 
@@ -58,6 +58,7 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
+import Data.Traversable (for)
 
 checkValid
   :: forall es
@@ -119,10 +120,17 @@ checkValid PluginAxiomsR { .. } expr = do
   -- seems like the 'Raise' constructor prohibits this (as it also contains
   -- an error field). Still, I feel like there should be a better way to
   -- construct this...
-  let Pantomime.Eval boolResult = result >>= Pantomime.exprToBool
-  evalBool <- case handle boolResult of
+  let Pantomime.Eval (ExceptT boolResult) = result >>= Pantomime.exprToBool
+  -- TODO: We use an orphan Traversable instance for Union. We should just make
+  -- a pull request for this in Grisette.
+  let boolResult' = for boolResult \case
+        Left (Left err) -> Left err
+        Left (Right alt) -> Right $ Left alt
+        Right value -> Right $ Right value
+
+  evalBool <- case handle boolResult' of
     Left (cs, ()) -> withCallStack cs throwError_ ()
-    Right value -> pure $ runExceptT (ok value)
+    Right value -> pure $ ok value
 
   let eq = flip onUnion evalBool \case
         Left Pantomime.Unreachable -> true

@@ -34,16 +34,12 @@ import GHC.Types.Unique
   , getKey
   )
 import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
-import GHC.Utils.Outputable
-  ( Outputable (..)
-  , showSDocUnsafe
-  )
+import GHC.Utils.Outputable (Outputable (..))
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
   ( Var
   , TyCon
   , Name
-  , HasOccName (..)
   , DataCon
   , HasCallStack
   , InScopeSet
@@ -69,6 +65,8 @@ import GHC.Plugins
   , coercionRKind
   , instNewTyCon_maybe
   , mkTyConAppCo
+  , getOccFS
+  , bytesFS
   )
 
 import GHC.TypeLits (someNatVal)
@@ -87,7 +85,7 @@ import Grisette
   )
 
 import Data.Functor ((<&>))
-import Data.String (IsString(..))
+import Data.Text.Encoding (decodeUtf8)
 
 import Pantomime.Grisette.BitVector (IntN)
 import Pantomime.Expr
@@ -132,7 +130,7 @@ varToSymbol
   -> Symbol
 varToSymbol var dst = do
   -- TODO: Clean this function up! It's super ugly!
-  let name = fromString . showSDocUnsafe . ppr . occName . varName $ var
+  let name = decodeUtf8 . bytesFS . getOccFS . varName $ var
   let unique = NumberAtom . toInteger . getKey . getUnique . varName $ var
   let dst' = case dst of
         Field -> Atom "field"
@@ -328,7 +326,7 @@ freshArgs freshEnv ty scope0 = do
   -- TODO: Isn't there some infinite sequence of names that could be used
   -- instead of this?
   -- Names for the arguments.
-  let names = repeat @String "arg"
+  let names = repeat "arg"
 
   -- Create fresh type arguments.
   let kinds = zip names $ fmap tyVarKind tyVars

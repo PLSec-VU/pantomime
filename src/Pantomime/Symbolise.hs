@@ -82,7 +82,7 @@ symbolise fam = go
       GHC.Var var
         | Just expr <- lookupIdSubst subst var -> expr
 
-        | Just expr <- GHC.maybeUnfoldingTemplate $ GHC.idUnfolding var
+        | Just expr <- GHC.maybeUnfoldingTemplate $ GHC.realIdUnfolding var
         -- TODO: I have this check for now, as it makes debugging a bit easier.
         -- Still, I don't think we want to keep this on the long haul. I guess
         -- a user could always write an axiom that says "use the original impl",

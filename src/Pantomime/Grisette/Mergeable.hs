@@ -1,5 +1,6 @@
 module Pantomime.Grisette.Mergeable
   ( NoMerge (..)
+  , NoEval (..)
   , partialStrategy
   , ifStrategy
   , tupleStrategy
@@ -11,7 +12,9 @@ import GHC.Stack (HasCallStack)
 import Data.Either (isLeft)
 
 import Grisette
-  ( Mergeable (..)
+  ( EvalSym (..)
+  , EvalSym1 (..)
+  , Mergeable (..)
   , Mergeable1 (..)
   , MergingStrategy (..)
   , product2Strategy
@@ -28,6 +31,19 @@ instance Mergeable (NoMerge a) where
 
 instance Mergeable1 NoMerge where
   liftRootStrategy _ = NoStrategy
+
+-- TODO: This doesn't really belong in this module... I guess we can keep it
+-- here for now. Otherwise, we could call this Pantomime.Grisette.Util?
+-- | A marker which allows a value that does not implement EvalSym to simply
+-- not evaluate.
+newtype NoEval a where
+  NoEval :: a -> NoEval a
+
+instance EvalSym (NoEval a) where
+  evalSym _ _ = id
+
+instance EvalSym1 NoEval where
+  liftEvalSym _ _ _ = id
 
 -- | Partial merging strategy.
 --
