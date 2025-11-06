@@ -62,6 +62,11 @@ data NonInterference si sl ss i l o where
     , projection :: si -> (sl, ss)
     } -> NonInterference si sl ss i l o
 
+-- TODO: The 0 and 1 naming is incredibly confusing. Ideally, users would
+-- be able to write a single theory. Sadly, just adding an && between these
+-- will likely be a bit slow than necessary. Also, it will be a bit harder to
+-- distinguish where it failed. For now, I just separated the two checks so one
+-- can query the solver twice.
 nonInterference0
   :: Eq sl
   => NonInterference si sl ss i l o
