@@ -444,6 +444,11 @@ instance CoreType n => Reify (RBitVector n) where
   -- only place where we actually use it... Maybe there is a nicer way to do
   -- this than to require this for every call when it isn't used for most
   -- of them...
+  --
+  -- I guess here we could still simply unwrap the coercion, given that the root
+  -- is the correct TyCon. In 'reify' though, we would have to reconstruct the
+  -- coercion (and I don't want to use PluginProv coercions for this!). This
+  -- direction seems harder without the FamInstEnvs.
   interpret fam ty expr = do
     -- Reduction for type-level naturals.
     let reduction = normaliseType fam Representational ty

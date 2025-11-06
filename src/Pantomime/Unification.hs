@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- TODO: Rename to Pantomime.Unify, I think it's cleaner and it also mirrors the
+-- naming from GHC.
 -- TODO: Add module docs.
 module Pantomime.Unification
   ( UnificationError (..)
@@ -13,6 +15,7 @@ module Pantomime.Unification
 import Prelude hiding (break)
 
 import GHC.Plugins hiding ((<>))
+import GHC.Core.Class (Class)
 import GHC.Core.Unify (tcUnifyTys, alwaysBindFun)
 import GHC.Core.Map.Type (TypeMap)
 import GHC.Core.Predicate (isDictId)
@@ -23,9 +26,10 @@ import GHC.Data.Maybe (rightToMaybe, whenIsJust)
 import GHC.Tc.Utils.TcType (tcSplitSigmaTy, substTy)
 
 import Data.List (intersperse)
+import Data.Traversable (for)
 
 import Control.Applicative (Alternative ((<|>)))
-import Control.Monad (when, forM)
+import Control.Monad (when)
 import Control.Error (LookupError (..))
 
 import Lens.Micro
@@ -38,7 +42,6 @@ import Effectful.Error.Static
 import Effectful.Break
 import Effectful.Context
 import Effectful.GHC.External (HasInstEnvs, lookupUniqueInst)
-import GHC.Core.Class (Class)
 
 -- | Error to indicate unification failure.
 --
@@ -184,6 +187,11 @@ lookupTy var = do
   let ty = substTyVar (unif ^. substitution) var
 
   -- Extend the quantifier set if the substitution was a type variable.
+  -- TODO: Shouldn't we gather all free type-variables (now we only gather the
+  -- type variable if it exists at the root...)? Also, can't we inspect
+  -- the substitution directly for this? This seems kind of roundabout... I
+  -- guess in this way we know for sure they're used? I'd have to look into
+  -- this to know what's up.
   case ty of
     TyVarTy var' -> modify $ quantifiers %~ flip extendDVarSet var'
     _ -> pure ()
@@ -415,7 +423,7 @@ resolveInstances
 resolveInstances expr = do
   -- Get a mapping from constraints to instances.
   let theta = splitExprTy expr ^. _2
-  results <- forM theta do
+  results <- for theta do
     fmap rightToMaybe . runError @(LookupError Type) . lookupClassInst
   let instances = zip theta results
 

@@ -37,6 +37,7 @@ import Grisette (LogicalOp (..), EvalSym (..), onUnion)
 import Control.Monad.Except (ExceptT (..))
 
 import Data.Foldable (for_)
+import Data.Traversable (for)
 
 import Language.Haskell.TH qualified as TH
 
@@ -58,7 +59,6 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
-import Data.Traversable (for)
 
 checkValid
   :: forall es

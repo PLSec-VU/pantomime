@@ -186,6 +186,41 @@ import Debug.Trace qualified as Debug
 dbgE :: GHC.Outputable o => o -> Eval es ()
 dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
 
+-- TODO: I recently swapped this implementation from another one because I
+-- thought the old one was broken w.r.t. laziness. I found out later that the
+-- test case was just wrong (i.e. really infite, this one would also not pass
+-- it). I'd like to see if we can reintroduce the old one, as I liked not having
+-- the Result within the Union. In fact, I think this style of Result would
+-- actually allow general effects to be available inside of Eval. The caveat
+-- here is that the branches do not actually branch for the effects themselve.
+-- This doesn't seem like a bad restriction though. For most effects: i.e.
+-- errors and reader this is no real problem: we only care about the first error
+-- anyways and reading does not require ordering anyway. For something like
+-- state or writer, it could be a little bit more iffy. I guess we should
+-- document this if we do want to allow full effects!
+--
+-- Just so I can find it later, this was the commit hash with the diff:
+-- 29b937f6a911dace85647615c18d278bdbc6b0a7
+--
+-- I actually tried the old one, indeed it was **not** broken. Now I'm not
+-- entirely sure which one I should favor... This one has the nice property of
+-- not requiring a 'for' and 'join' on the inner union for the monadic bind.
+-- I'm not sure if this one would work if we want to do a full Eff system in
+-- place of just Result though. On the other hand though, I'm not sure if it was
+-- slow to do a 'for' and then 'join' (and if there maybe is a better way).
+--
+-- Actually, I was thinking about how to write a 'UnionT' monad transformer
+-- to wrap the around the Eff monad. Interestingly, the 'for' and 'join'
+-- implementation is exactly like a broken 'ListT'. Note, the way it is broken
+-- is very different from the reason I thought it was broken. It actually has
+-- to do with commutativity of the monadic bind.
+--
+-- We can think if it is possible to write a non-broken UnionT, but for now it
+-- is fine to leave it implemented like this I guess. Probably good to look at
+-- the non-broken ListT implementations in order to find out how to write a good
+-- one for Union. Perhaps the merging makes it a little bit hard...
+--
+-- For now though, let's just not bother and use this one!
 newtype Eval es a where
   Eval :: ExceptT (Result es (Variant es)) Union a -> Eval es a
   deriving Functor

@@ -1,10 +1,17 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+
 module Pantomime
   ( plugin
 
   , Theory (..)
   , Circuit
+
   , Pantomime (..)
   , pantomime
+
+  , NonInterference (..)
+  , nonInterference0
+  , nonInterference1
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
