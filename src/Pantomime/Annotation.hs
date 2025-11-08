@@ -8,8 +8,8 @@ module Pantomime.Annotation
   , pantomime
 
   , NonInterference (..)
-  , nonInterference0
-  , nonInterference1
+  , stateProjectionPreservation
+  , leakageDeterminism
   ) where
 
 import Data.Bifunctor (Bifunctor(..))
@@ -67,13 +67,15 @@ data NonInterference si sl ss i l o where
 -- will likely be a bit slow than necessary. Also, it will be a bit harder to
 -- distinguish where it failed. For now, I just separated the two checks so one
 -- can query the solver twice.
-nonInterference0
+--
+-- Okay I gave them better names. Still, ideally this becomes one single check!
+stateProjectionPreservation
   :: Eq sl
   => NonInterference si sl ss i l o
   -> si
   -> i
   -> Bool
-nonInterference0 NonInterference { .. } = do
+stateProjectionPreservation NonInterference { .. } = do
   let leakage' s i = do
         let (sl, _ss) = projection s
         let (sl', _o) = leakage sl i
@@ -85,7 +87,7 @@ nonInterference0 NonInterference { .. } = do
 
   \s i -> leakage' s i == implementation' s i
 
-nonInterference1
+leakageDeterminism
   :: Eq o
   => Eq l
   => Eq ss
@@ -95,7 +97,7 @@ nonInterference1
   -> si
   -> i
   -> Bool
-nonInterference1 NonInterference { .. } = do
+leakageDeterminism NonInterference { .. } = do
   let leakage' s i = do
         let (sl, ss) = projection s
         let (_sl', o) = leakage sl i
