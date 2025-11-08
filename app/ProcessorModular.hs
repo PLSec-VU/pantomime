@@ -22,9 +22,9 @@ import Data.Bits
 import Control.Monad.State (MonadState, MonadIO, put, get, runStateT, runState, liftIO) 
 import Data.Maybe (fromMaybe,isJust)
 import Data.Tuple (swap)
-import Projection
-import UC
---import Test.QuickCheck hiding ((.&.))
+-- import Projection
+-- import UC
+-- import Test.QuickCheck hiding ((.&.))
 
 data Instruction = Add Word8
                 -- ^ Add immediate to the register

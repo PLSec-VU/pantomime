@@ -22,7 +22,7 @@ module Two2Adders
   -- , proj5
   ) where
 
-import UC
+-- import UC
 import Prelude hiding (seq)
 
 -- | Show that leak2 is a leakage for add2 wrt obs2

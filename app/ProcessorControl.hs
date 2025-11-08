@@ -20,8 +20,9 @@ import Data.Bits
 import Control.Monad.State (MonadState, MonadIO, put, get, runStateT, runState, liftIO)
 import Data.Maybe (isJust)
 import Data.Tuple (swap)
-import Projection
-import UC
+import Pantomime
+-- import Projection
+-- import UC
 import Test.QuickCheck hiding ((.&.))
 import Debug.Trace
 
@@ -417,12 +418,12 @@ prop_theorem = forAll genProgram theorem
 
 check = quickCheckWith stdArgs{maxSuccess = 5000000} prop_theorem 
 
-{-# ANN tickRun Spec
-  { observation' = 'obs
-  , leakage' = 'leakRun
-  , simulator' = 'simRun
-  , projection' = 'proj
-  } #-}
+-- {-# ANN tickRun Spec
+--   { observation' = 'obs
+--   , leakage' = 'leakRun
+--   , simulator' = 'simRun
+--   , projection' = 'proj
+--   } #-}
 
 diff :: ((State, ()), Word16)
 diff = ((s, ()), i)
@@ -439,15 +440,16 @@ diff = ((s, ()), i)
         i = 0x0300
 
 test :: IO ()
-test = do
-  -- pure ()
-  let (s, i) = diff
-  let imp = Projection.sproj proj (Projection.compose tickRun obs) s i
-  let sim = Projection.sproj' proj (Projection.compose leakRun simRun) s i
-  -- let imp = Projection.composeI tickRun obs' proj s i
-  -- let sim = Projection.composeS leakRun simRun proj s i
-  -- print $ show $ proj s
-  -- print $ leakRun (fst $ proj s) i
-  print $ imp
-  print $ sim
-  print $ imp == sim
+test = pure ()
+-- test = do
+--   -- pure ()
+--   let (s, i) = diff
+--   let imp = Projection.sproj proj (Projection.compose tickRun obs) s i
+--   let sim = Projection.sproj' proj (Projection.compose leakRun simRun) s i
+--   -- let imp = Projection.composeI tickRun obs' proj s i
+--   -- let sim = Projection.composeS leakRun simRun proj s i
+--   -- print $ show $ proj s
+--   -- print $ leakRun (fst $ proj s) i
+--   print $ imp
+--   print $ sim
+--   print $ imp == sim

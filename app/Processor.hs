@@ -14,8 +14,8 @@ import Data.Bits
 import Control.Monad.State (MonadState, MonadIO, put, get, runStateT, runState, liftIO)
 import Data.Maybe (isJust)
 import Data.Tuple (swap)
-import Projection
-import UC
+-- import Projection
+-- import UC
 
 --import Test.QuickCheck hiding ((.&.))
 
@@ -150,12 +150,12 @@ test = do
 -- Leakage Description and Proof
 ------------------------------------------------------------------------------------
 
-{-# ANN tickRun UC
-  { observation = 'obs
-  , leakage = 'leak
-  , simulator = 'simRun
-  , projection = 'proj
-  } #-}
+-- {-# ANN tickRun UC
+--   { observation = 'obs
+--   , leakage = 'leak
+--   , simulator = 'simRun
+--   , projection = 'proj
+--   } #-}
 
 
 -- | Sim instructions

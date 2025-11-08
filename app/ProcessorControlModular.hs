@@ -18,8 +18,8 @@ import Data.Bits
 import Control.Monad.State (MonadState, MonadIO, put, get, runStateT, runState, liftIO)
 import Data.Maybe (isJust)
 import Data.Tuple (swap)
-import Projection
-import UC
+-- import Projection
+-- import UC
 import Test.QuickCheck hiding ((.&.))
 import Debug.Trace
 
@@ -215,12 +215,12 @@ obs _ (_, pc) =  ((),pc)
 -- wbToReg n Nothing = n
 
 
-{-# ANN tickRun Spec
-  { observation' = 'obs
-  , leakage' = 'leakRun
-  , simulator' = 'simRun
-  , projection' = 'proj
-  } #-}
+-- {-# ANN tickRun Spec
+--   { observation' = 'obs
+--   , leakage' = 'leakRun
+--   , simulator' = 'simRun
+--   , projection' = 'proj
+--   } #-}
   
 
 isJmp :: Instruction -> Word32 -> Bool

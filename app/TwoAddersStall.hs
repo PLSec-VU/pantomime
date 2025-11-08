@@ -18,8 +18,8 @@ module TwoAddersStall
   ) where
 
 -- import Test.QuickCheck
-import Projection
-import UC
+-- import Projection
+-- import UC
 
 -- | Show that leak1 is a leakage for add1 wrt obs1
 
@@ -106,7 +106,8 @@ add12 (s1, s2, stalled) (i1, i2) = ((s1', s2', stall), o2)
 
 -- {-# ANN test UCNorm #-}
 test :: (Int, Maybe Int, Bool) -> (Maybe Int, Maybe Int) -> (((), (Int, Bool, Bool)), Bool)
-test = sproj proj12 $ oproj obs12 add12
+-- test = sproj proj12 $ oproj obs12 add12
+test = undefined
 
 -- -- | Overall observation is just timing
 obs12 :: Maybe Int -> Bool

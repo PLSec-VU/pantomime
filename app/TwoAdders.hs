@@ -15,9 +15,6 @@ module TwoAdders
   , proj12
   ) where
 
-import UC
-
-
 -- | Show that leak1 is a leakage for add1 wrt obs1
 
 -- {-# ANN add1 UC

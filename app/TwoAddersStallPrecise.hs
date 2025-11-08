@@ -17,8 +17,8 @@ module TwoAddersStallPrecise
   ) where
 
 -- import Test.QuickCheck
-import Projection
-import UC
+-- import Projection
+-- import UC
 
 -- | Show that leak1 is a leakage for add1 wrt obs1
 
