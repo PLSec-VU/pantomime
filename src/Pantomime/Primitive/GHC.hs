@@ -61,6 +61,7 @@ import Pantomime.Dict
   , leqNat
   , typeAdd
   , typeSub
+  , someTyNat
   , unsafeDict
   )
 
@@ -320,6 +321,10 @@ type SlcBitVector
   ~> RBitVector (RAdd (RAdd (NatTv 0) (RTyNat 1)) (NatTv 1))
   ~> RBitVector (RSub (RAdd (NatTv 0) (RTyNat 1)) (NatTv 2))
 
+type MBndBitVector
+  =  NatTv 0
+  +> RBitVector (NatTv 0)
+
 type ResBitVector
   =  NatTv 0
   +> NatTv 1
@@ -369,8 +374,9 @@ reifiedBitVector = staticReifyError $ lookupReifyMany
   , res 'BitVector.resizeS sizedBVResizeS
   , withN 'BitVector.withNat
 
-  -- TODO: I want to nuke this one at some point!
+  -- TODO: I want to nuke these one at some point!
   , slc 'BitVector.stupidSlice
+  , bnd 'BitVector.stupidMinBound
   ]
   where
     leS :: forall n. KnownNat n => WordN S n -> WordN S n -> SymBool
@@ -513,6 +519,13 @@ reifiedBitVector = staticReifyError $ lookupReifyMany
       Dict <- pure $ unsafeDict @(idx + width <= n)
 
       pure . SomeBV $ sizedBVSelect @_ @idx @width x'
+
+    bnd
+      :: TH.Name
+      -> Interpretation fs
+    bnd name = Interpretation @MBndBitVector name $ pure \n -> do
+      SomeNat @n _ <- failWithE () $ someTyNat n
+      pure $ SomeBV @n 0
 
 concreteKnownNat
   :: () !> es

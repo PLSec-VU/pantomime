@@ -46,7 +46,9 @@ module Pantomime.Primitive.BitVector
   , resizeZ
   , resizeS
 
+  -- | Functions I would rather not have but exist for reasons.
   , stupidSlice
+  , stupidMinBound
   ) where
 
 import Prelude qualified
@@ -331,3 +333,17 @@ stupidSlice x = runIdentity do
   Dict <- pure $ unsafeDict @(idx + width <= upper + 1 + top)
 
   pure $ select @idx @width @(upper + 1 + top) x
+
+-- TODO: We only have this function because Clash has incredibly silly
+-- constraints on their functions. 'minBound#' doesn't have a KnownNat
+-- requirement because BitVector is implemented in a stupid way that tracks a
+-- mask instead of its size. For now, we just create a function that captures
+-- the behaviour by doing type-level machinery under the hood. Really though,
+-- I just want to express my annoyance with Clash as there is no great way to
+-- resolve this issue... (unlike stupidSlice, which is not actually that stupid)
+--
+-- There isn't even a real implementation for this thing btw. (and no, we're not
+-- going to adopt the clash way of encoding this thing!)
+{-# OPAQUE stupidMinBound #-}
+stupidMinBound :: BitVector n
+stupidMinBound = Prelude.undefined

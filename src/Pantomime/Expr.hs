@@ -111,6 +111,8 @@ import GHC.Plugins
   , liftCoSubstWithEx
   , dataConRepArgTys
   , boolTyCon
+  , trueDataCon
+  , falseDataCon
   )
 
 import GHC.TypeNats (KnownNat, SomeNat (..))
@@ -118,6 +120,7 @@ import GHC.Generics (Generic)
 import GHC.Stack (HasCallStack, withFrozenCallStack)
 
 import Grisette.Unified (EvalModeTag (..))
+import Grisette qualified (LogicalOp (..))
 import Grisette
   ( Union
   , SymBool
@@ -125,7 +128,6 @@ import Grisette
   , SymEq (..)
   , SymOrd (..)
   , LogicalOp ((.&&))
-  , BitCast (..)
   , ToSym (..)
   , ToCon (..)
   , TryMerge (..)
@@ -149,7 +151,6 @@ import Pantomime.Orphan.Grisette ()
 import Pantomime.Orphan.GHC ()
 import Pantomime.Result
 import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Grisette.SizedBV (sizedBVResizeZ)
 import Pantomime.Grisette.Mergeable
   ( NoEval (..)
   , NoMerge (..)
@@ -221,6 +222,13 @@ dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
 -- one for Union. Perhaps the merging makes it a little bit hard...
 --
 -- For now though, let's just not bother and use this one!
+--
+-- Btw, I guess Either is commutative up to which error it emits. For us, any
+-- arbitrary decision on this is fine. Reader is also commutative. I guess for
+-- those two, we could actually implement Eval using the 'for' and 'join'
+-- method, with the asterix of picking an arbitrary error branch. Having a
+-- reader could be quite nice btw. We should employ the same trick as for the
+-- error when indexing it btw!
 newtype Eval es a where
   Eval :: ExceptT (Result es (Variant es)) Union a -> Eval es a
   deriving Functor
@@ -596,7 +604,7 @@ mkEnumCon tag ty = do
   -- If we do, do make sure to adjust exprToBool accordingly: we actually do
   -- need to assert no UB occurred!
   -- Check to ensure we have a proper tag.
-  let upper = fromIntegral $ length (tyConDataCons boolTyCon)
+  let upper = fromIntegral $ length (tyConDataCons tc)
   let inBounds = 0 .<= tag .&& tag .< upper
 
   -- Construct the data constructor and its type arguments.
@@ -819,7 +827,21 @@ exprToBool = \case
   Lit (DataCon tag tc) | tc == boolTyCon -> do
     -- DataCon are checked at creation for correctness. Hence, we can simply
     -- cast the bit value.
-    pure $ bitCast (sizedBVResizeZ @_ @_ @1 tag)
+    -- TODO: This above statement might not be true at some point. Really, we
+    -- should check at usage site as it doesn't make sense to check at creation:
+    -- creating a bad dataconstructor doesn't result in UB if we don't branch
+    -- on it!
+    -- TODO: I noticed that Grisette has trouble with reasoning about bit-casts
+    -- when compared to just If statements. With this in mind, I think it makes
+    -- more sense to just do the if statement here!
+    --
+    -- Okay, did it now, but it really looks ugly. Maybe deserves some clean-up.
+    let eqCon dc = tag .== fromIntegral (dataConTagZ dc)
+    mrgIf (eqCon trueDataCon)
+      (pure Grisette.true)
+      (mrgIf (eqCon falseDataCon)
+        (pure Grisette.false)
+        mkUB)
 
   _ -> throwE ()
 

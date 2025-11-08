@@ -2,6 +2,8 @@
 -- separate package.
 -- TODO: We should allow types to be interpreted also if they require strictly
 -- less typeclass constraints.
+-- TODO: We should allow subtyping for constraints, such that we don't need this
+-- no warning pragma anymore!
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PolyKinds #-}
@@ -829,6 +831,15 @@ sliceBitVector x SNat {} SNat {} = go x
 
   --     pure $ Pantomime.select @idx @width @(upper + 1 + top) x'
 
+minBoundBitVector
+  :: forall n
+   . Coercible BitVector Pantomime.BitVector
+  => BitVector n
+minBoundBitVector = go
+  where
+    go :: Coercible bv Pantomime.BitVector => bv n
+    go = coerce Pantomime.stupidMinBound
+
 toIntegerBitVector
   :: forall n
    . Coercible BitVector Pantomime.BitVector
@@ -943,6 +954,7 @@ axioms = PluginAxioms
     , ('BitVector.toInteger#, 'toIntegerBitVector)
     , ('BitVector.slice#, 'sliceBitVector)
     , ('(BitVector.++#), 'concatBitVector)
+    , ('BitVector.minBound#, 'minBoundBitVector)
 
     , ('Bit.eq##, 'eqBit)
     , ('Bit.neq##, 'neqBit)
