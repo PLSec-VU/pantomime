@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.37.0.
+-- This file has been generated from package.yaml by hpack version 0.38.1.
 --
 -- see: https://github.com/sol/hpack
 
@@ -28,8 +28,6 @@ library
       Control.Error
       Effectful.Break
       Effectful.Context
-      Effectful.Context.Dynamic
-      Effectful.Context.Static.Local
       Effectful.GHC.Annotations
       Effectful.GHC.CoreE
       Effectful.GHC.Display
@@ -54,7 +52,6 @@ library
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.SomeBV
       Pantomime.Grisette.Union
-      Pantomime.Orphan.Effectful
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes
@@ -123,7 +120,6 @@ executable uc-plugin-exe
   other-modules:
       ClassInline
       Core
-      Core2
       LocalClass
       Processor
       ProcessorControl

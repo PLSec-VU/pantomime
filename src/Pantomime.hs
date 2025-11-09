@@ -10,8 +10,8 @@ module Pantomime
   , pantomime
 
   , NonInterference (..)
-  , stateProjectionPreservation
-  , leakageDeterminism
+  , tickStateCorrespondence
+  , projectionCoherence
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
