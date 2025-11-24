@@ -3,8 +3,7 @@
 {-# OPTIONS_GHC -Wno-all #-}
 
 module ProcessorControl
-    ( runDiff
-    , check
+    ( check
     , tickRun
     , obs
     , leakRun

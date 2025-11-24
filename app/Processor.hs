@@ -180,7 +180,7 @@ data LeakInst = LAdd Bool
                 |  LClr
     deriving (Eq, Ord, Show) 
 
-stateless :: (a -> b) -> Circuit () a b
+stateless :: (a -> b) -> () -> a -> ((), b)
 stateless f _ i = ((), f i)
 
 obs = stateless obs'
