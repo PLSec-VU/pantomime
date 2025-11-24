@@ -33,7 +33,7 @@ module Main
 -- import GHC.Base
 
 -- import UC
-import ProcessorControl (runDiff)
+-- import ProcessorControl (runDiff)
 -- -- import Data.Word
 
 -- import qualified Projection
@@ -322,7 +322,7 @@ add _ ( Just 0 , Just b) = ( Nothing , Just b)
 add _ ( Just a , Just b) = ( Just (a+b) , Nothing )
 add s _ = ( Nothing , s)
 
-{-# ANN test (Theory Base.axioms) #-}
+-- {-# ANN test (Theory Base.axioms) #-}
 test :: Pantomime.BitVector 23 -> Bool
 test x = x == Pantomime.stupidMinBound
 -- test :: Maybe Int -> (Maybe Int, Maybe Int) -> (Maybe Int, Bool)
@@ -1098,37 +1098,51 @@ main = do
   --       let (ss', o) = Core2.sim ss l
   --       ((sl', ss'), o)
 
-  -- let st = Core2.State
-  --       { reg = 0x80000000
-  --       , fePC = 0x06
-  --       , exPC = 0xa1
-  --       , exInstr = Core2.Bz 0x01
-  --       , wbRes = Just 0x00000000
-  --       , wbOut = Nothing
+  let st = Core2.State
+        { reg = 10
+        , fePC = 1
+        , exPC = 0
+        , exInstr = Core2.Bz 8
+        , wbRes = Just 0
+        , wbOut = Nothing
+        }
+  let instr = 0x00ec
+
+  let leaksim s i = do
+        let (sl, ss) = Core2.proj s
+        let (sl', x) = Core2.leak sl i
+        let (ss', o) = Core2.sim ss x
+        ((sl', ss'), o)
+  let implobs s i = do
+        let (s', o) = Core2.core s i
+        (Core2.proj s', Core2.obs' o)
+
+  print $ leaksim st instr
+  print $ implobs st instr
+
+  print $ Core2.theory st instr
+
+  -- let st0 = Core2.State
+  --       { reg = 0x00000000
+  --       , fePC = 0xc1
+  --       , exPC = 0x3d
+  --       , exInstr = Core2.Bz 0x00
+  --       , wbRes = Just 0x80000000
+  --       , wbOut = Just 0x40000000
   --       }
-  -- let instr = 0x100
+  -- let instr0 = 0x0000
 
-  let st0 = Core2.State
-        { reg = 0x00000000
-        , fePC = 0xc1
-        , exPC = 0x3d
-        , exInstr = Core2.Bz 0x00
-        , wbRes = Just 0x80000000
-        , wbOut = Just 0x40000000
-        }
-  let instr0 = 0x0000
+  -- let st1 = Core2.State
+  --       { reg = 0x00000000
+  --       , fePC = 0xc1
+  --       , exPC = 0x3d
+  --       , exInstr = Core2.Clr
+  --       , wbRes = Just 0x00000000
+  --       , wbOut = Just 0x00000000
+  --       }
+  -- let instr1 = 0x0000
 
-  let st1 = Core2.State
-        { reg = 0x00000000
-        , fePC = 0xc1
-        , exPC = 0x3d
-        , exInstr = Core2.Clr
-        , wbRes = Just 0x00000000
-        , wbOut = Just 0x00000000
-        }
-  let instr1 = 0x0000
-
-  print $ Core2.theory1 st0 instr0 st1 instr1
+  -- print $ Core2.theory1 st0 instr0 st1 instr1
 
   -- let leakproj s i = Core2.leak (fst $ Core2.proj s) i
   -- let implobs' s i = do
