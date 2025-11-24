@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -w #-}
+
 module Two2Adders
   ( obs2
   , leak2
@@ -22,7 +24,6 @@ module Two2Adders
   -- , proj5
   ) where
 
--- import UC
 import Prelude hiding (seq)
 
 -- | Show that leak2 is a leakage for add2 wrt obs2

@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -w #-}
+
 module TwoAdders
   ( obs1
   , leak1

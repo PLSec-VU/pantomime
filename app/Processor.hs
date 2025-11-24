@@ -1,11 +1,13 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# OPTIONS_GHC -Wno-all #-}
 
 module Processor
     ( tickRun,
       simRun,
       leak,
       obs,
-      proj
+      proj,
+      diff,
     ) where
 --import Test.QuickCheck
 
@@ -14,12 +16,8 @@ import Data.Bits
 import Control.Monad.State (MonadState, MonadIO, put, get, runStateT, runState, liftIO)
 import Data.Maybe (isJust)
 import Data.Tuple (swap)
--- import Projection
--- import UC
 
 --import Test.QuickCheck hiding ((.&.))
-
-
 
 data Instruction = Add Word8
                 -- ^ Add immediate to the register
@@ -52,7 +50,8 @@ decode word = case shiftR word 8 of
     0 -> Add (fromIntegral (word .&. 0xFF))
     1 -> Clr
     2 -> Out
-    _ -> error "Invalid instruction"
+    _ -> Add 0
+    -- _ -> error "Invalid instruction"
 
 -- | Processor State
 data State = State {
@@ -113,10 +112,21 @@ tick rawInst = do
     fetch rawInst
     return (out, pc)
 
+diff :: (State, Word16)
+diff = (s, i)
+    where
+        s = State
+            { pc = 0 -- Don't care
+            , reg = 0 -- Don't care
+            , stalled = False
+            , fetchInstruction = Add 0
+            , writebackOut = (Nothing, Nothing) -- Don't care about fst
+            }
+        i = 0xffff
 
 tickRun :: State -> Word16 -> (State, (Maybe Output, Word8))
-tickRun s i = swap $ runState (tick i) s    
-    
+tickRun s i = swap $ runState (tick i) s
+
 run :: MonadState State m => [Word16] -> m [Maybe Output]
 run program = do
     state <- get
@@ -157,6 +167,12 @@ test = do
 --   , projection = 'proj
 --   } #-}
 
+-- {-# ANN tickRun Spec
+--   { observation' = 'obs
+--   , leakage' = 'leak
+--   , simulator' = 'simRun
+--   , projection' = 'proj
+--   } #-}
 
 -- | Sim instructions
 data LeakInst = LAdd Bool
@@ -164,10 +180,15 @@ data LeakInst = LAdd Bool
                 |  LClr
     deriving (Eq, Ord, Show) 
 
+stateless :: (a -> b) -> Circuit () a b
+stateless f _ i = ((), f i)
+
+obs = stateless obs'
+
 -- | Attacker can see whether there's an ouput + the PC.
-obs :: (Maybe Output, Word8) -> (Bool, Word8)
-obs (Just _, pc) = (True, pc)
-obs (_, pc) = (False, pc)
+obs' :: (Maybe Output, Word8) -> (Bool, Word8)
+obs' (Just _, pc) = (True, pc)
+obs' (_, pc) = (False, pc)
 
 leakInst :: Instruction -> LeakInst
 leakInst inst = case inst of
@@ -225,10 +246,10 @@ sim inst = do
     return (out, pc)
 
 simRun :: LState -> LeakInst -> (LState, (Bool, Word8))
-simRun s i = swap $ runState (sim i) s    
+simRun s i = swap $ runState (sim i) s
 
-proj :: State -> ((), LState)
-proj s = ((), ls)
+proj :: (State, ()) -> ((), LState)
+proj (s, _) = ((), ls)
     where    
     ls = LState{ 
           lpc = pc s 

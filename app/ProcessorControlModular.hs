@@ -18,8 +18,6 @@ import Data.Bits
 import Control.Monad.State (MonadState, MonadIO, put, get, runStateT, runState, liftIO)
 import Data.Maybe (isJust)
 import Data.Tuple (swap)
--- import Projection
--- import UC
 import Test.QuickCheck hiding ((.&.))
 import Debug.Trace
 
@@ -221,7 +219,6 @@ obs _ (_, pc) =  ((),pc)
 --   , simulator' = 'simRun
 --   , projection' = 'proj
 --   } #-}
-  
 
 isJmp :: Instruction -> Word32 -> Bool
 isJmp (J _) _ = True
@@ -256,7 +253,7 @@ leak rawInst = do
             put $ state {lfetchInstruction = Add 0}
             return (LJ addr)
         Beq offset ->
-            if (lreg state) == 0 
+            if (lreg state) == 0
             then do 
                 put $ state {lfetchInstruction = Add 0}
                 return $ LBeq offset

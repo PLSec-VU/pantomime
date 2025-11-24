@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -w #-}
+
 module TwoAddersStallPrecise
   ( obs1
   , leak1
@@ -15,10 +17,6 @@ module TwoAddersStallPrecise
 --   , sim12
 --   , proj12
   ) where
-
--- import Test.QuickCheck
--- import Projection
--- import UC
 
 -- | Show that leak1 is a leakage for add1 wrt obs1
 

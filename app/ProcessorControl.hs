@@ -3,7 +3,7 @@
 {-# OPTIONS_GHC -Wno-all #-}
 
 module ProcessorControl
-    ( test
+    ( runDiff
     , check
     , tickRun
     , obs
@@ -21,8 +21,6 @@ import Control.Monad.State (MonadState, MonadIO, put, get, runStateT, runState, 
 import Data.Maybe (isJust)
 import Data.Tuple (swap)
 import Pantomime
--- import Projection
--- import UC
 import Test.QuickCheck hiding ((.&.))
 import Debug.Trace
 
@@ -166,6 +164,7 @@ tick rawInst = do
    pc <- fetch rawInst
    return (out, pc)
 
+-- {-# ANN tickRun (SymCompare 'tickRun) #-}
 tickRun :: State -> Word16 -> (State, (Maybe Output, Word8))
 tickRun s i = swap $ runState (tick i) s
 
@@ -418,11 +417,11 @@ prop_theorem = forAll genProgram theorem
 
 check = quickCheckWith stdArgs{maxSuccess = 5000000} prop_theorem 
 
--- {-# ANN tickRun Spec
---   { observation' = 'obs
---   , leakage' = 'leakRun
---   , simulator' = 'simRun
---   , projection' = 'proj
+-- {-# ANN tickRun Pantomime
+--   { observation = 'obs
+--   , leakage = 'leakRun
+--   , simulator = 'simRun
+--   , projection = 'proj
 --   } #-}
 
 diff :: ((State, ()), Word16)

@@ -3,21 +3,27 @@
 {-# OPTIONS_GHC -Wno-all #-}
 
 module Core
-(test) where
+  ( theory
+  ) where
 
 import GHC.Word (Word8 (..), Word16 (..), Word32 (..))
 import GHC.Base (wordToWord8#, word8ToWord#, word16ToWord#, wordToWord16#, wordToWord32#)
 import Data.Word
 import Data.Bits
 
+import Pantomime (Pantomime(..), Theory (..), pantomime)
+import Pantomime.Base qualified as Base
+
 
 data Instr = Add Word8 | Clr | Out | Jmp Word8 | Beq Word8
+  deriving (Eq, Show)
 
 data State = State { pc :: Word8 
                     , reg :: Word32 
                     , exInstr :: Instr 
                     , exPC :: Word8 
                     , wbOut :: (Maybe Word32 , Maybe Word32) }
+  deriving (Eq, Show)
 
 fe :: State -> ( Word16 , Maybe Word8 ) -> (State, ())
 fe state ( rawInstr , jmp ) =
@@ -56,15 +62,25 @@ proc state rawInstr =
     let ( state''', _ ) = fe state'' (rawInstr, jmp) in
         ( state''', (out, pc state'''))
 
-test = putStrLn "Helno world!"
+-- {-# ANN theory (Theory Base.axioms) #-}
+theory :: State -> Word16 -> Bool
+theory = pantomime Pantomime
+  { implementation = proc
+  , leakage = leak
+  , simulator = sim
+  , observation = obs
+  , projection = proj
+  }
 
 ------------------------------------
 -- | Modular leakage and simulator
 ------------------------------------
 
 data LInstr = LJmp Word8 | LBeq Word8 | LOther
+  deriving (Eq, Show)
 
 data LState = LState {lreg :: Word32, lexInstr :: Instr}
+  deriving (Eq, Show)
 
 leak_ex :: LState -> (LState , (LInstr, Bool))
 leak_ex state =
@@ -135,6 +151,7 @@ leak state rawInstr =
 
 
 data SState = SState {spc :: Word8, sexPC :: Word8}
+  deriving (Eq, Show)
 
 sim :: SState -> LInstr -> (SState, Word8)
 sim state leakInstr =
@@ -145,7 +162,12 @@ sim state leakInstr =
         LBeq off -> let newPC = ( sexPC state ) + off in
                     (state {sexPC = curPC , spc = newPC } , newPC)
 
+obs :: (Maybe Word32, Word8) -> Word8
+obs = snd
 
+proj :: State -> (LState, SState)
+proj State { reg, exInstr, pc, exPC } = do
+  (LState { lreg = reg, lexInstr = exInstr}, SState { spc = pc, sexPC = exPC })
 
 -----------------------------
 -- | Encoding and decoding
