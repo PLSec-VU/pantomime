@@ -433,8 +433,8 @@ leak LState { lreg, lexInstr, lwbRes } rawInstr = do
         _ -> Nothing
   let (lexInstr', leakInstr) = case lexInstr of
         Jmp addr -> (Add 0, LJmp addr)
-        -- Bz off | lreg' == 0 -> (Add 0, LBr off)
-        Bz off | lreg == 0 -> (Add 0, LBr off)
+        Bz off | lreg' == 0 -> (Add 0, LBr off)
+        -- Bz off | lreg == 0 -> (Add 0, LBr off)
         _ -> (decode rawInstr, LOther)
   (LState { lreg = lreg', lexInstr = lexInstr', lwbRes = lwbRes' }, leakInstr)
 
