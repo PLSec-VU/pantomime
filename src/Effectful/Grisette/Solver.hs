@@ -24,8 +24,6 @@ import Data.Text (Text)
 
 -- | Allows access to an SMT solver to check satisfiability.
 data Solver :: Effect where
-  -- TODO: I guess we could make this work for non-symbolic values? Of course,
-  -- the solution is trivial there and doesn't require the solver.
   Solve :: Error SolverError :> es => SymBool -> Solver (Eff es) SolverResult
 
 type instance DispatchOf Solver = Dynamic

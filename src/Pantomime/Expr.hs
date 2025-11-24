@@ -45,7 +45,6 @@ module Pantomime.Expr
   , eqLit
   , exprType
   , litType
-  , concreteDataCon
   , collectArgs
   , collectScrut
 
@@ -107,6 +106,7 @@ import GHC.Plugins
   , dataConUnivTyVars
   , decomposeCo
   , tyConArity
+  , tyConFamilySize
   , tyConRolesRepresentational
   , liftCoSubstWithEx
   , dataConRepArgTys
@@ -115,7 +115,7 @@ import GHC.Plugins
   , falseDataCon
   )
 
-import GHC.TypeNats (KnownNat, SomeNat (..))
+import GHC.TypeNats (KnownNat)
 import GHC.Generics (Generic)
 import GHC.Stack (HasCallStack, withFrozenCallStack)
 
@@ -154,9 +154,6 @@ import Pantomime.Grisette.SomeBV (SomeBV (..))
 import Pantomime.Grisette.Mergeable
   ( NoEval (..)
   , NoMerge (..)
-  , partialStrategy
-  , ifStrategy
-  , tupleStrategy
   , impossible
   )
 import Pantomime.Grisette.BitVector (IntN, WordN)
@@ -165,14 +162,9 @@ import Data.Composition ((.:))
 import Data.Coerce (coerce)
 import Data.List ((!?))
 import Data.Traversable (for)
-import Data.Typeable
-  ( type (:~:) (..)
-  , Proxy (..)
-  , eqT
-  )
+import Data.Typeable (type (:~:) (..), eqT)
 
 import Control.Arrow (Arrow(..))
-import Control.Applicative (Alternative(..))
 import Control.Monad.Except (ExceptT (..))
 import Control.Monad
   ( (>=>)
@@ -229,6 +221,15 @@ dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
 -- method, with the asterix of picking an arbitrary error branch. Having a
 -- reader could be quite nice btw. We should employ the same trick as for the
 -- error when indexing it btw!
+--
+-- I don't believe it is actually possible to write a good UnionT
+-- implementation. That is, what would the effect be of two computations that
+-- should be merged. Should we take just one of them? Which one? If we do take
+-- effects of both, which ordering should be employed for this?
+--
+-- Still, having to redefine an effect-like monad restricted to the correct
+-- effects feels a tad bit silly. Would it not make more sense to just have a
+-- big warning of which effects are actually allowed by this?
 newtype Eval es a where
   Eval :: ExceptT (Result es (Variant es)) Union a -> Eval es a
   deriving Functor
@@ -269,6 +270,8 @@ data Variant es where
   deriving Mergeable via Default (Variant es)
   deriving EvalSym via Default (Variant es)
 
+-- TODO: I feel like a comment on this one is due: this is pretty much the main
+-- data structure of the evaluator (together with Eval)!
 data Expr es where
   Lit
     :: Literal
@@ -380,7 +383,18 @@ data Literal where
   -- Also, there are many edge-cases right now in the code for when it is, or is
   -- not an EnumCon. In this way, the distinction is a little bit more explicit!
   -- I think we should change this!
+  --
+  -- TODO: Changing to the above EnumCon/DataCon split, does it make sense to
+  -- split constructors from the other literals. They're used in a lot of
+  -- different positions and sometimes it just makes sense to not want to reason
+  -- about the possibility of primitive values. Perhaps we could just add a
+  -- 'Con' field to 'Expr'? In this case, perhaps we want to also just attach
+  -- their applications to them as well since we don't actually use App for
+  -- anything else anyway?
   DataCon
+    :: DataCon
+    -> Literal
+  EnumCon
     :: KnownNat n
     => IntN S n
     -> TyCon
@@ -407,39 +421,33 @@ data Literal where
 instance Mergeable Literal where
   rootStrategy = SortedStrategy
     (\case
-      DataCon _ _ -> 0 :: Int
-      Int _ _ -> 1
-      Word _ _ -> 2
-      Integer _ _ -> 3)
+      DataCon _ -> 0 :: Int
+      EnumCon _ _ -> 1
+      Int _ _ -> 2
+      Word _ _ -> 3
+      Integer _ _ -> 4)
     \case
       0 -> wrapStrategy
-        (ifStrategy
-          (isEnumerationTyCon . snd)
-          -- If this is an enumeration TyCon, we can simply merge the tags
-          -- as all DataCon have the same type.
-          rootStrategy
-          -- If this is not an enumeration TyCon, we cannot merge tags as the
-          -- DataCon have different types. Thus, we use a concrete strategy.
-          -- This means, only exactly equivalent concrete tags are merged.
-          -- No merging will occur if the tag is symbolic. A symbolic tag for
-          -- a non-enumeration DataCon is considered as inconsistent.
-          (tupleStrategy
-            (partialStrategy @(SomeBV (IntN C)) toSym toCon rootStrategy)
-            rootStrategy))
-        (\case (SomeBV tag, tc) -> DataCon tag tc)
-        \case DataCon tag tc -> (SomeBV tag, tc) ; _ -> impossible
+        rootStrategy
+        DataCon
+        \case DataCon dc -> dc ; _ -> impossible
 
       1 -> wrapStrategy
+        rootStrategy
+        (\case (SomeBV tag, tc) -> EnumCon tag tc)
+        \case EnumCon tag tc -> (SomeBV tag, tc) ; _ -> impossible
+
+      2 -> wrapStrategy
         rootStrategy
         (\case (SomeBV value, ty) -> Int value ty)
         \case Int value ty -> (SomeBV value, ty) ; _ -> impossible
 
-      2 -> wrapStrategy
+      3 -> wrapStrategy
         rootStrategy
         (\case (SomeBV value, ty) -> Word value ty)
         \case Word value ty -> (SomeBV value, ty) ; _ -> impossible
 
-      3 -> wrapStrategy
+      4 -> wrapStrategy
         rootStrategy
         (\case (value, ty) -> Integer value ty)
         \case Integer value ty -> (value, ty) ; _ -> impossible
@@ -460,7 +468,8 @@ instance EvalSym (Expr es) where
 
 instance EvalSym Literal where
   evalSym fill model = \case
-    DataCon tag tc -> DataCon (evalSym' tag) tc
+    DataCon dc -> DataCon dc
+    EnumCon tag tc -> EnumCon (evalSym' tag) tc
     Int value ty -> Int (evalSym' value) ty
     Word value ty -> Word (evalSym' value) ty
     Integer value ty -> Integer (evalSym' value) ty
@@ -558,13 +567,13 @@ instance Outputable Literal where
     -- an enumeration TyCon, we should emit a tagToEnum# apply to the value. If
     -- this is not an enumeration TyCon, then the tag is invalid. We should
     -- probably print some sort of error message in that case.
-    DataCon @n tag tc
+    DataCon dc -> ppr dc
+    EnumCon @n tag tc
       | Just tag' <- toCon @_ @(IntN C n) tag 
       , Just dc <- tyConDataCons tc !? fromIntegral tag' -> ppr dc
       -- TODO: Technically this print is wrong as the type application should be
       -- the whole type, not just the TyCon.
-      | isEnumerationTyCon tc -> "tagToEnum#" <+> "@" GHC.<> ppr tc <+> ppr (SomeBV tag)
-      | otherwise -> "INVALID DATACON"
+      | otherwise -> "tagToEnum#" <+> "@" GHC.<> ppr tc <+> ppr (SomeBV tag)
     Int value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
     Word value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
     Integer value ty -> text (show value) <+> "::" <+> ppr ty
@@ -579,10 +588,12 @@ mkDataCon
    . KnownNat n
   => DataCon
   -> Literal
-mkDataCon dc = do
-  let tag = fromIntegral . dataConTagZ $ dc
-  let tc = dataConTyCon dc
-  DataCon @n tag tc
+mkDataCon dc = if
+  | let tc = dataConTyCon dc
+  , isEnumerationTyCon tc -> do
+    let tag = fromIntegral . dataConTagZ $ dc
+    EnumCon @n tag tc
+  | otherwise -> DataCon dc
 
 mkEnumCon
   :: forall n es
@@ -604,11 +615,11 @@ mkEnumCon tag ty = do
   -- If we do, do make sure to adjust exprToBool accordingly: we actually do
   -- need to assert no UB occurred!
   -- Check to ensure we have a proper tag.
-  let upper = fromIntegral $ length (tyConDataCons tc)
+  let upper = fromIntegral $ tyConFamilySize tc
   let inBounds = 0 .<= tag .&& tag .< upper
 
   -- Construct the data constructor and its type arguments.
-  let dc = mkLit $ DataCon tag tc
+  let dc = mkLit $ EnumCon tag tc
   let targs' = pure . mkType <$> targs
   let expr = mkApps dc targs'
 
@@ -824,7 +835,7 @@ exprToBool
   => Expr es
   -> Eval es SymBool
 exprToBool = \case
-  Lit (DataCon tag tc) | tc == boolTyCon -> do
+  Lit (EnumCon tag tc) | tc == boolTyCon -> do
     -- DataCon are checked at creation for correctness. Hence, we can simply
     -- cast the bit value.
     -- TODO: This above statement might not be true at some point. Really, we
@@ -855,7 +866,9 @@ eqLit
   -> Literal
   -> Result es SymBool
 eqLit = \cases
-  (DataCon @l ltag ltc) (DataCon @r rtag rtc) 
+  (DataCon ldc) (DataCon rdc)
+    | dataConTyCon ldc == dataConTyCon rdc -> pure $ toSym (ldc == rdc)
+  (EnumCon @l ltag ltc) (EnumCon @r rtag rtc)
     | ltc == rtc
     , Just Refl <- eqT @l @r -> pure $ ltag .== rtag
   (Int @l lval lty) (Int @r rval rty) 
@@ -901,45 +914,16 @@ litType
   => Literal
   -> Result es Type
 litType = \case
-  DataCon tag tc -> do
-    dc <- failWith () $ anyDataCon tag tc
+  DataCon dc -> pure $ dataConRepType dc
+  EnumCon _ tc -> do
+    -- TODO: I guess a safe head function, with failWith would read better.
+    dc <- case tyConDataCons tc of
+      dc : _ -> pure dc
+      _ -> throw ()
     pure $ dataConRepType dc
   Int _ ty -> pure ty
   Word _ ty -> pure ty
   Integer _ ty -> pure ty
-
--- | Attempts to concretise a tag to a DataCon. If the TyCon is an enumeration,
--- this will as a back-up gather any DataCon.
---
--- Enumeration tags may not be concretisable as they can be instantiated via
--- arithmetic. As all DataCon in the enumeration have the same type, it may
--- still be useful to fetch it.
-anyDataCon
-  :: forall n
-   . KnownNat n
-  => IntN S n
-  -> TyCon
-  -> Maybe DataCon
-anyDataCon tag tc = concreteDataCon tag tc <|> if
-  -- Enumeration TyCon all have the same type, so we just select the first
-  -- one. We special case this as the tag of an enumeration may be an
-  -- arbitrary arithmetic expression from which we cannot extract a concrete
-  -- DataCon.
-  | isEnumerationTyCon tc
-  , dc : _ <- tyConDataCons tc -> pure dc
-  | otherwise -> empty
-
--- | Attempts to concretise a tag to a DataCon.
-concreteDataCon
-  :: forall n
-   . KnownNat n
-  => IntN S n
-  -> TyCon
-  -> Maybe DataCon
-concreteDataCon tag tc = do
-  let dcs = tyConDataCons tc
-  tag' <- toCon @_ @(IntN C n) tag 
-  dcs !? fromIntegral tag'
 
 -- | Collect the arguments of an application.
 collectArgs
@@ -988,16 +972,21 @@ collectScrut = \case
 
     -- Collect the spine and arguments.
     let (spine, args) = collectThunks body'
+    spine' <- case spine of
+      Lit lit -> pure lit
+      _ -> throwE ()
 
     -- Only a DataCon spine may have its arguments pushed.
-    (SomeNat @n _, dc) <- case spine of
-      Lit (DataCon @n tag tc)
-        | Just dc <- anyDataCon tag tc -> pure (SomeNat @n Proxy, dc)
+    dc <- case spine' of
+      DataCon dc -> pure dc
+      -- Any Enum DataCon suffices, as we only use its type (and all enum con
+      -- have the same type).
+      EnumCon _ tc | dc : _ <- tyConDataCons tc -> pure dc
       _ -> throwE ()
 
     -- Push the coercion into the arguments.
     (_univ, args') <- liftR $ pushCoDataCon dc args co
-    pure (Right $ mkDataCon @n dc, unthunk <$> args')
+    pure (Right spine', unthunk <$> args')
 
   -- If not a cast, we attempt to get the literal at the spine and return the
   -- arguments excluding the universal type arguments.
@@ -1007,7 +996,8 @@ collectScrut = \case
 
     -- Gathers the number of universal arguments of a literal.
     let nUnivLit = \case
-          DataCon _ tc -> tyConArity tc
+          DataCon dc -> tyConArity $ dataConTyCon dc
+          EnumCon _ tc -> tyConArity tc
           -- TODO: Use or pattern once we bump the GHC version.
           Int {} -> 0
           Word {} -> 0

@@ -85,7 +85,6 @@ import Pantomime.Expr
   , forceTy
   , forceCo
   , exprToBool
-  , concreteDataCon
   , exprType
   , throwE
   , failWithE
@@ -99,7 +98,6 @@ import Pantomime.Subst
 import Pantomime.Primitive.BitVector (BitVector)
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Grisette.SizedBV (sizedBVResizeZ)
 import Pantomime.Result (type (!>))
 
 import GHC.TypeNats (type (<=), KnownNat, Nat, natVal)
@@ -143,6 +141,7 @@ import GHC.Plugins
   , splitFunTy_maybe
   , splitTyConApp_maybe
   , tyConDataCons_maybe
+  , dataConTyCon
   , coercionLKind
   , coercionRKind
   , coercionRole
@@ -183,7 +182,7 @@ import Control.Applicative (liftA3)
 import Control.Monad (unless)
 
 import Grisette.Unified (EvalModeTag(..))
-import Grisette (SymBool, BitCast (..), liftUnion)
+import Grisette (SymBool, SimpleMergeable (..), liftUnion)
 
 import Effectful
 import Effectful.Error.Static
@@ -530,9 +529,7 @@ instance Reify RNatural where
 
     -- Check whether the spine is indeed a natural datacon.
     dc <- case spine of
-      Lit (DataCon tag tc)
-        | tc == naturalTyCon 
-        , Just dc <- concreteDataCon tag tc -> pure dc
+      Lit (DataCon dc) | dataConTyCon dc == naturalTyCon -> pure dc
       _ -> throwE ()
 
     -- All natural DataCon have only one argument exactly. Note that we also
@@ -595,9 +592,7 @@ instance Reify RInteger where
 
     -- Check whether the spine is indeed a natural datacon.
     dc <- case spine of
-      Lit (DataCon tag tc)
-        | tc == integerTyCon
-        , Just dc <- concreteDataCon tag tc -> pure dc
+      Lit (DataCon dc) | dataConTyCon dc == integerTyCon -> pure dc
       _ -> throwE ()
 
     -- All natural DataCon have only one argument exactly. Note that we also
@@ -641,7 +636,7 @@ instance Reify RBool where
 
     -- Convert the symbolic boolean into a tag.
     value <- expr
-    let tag = sizedBVResizeZ @_ @1 $ bitCast value
+    let tag = mrgIte value 1 0
 
     -- FIXME: Provide proper tag size.
     mkEnumCon @64 tag boolTy
@@ -683,7 +678,7 @@ instance KnownNat n => Reify (RInt n) where
 
     -- Check the spine to be the correct type.
     case spine of
-      Lit (DataCon _ tc) | tc == intTyCon -> pure ()
+      Lit (DataCon dc) | dataConTyCon dc == intTyCon -> pure ()
       _ -> throwE ()
 
     arg <- case args of

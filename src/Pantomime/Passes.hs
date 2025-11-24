@@ -73,7 +73,7 @@ annBindsPass pass guts = do
   -- TODO: We should probably run every annotation!
   (_, anns) <- getFirstAnnotations @a deserializeWithData
 
-  binds <- for (mg_binds guts) $ \case
+  binds <- for (mg_binds guts) \case
     NonRec x e | Just ann <- lookupUFM anns $ varName x -> do
       nonRec <$> pass ann (Bind' x e)
     b -> pure b

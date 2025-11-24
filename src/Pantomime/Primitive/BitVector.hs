@@ -344,6 +344,23 @@ stupidSlice x = runIdentity do
 --
 -- There isn't even a real implementation for this thing btw. (and no, we're not
 -- going to adopt the clash way of encoding this thing!)
+--
+-- TODO: Actually, there is perhaps one sort of okay way to solve this:
+-- magicKnownNat :: forall n. Dict (KnownNat n)
+--
+-- This is essentially what we are doing in here. Of course, this function has
+-- no implementation in real Haskell (and we should spell this out!), but we
+-- can implement it in the symbolic version using type-family reduction. Kind of
+-- like what we needed to do for stupidMinBound.
+--
+-- There really is no better way to solve this I think: we really just need a
+-- KnownNat on minBound#, and I'm not gonna ask Clash to fix this...
+--
+-- I guess btw given 'magicKnownNat', we actually don't need to store the
+-- constraint size in the datacon itself. Technically though, this is still kind
+-- of nice as it accurately reflects what Pantomime does under the hood? I guess
+-- here it could be symbolic, but in Pantomime it really cannot. I'm starting to
+-- like magicKnownNat actually :)
 {-# OPAQUE stupidMinBound #-}
 stupidMinBound :: BitVector n
 stupidMinBound = Prelude.undefined

@@ -26,6 +26,8 @@ data Theory where
 
 type Circuit s i o = s -> i -> (s, o)
 
+-- TODO: I think we should name this "constructive", or "simulator-based".
+-- That would be slightly more descriptive in terms of what the check does.
 data Pantomime si sl ss i i' o o' where
   Pantomime ::
     { observation :: o -> o'

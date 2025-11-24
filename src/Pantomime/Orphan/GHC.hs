@@ -17,6 +17,7 @@ import GHC.Plugins
   ( Uniquable(..)
   , Specificity (..)
   , TyCon
+  , DataCon
   , FastString
   , Var
   , VarBndr (..)
@@ -88,6 +89,11 @@ deriving via Uniquely Var instance Mergeable Var
 
 deriving via Uniquely TyCon instance Ord TyCon
 deriving via Uniquely TyCon instance Mergeable TyCon
+
+-- TODO: Perhaps it makes sense to sort DataCon based on their definitional
+-- index than just Unique? Not sure if this is something that is cached?
+deriving via Uniquely DataCon instance Ord DataCon
+deriving via Uniquely DataCon instance Mergeable DataCon
 
 deriving via Uniquely FastString instance Ord FastString
 deriving via Uniquely FastString instance Mergeable FastString

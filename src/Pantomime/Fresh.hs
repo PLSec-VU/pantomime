@@ -2,7 +2,6 @@
 
 module Pantomime.Fresh
   ( FreshInstEnv (..)
-  , freshExpr
   , freshArgs
   ) where
 
@@ -45,26 +44,28 @@ import GHC.Plugins
   , InScopeSet
   , Role (..)
   , dataConTagZ
-  , mkSymCo
   , isDataTyCon
   , isUnboxedTupleTyCon
   , isUnboxedSumTyCon
+  , isEnumerationTyCon
+  , isNumLitTy
   , tyConDataCons_maybe
   , dataConInstArgTys
   , splitForAllTyVars
   , splitFunTys
   , splitTyConApp_maybe
-  , mkTyConTy
-  , isNumLitTy
+  , tyConFamilySize
   , tyVarKind
+  , mkTyConTy
   , mkUnivCo
   , mkAppCos
   , mkReflCo
+  , mkTyConAppCo
+  , mkSymCo
   , coreFullView
   , coercionLKind
   , coercionRKind
   , instNewTyCon_maybe
-  , mkTyConAppCo
   , getOccFS
   , bytesFS
   )
@@ -78,10 +79,12 @@ import Grisette
   , Solvable (..)
   , ConRep (..)
   , SExpr (..)
-  , SymEq (..)
+  , LogicalOp (..)
+  , SymOrd (..)
   , SimpleMergeable (..)
   , simple
   , withMetadata
+  , mrgIf
   )
 
 import Data.Functor ((<&>))
@@ -120,23 +123,28 @@ data Accessor where
     -- ^ The field number to access.
     -> Accessor
 
-data FieldOrTag where
-  Field :: FieldOrTag
-  Tag :: FieldOrTag
+data VarType where
+  Field :: VarType
+  Tag :: VarType
+  -- ^ Full tag, used for EnumCon.
+  Select :: DataCon -> VarType
+  -- ^ Select a specific DataCon.
 
 varToSymbol
   :: Variable es
-  -> FieldOrTag
+  -> VarType
   -> Symbol
 varToSymbol var dst = do
   -- TODO: Clean this function up! It's super ugly!
   let name = decodeUtf8 . bytesFS . getOccFS . varName $ var
   let unique = NumberAtom . toInteger . getKey . getUnique . varName $ var
+  let dcToSExpr = NumberAtom . toInteger . dataConTagZ
   let dst' = case dst of
         Field -> Atom "field"
         Tag -> Atom "tag"
+        Select dc -> List [Atom "select", dcToSExpr dc]
   let accessors = flip fmap (varAccessor var) \(Accessor dc idx) -> do
-        List $ fmap (NumberAtom . toInteger) [dataConTagZ dc, idx]
+        List [dcToSExpr dc, NumberAtom $ toInteger idx]
   let meta = List $ unique : dst' : accessors
   let ident = withMetadata name meta
   simple ident
@@ -144,7 +152,7 @@ varToSymbol var dst = do
 symbolicVar
   :: Solvable (ConType s) s
   => Variable es
-  -> FieldOrTag
+  -> VarType
   -> s
 symbolicVar var dst = case varArgs var of
   [] -> sym $ varToSymbol var dst
@@ -263,10 +271,53 @@ freshExpr FreshInstEnv { .. } root = go Variable
           , isUnboxedTupleTyCon
           , isUnboxedSumTyCon
           ]
-        , Just dataCons <- tyConDataCons_maybe tc -> do
-          -- FIXME: This should get the proper platform size.
-          let tag = symbolicVar @(IntN S 64) var Tag
+        , Just dataCons <- tyConDataCons_maybe tc -> if
+          -- TODO: I really, really hate this level of indentation!
+          | isEnumerationTyCon tc -> do
+            -- FIXME: This should get the proper platform size.
+            let tag = symbolicVar @(IntN S 64) var Tag
 
+            -- Tag is within bounds.
+            let upper = fromIntegral $ tyConFamilySize tc
+            let inBounds = 0 .<= tag .&& tag .< upper
+
+            -- Construct the data constructor and its type arguments.
+            let dc = pure $ mkLit (EnumCon tag tc)
+            mrgIf inBounds dc mkUnreachable
+
+          -- Create cascading if for all possible cases. Note, we avoid
+          -- Unreachable at the root, as it would introduce obsolute
+          -- constraints.
+          | (dcN : dcs) <- reverse dataCons -> do
+            let goDataCon dc = do
+                  let fieldTys = scaledThing <$> dataConInstArgTys dc args
+                  let valArgs = zip [0..] fieldTys <&> \(idx, ty') -> go var
+                        { varType = ty'
+                        , varAccessor = Accessor dc idx : varAccessor var
+                        }
+
+                  let dc' = mkLit $ DataCon dc
+                  let tyArgs = pure . mkType <$> args
+                  mkApps dc' $ tyArgs <> valArgs
+
+            foldlBy (goDataCon dcN) dcs \acc dc -> do
+              let scrut = symbolicVar var $ Select dc
+              let expr = goDataCon dc
+              mrgIte scrut expr acc
+
+          -- Unreachable otherwise.
+          | otherwise -> mkUnreachable
+
+          -- NOTE: I'll leave this todo here for now, because I think the stuff
+          -- in here should become a detailed comment at some point in the
+          -- future on why we create these values in certain ways.
+          --
+          -- It would be good to note that we don't use tag at all in non-enum
+          -- data con. That is, it is just an fold using boolean conditions:
+          -- ite isDC0 DC0 (ite isDC1 DC1 ...)
+          --
+          -- I guess since we now fully swap to an EnumCon/DataCon sum, this is
+          -- probably a bit more obvious. Still, it is good to mention!
           -- TODO: This creates a long list of negated equalities for the
           -- unreachable case: tag != 0 && tag != 1 ... tag != n
           -- Instead, I wonder if it is not better to generate tag < n?
@@ -290,21 +341,42 @@ freshExpr FreshInstEnv { .. } root = go Variable
           -- tag
           --
           -- Note I skipped writing the Unreachable case in both examples.
-          foldlBy mkUnreachable dataCons \acc dc -> do
-            let scrut = tag .== fromIntegral (dataConTagZ dc)
-
-            let fieldTys = scaledThing <$> dataConInstArgTys dc args
-            let valArgs = zip [0..] fieldTys <&> \(idx, ty') -> go var
-                  { varType = ty'
-                  , varAccessor = Accessor dc idx : varAccessor var
-                  }
-
-            -- FIXME: This should get the proper platform size.
-            let dc' = mkLit $ mkDataCon @64 dc
-            let tyArgs = pure . mkType <$> args
-            let expr = mkApps dc' $ tyArgs <> valArgs
-
-            mrgIte scrut expr acc
+          --
+          -- Another thing: we don't really need the Unreachable case in a
+          -- normal (non-enumeration) TyCon. They're encoded as e.g.
+          -- ite
+          --   (tag == 0)
+          --   Just
+          --   (ite
+          --     (tag == 1)
+          --     Nothing
+          --     Unreachable)
+          -- However, it would make more sense to just write:
+          -- ite cond Just Nothing
+          --
+          -- Where 'cond' is just any conditional. It doesn't need to check
+          -- anything about bitvectors! We never use the tag elsewhere! Hmm,
+          -- I guess the nice thing about bitvectors is that they make the other
+          -- cases exclusive by default. I.e. tag == 0 and tag == 1 are mutually
+          -- exclusive, cond1 and cond2 aren't and putting extra conditions like
+          -- that is not better than having the unreachable...
+          --
+          -- Actually, there is an implied order due to the cascading anyway,
+          -- so I'm not sure it matters.
+          --
+          -- It is especially bad for types with a single datacon:
+          -- ite
+          --   (tag == 0)
+          --   I# ...
+          --   Unreachable
+          --
+          -- Why?? :(
+          --
+          -- I guess we can use the unreachable for DataCon without constructors
+          -- like Void? Otherwise, we have no value for it.
+          --
+          -- For enum TyCon, we of course do plan to use it, so there we do need
+          -- the Unreachable statement.
 
         -- TODO: Throw proper error!
         | otherwise -> do

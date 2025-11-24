@@ -634,9 +634,13 @@ symbolisePrimOp fam = \case
       unless (eqType ty argTy) do
         throwE ()
 
+      -- TODO: I dislike having this function here, maybe it should be a
+      -- function inside of Expr? Especially since there is some detail here
+      -- like how we convert datacon to tags.
       -- Get the DataCon tag.
       case fst $ collectArgs arg' of
-        Lit (DataCon @m tag _tc) | Just Refl <- eqT @n @m -> pure tag
+        Lit (DataCon dc) -> pure (fromIntegral . GHC.dataConTagZ $ dc)
+        Lit (EnumCon @m tag _tc) | Just Refl <- eqT @n @m -> pure tag
         _ -> throwE ()
 
 -- | Alias for the 'tagToEnum#' reified type.
