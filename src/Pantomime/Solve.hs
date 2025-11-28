@@ -84,8 +84,13 @@ checkValid PluginAxiomsR { .. } expr = do
   bitVector <- reifiedBitVector
   unsafeRefl <- reifiedUnsafeRefl
 
-  fam <- getFamInstEnvs
-
+  -- TODO: Does it make sense to build this up on every invocation? I feel like
+  -- it would be better to do this once per module. In fact, the final symbolise
+  -- call could actually just be a lookup from the substitution. Idk, I feel
+  -- like there is room for improvement here. Note, we might want to skip out
+  -- on the setup if the module does not have any (active) annotations. Not sure
+  -- if the setup is actually a lot of work, but it seems odd to do it like
+  -- this...
   subst0 <- extendIdSubstMany mkEmptySubst $ unsafeRefl : bitVector
   -- TODO: I think there is an ordering problem here between user
   -- mappings and program definitions. I guess user mappings should
@@ -96,13 +101,15 @@ checkValid PluginAxiomsR { .. } expr = do
   -- should truly be opaque outside of the defining module and they cannot
   -- be guaranteed to not be misused within the module.
   let axioms' = uncurry NonRec <$> termAxiomsR
-  subst1 <- symboliseBindMany fam subst0 axioms'
-  subst <- symboliseBindMany fam subst1 program
+  subst1 <- symboliseBindMany subst0 axioms'
+  subst <- symboliseBindMany subst1 program
 
+  -- TODO: We should change the fresh variable generation to lookup these
+  -- values via the monad. I'd have to think what is the best way to actually
+  -- implement these effects.
   primTys <- getTypes
   let freshEnv = FreshInstEnv
-        { fieFam = fam
-        , fiePrim = primTys
+        { fiePrim = primTys
         , fieUser = typeAxiomsR
         }
 
@@ -112,14 +119,12 @@ checkValid PluginAxiomsR { .. } expr = do
 
   -- Apply the function to the fresh arguments and convert it to a boolean.
   let result = do
-        fun <- symbolise fam subst expr
+        fun <- symbolise subst expr
         res <- mkApps fun $ fmap snd args
         exprToBool res
 
-  -- TODO: I was thinking of making a 'handleE' function for 'Eval', but it
-  -- seems like the 'Raise' constructor prohibits this (as it also contains
-  -- an error field). Still, I feel like there should be a better way to
-  -- construct this...
+  -- TODO: What to do about raise? Do we really just want to return false? I
+  -- guess for now it makes sense.
   union <- coerce result
   let eq = flip (onUnion @Union) union \case
         Left Unreachable -> true
@@ -145,6 +150,9 @@ checkValid PluginAxiomsR { .. } expr = do
   -- I guess the expected behaviour in these cases would be that the function
   -- forces the Void value in order to create any value via an empty case. I
   -- don't think in practise we care about this one.
+  --
+  -- In fact, if the user doesn't force it, it is indeed not the case that these
+  -- functions are equivalent (even though I guess for this input, they are).
   case solution of
     Satisfiable model -> do
       -- TODO: I should probably check whether the arguments are recursive

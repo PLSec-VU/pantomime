@@ -7,7 +7,6 @@ module Pantomime.Symbolise
   ) where
 
 import GHC.Plugins qualified as GHC
-import GHC.Core.FamInstEnv (FamInstEnvs)
 import GHC.Builtin.PrimOps (PrimOp (..))
 import GHC.Builtin.Types.Prim
   ( intPrimTy
@@ -55,12 +54,13 @@ import Data.Typeable (Proxy (..), type (:~:) (..), eqT)
 
 import Effectful
 import Effectful.Error.Static
+import Effectful.GHC.External
 
 symbolise
   :: HasCallStack
   => Error () :> es
-  => FamInstEnvs
-  -> Subst es
+  => HasFamInstEnvs :> es
+  => Subst es
   -> GHC.CoreExpr
   -> EvalExpr es
 -- TODO: I'm now threading in the family instance environment for the primitive
@@ -75,7 +75,12 @@ symbolise
 -- For 2, I could add the PrimOps to the substitution map instead of this
 -- lookup. I feel like this one has merits in it's own right. Maybe we should do
 -- this anyway, even if we end up fixing issue 1.
-symbolise fam = go
+--
+-- NOTE: Since I extended Eval to allow this effect, it is not so bad. Still,
+-- I think it would be good to implement 2. For 1, we would first need to allow
+-- the typeclass instance to have different effects. This also has some
+-- downsides, so it might not be worth the hassle.
+symbolise = go
   where
     -- TODO: I think we should add notes where we add helper functions like this
     -- to signify it is to ensure the callstack doesn't grow.
@@ -99,7 +104,7 @@ symbolise fam = go
 
         | Just op <- GHC.isPrimOpId_maybe var -> do
           -- FIXME: Give proper platform size.
-          symbolisePrimOp @64 fam op
+          symbolisePrimOp @64 op
 
         | Just dc <- GHC.isDataConId_maybe var -> do
           -- FIXME: This should get the proper platform size.
@@ -138,7 +143,7 @@ symbolise fam = go
           go subst' body
 
       GHC.Let bind body -> do
-        subst' <- liftEff $ symboliseBind fam subst bind
+        subst' <- liftEff $ symboliseBind subst bind
         go subst' body
 
       GHC.Case scrut bndr _ty alts -> do
@@ -210,20 +215,20 @@ symboliseBind
    . HasCallStack
   => Error () :> es
   => Error () :> fs
-  => FamInstEnvs
-  -> Subst fs
+  => HasFamInstEnvs :> fs
+  => Subst fs
   -> GHC.CoreBind
   -> Eff es (Subst fs)
-symboliseBind fam subst = \case
+symboliseBind subst = \case
   GHC.NonRec bndr rhs -> do
-    let rhs' = symbolise fam subst rhs
+    let rhs' = symbolise subst rhs
     extendIdSubst subst bndr rhs'
 
   GHC.Rec pairs -> do
     let subst' :: forall gs. Error () :> gs => Eff gs (Subst fs)
         subst' = extendIdSubstMany subst pairs'
         pairs' = second symbolise' <$> pairs
-        symbolise' rhs = liftEff subst' >>= \s -> symbolise fam s rhs
+        symbolise' rhs = liftEff subst' >>= \s -> symbolise s rhs
     subst'
 
 symboliseBindMany
@@ -232,11 +237,11 @@ symboliseBindMany
   => Error () :> es
   => Error () :> fs
   => Foldable f
-  => FamInstEnvs
-  -> Subst fs
+  => HasFamInstEnvs :> fs
+  => Subst fs
   -> f GHC.CoreBind
   -> Eff es (Subst fs)
-symboliseBindMany = foldM . symboliseBind
+symboliseBindMany = foldM symboliseBind
 
 symboliseLit
   :: Error () :> es
@@ -281,11 +286,11 @@ symbolisePrimOp
   :: forall n es
    . HasCallStack
   => Error () :> es
+  => HasFamInstEnvs :> es
   => KnownNat n
-  => FamInstEnvs
-  -> PrimOp
+  => PrimOp
   -> EvalExpr es
-symbolisePrimOp fam = \case
+symbolisePrimOp = \case
   -- Char operations:
   -------------------
   -- ChrOp -> throwE ()
@@ -560,28 +565,28 @@ symbolisePrimOp fam = \case
       => ReifyBuiltin b
       => (InterpRep es a -> InterpRep es b)
       -> EvalExpr es
-    convert = builtinReify @(a ~> b) fam . liftF1'
+    convert = builtinReify @(a ~> b) . liftF1'
 
     binary
       :: forall a
        . ReifyBuiltin a
       => (InterpRep es a -> InterpRep es a -> InterpRep es a)
       -> EvalExpr es
-    binary = builtinReify @(a ~> a ~> a) fam . liftF2'
+    binary = builtinReify @(a ~> a ~> a) . liftF2'
 
     unary
       :: forall a
        . ReifyBuiltin a
       => (InterpRep es a -> InterpRep es a)
       -> EvalExpr es
-    unary = builtinReify @(a ~> a) fam . liftF1'
+    unary = builtinReify @(a ~> a) . liftF1'
 
     cmp
       :: forall a
        . ReifyBuiltin a
       => (InterpRep es a -> InterpRep es a -> SymBool)
       -> EvalExpr es
-    cmp f = builtinReify @(a ~> a ~> RHIntPW n) fam $ liftF2' \l r -> do
+    cmp f = builtinReify @(a ~> a ~> RHIntPW n) $ liftF2' \l r -> do
       mrgIte (f l r) 1 0
 
     -- TODO: I need to think of a good way to do arithmetic/logical shift as
@@ -598,7 +603,7 @@ symbolisePrimOp fam = \case
       => GenSymSimple () (bv m)
       => (bv m -> bv m -> bv m)
       -> EvalExpr es
-    shft f = builtinReify @(a ~> RHIntPW n ~> a) fam $ liftF2' \val idx -> do
+    shft f = builtinReify @(a ~> RHIntPW n ~> a) $ liftF2' \val idx -> do
       -- The bit-size of platform words.
       let size = fromIntegral $ natVal (Proxy @m)
 
@@ -619,14 +624,14 @@ symbolisePrimOp fam = \case
       -- The final result is defined only within the bounds.
       mrgIte inBounds result ub
 
-    tagToEnum = builtinReify @(TagToEnumType n) fam $ liftF2 \ty arg -> do
+    tagToEnum = builtinReify @(TagToEnumType n) $ liftF2 \ty arg -> do
       tag <- arg
       mkEnumCon tag ty
 
-    raiseOp = builtinReify @RaiseType fam $ liftF5 \_l _r _a _b x -> do
+    raiseOp = builtinReify @RaiseType $ liftF5 \_l _r _a _b x -> do
       mkRaise x
 
-    dataToTag = builtinReify @(DataToTagType n) fam $ liftF3 \_lev ty arg -> do
+    dataToTag = builtinReify @(DataToTagType n) $ liftF3 \_lev ty arg -> do
       -- Force the argument.
       arg' <- arg
 

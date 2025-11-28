@@ -170,8 +170,8 @@ lookupReify
   => Error ReifyMismatch :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => HasFamInstEnvs :> es
   => Error () :> fs
+  => HasFamInstEnvs :> fs
   => Reify a
   => TH.Name
   -> Eval fs (InterpRep fs a)
@@ -194,9 +194,8 @@ lookupReify name interp = do
   unless (eqType ty $ varType var) do
     throwError_ $ ReifyMismatch var ty
 
-  fam <- getFamInstEnvs
   -- Get the expression reified from the intepretation.
-  let expr = reify @a fam ty interp
+  let expr = reify @a ty interp
   pure (var, expr)
 
 lookupReifyMany
@@ -207,8 +206,8 @@ lookupReifyMany
   => Error ReifyMismatch :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => HasFamInstEnvs :> es
   => Error () :> fs
+  => HasFamInstEnvs :> fs
   => Traversable f
   => f (Interpretation fs)
   -> Eff es (f (Var, EvalExpr fs))
@@ -228,8 +227,8 @@ reifiedUnsafeRefl
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => HasFamInstEnvs :> es
   => Error () :> fs
+  => HasFamInstEnvs :> fs
   => Eff es (Var, EvalExpr fs)
 reifiedUnsafeRefl = staticReifyError do
   lookupReify @UnsafeEqProof 'unsafeEqualityProof $ liftF3 \_k tyL tyR -> do
@@ -338,9 +337,9 @@ reifiedBitVector
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
-  => HasFamInstEnvs :> es
   => THNameToGHCName :> es
   => Error () :> fs
+  => HasFamInstEnvs :> fs
   => Eff es [(Var, EvalExpr fs)]
 reifiedBitVector = staticReifyError $ lookupReifyMany
   [ binary 'BitVector.add (+)

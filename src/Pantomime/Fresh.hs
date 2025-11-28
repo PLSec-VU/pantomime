@@ -5,11 +5,7 @@ module Pantomime.Fresh
   , freshArgs
   ) where
 
-import GHC.Core.Reduction
-  ( Reduction(..)
-  , mkReduction
-  , homogeniseHetRedn
-  )
+import GHC.Core.Reduction (Reduction(..), mkReduction, homogeniseHetRedn)
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
 import GHC.Builtin.Types.Prim
   ( intPrimTy
@@ -23,15 +19,8 @@ import GHC.Builtin.Types.Prim
   , word32PrimTy
   , word64PrimTy
   )
-import GHC.Core.FamInstEnv
-  ( FamInstEnvs
-  , topReduceTyFamApp_maybe
-  , normaliseType
-  )
-import GHC.Types.Unique
-  ( Uniquable(..)
-  , getKey
-  )
+import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe, normaliseType)
+import GHC.Types.Unique (Uniquable(..), getKey)
 import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
 import GHC.Utils.Outputable (Outputable (..))
 import GHC.Plugins qualified as GHC
@@ -96,11 +85,11 @@ import Pantomime.Util (freshIds, freshTyVars, foldlBy)
 
 import Effectful
 import Effectful.Error.Static
+import Effectful.GHC.External
 
 data FreshInstEnv where
   FreshInstEnv ::
-    { fieFam :: FamInstEnvs
-    , fieUser :: TyConEnv TyCon
+    { fieUser :: TyConEnv TyCon
     , fiePrim :: Primitive.Types
     } -> FreshInstEnv
 
@@ -169,224 +158,233 @@ symbolicVar var dst = case varArgs var of
 freshExpr
   :: HasCallStack
   => Error () :> es
+  => HasFamInstEnvs :> es
   => FreshInstEnv
   -> Var
   -> EvalExpr es
-freshExpr FreshInstEnv { .. } root = go Variable
-  { varName = GHC.varName root
-  , varAccessor = []
-  , varType = GHC.varType root
-  , varArgs = []
-  }
-  where
-    -- TODO: Add note on callstack and recursion
-    go var = do
-      -- TODO: I don't like the nesting this gives. Maybe we should move these
-      -- definitions inwards somehow.
-      let ty = coreFullView $ varType var
+freshExpr FreshInstEnv { .. } root = do
+  -- TODO: Is it better to this lookup once? Whilst it is a reader-like effect,
+  -- it is implemented through IO, so I'm a bit wary of running it in a hot loop
+  -- like this one. The only way to know is just to profile I guess, but for now
+  -- I'll put it outside.
+  fam <- liftEff getFamInstEnvs
+  -- TODO: Add note on callstack and recursion
+  -- TODO: I don't like the nesting this gives. Maybe we should move these
+  -- definitions inwards somehow. Perhaps just a standalone helper definition?
+  -- This could also be useful for the callstack stuff :)
+  let go var = do
+        let ty = coreFullView $ varType var
 
-      let symbolic :: Solvable (ConType s) s => s
-          symbolic = symbolicVar var Field
+        let symbolic :: Solvable (ConType s) s => s
+            symbolic = symbolicVar var Field
 
-      let mkReductionCast reduction = do
-            let co = mkSymCo $ reductionCoercion reduction
-            let var' = var { varType = reductionReducedType reduction }
-            inner <- go var'
+        let mkReductionCast reduction = do
+              let co = mkSymCo $ reductionCoercion reduction
+              let var' = var { varType = reductionReducedType reduction }
+              inner <- go var'
+              mkCast inner co
+
+        if
+          -- Haskell Primitive:
+          ---------------------
+          -- FIXME: Generate proper platform size.
+          | ty `eqType` intPrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
+          | ty `eqType` int8PrimTy -> pure $ mkLit (mkIntN @8 symbolic ty)
+          | ty `eqType` int16PrimTy -> pure $ mkLit (mkIntN @16 symbolic ty)
+          | ty `eqType` int32PrimTy -> pure $ mkLit (mkIntN @32 symbolic ty)
+          | ty `eqType` int64PrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
+          -- FIXME: Generate proper platform size.
+          | ty `eqType` wordPrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
+          | ty `eqType` word8PrimTy -> pure $ mkLit (mkWordN @8 symbolic ty)
+          | ty `eqType` word16PrimTy -> pure $ mkLit (mkWordN @16 symbolic ty)
+          | ty `eqType` word32PrimTy -> pure $ mkLit (mkWordN @32 symbolic ty)
+          | ty `eqType` word64PrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
+          -- | ty `eqType` floatPrimTy -> undefined
+          -- | ty `eqType` doublePrimTy -> undefined
+
+          -- Pantomime Primitive:
+          -----------------------
+          -- Integer:
+          | ty `eqType` mkTyConTy (Primitive.tcInteger fiePrim) -> do
+            let value = mkInteger symbolic ty
+            pure $ mkLit value
+
+          -- BitVector:
+          | Just (tc, [narg]) <- splitTyConApp_maybe ty
+          , tc == Primitive.tcBitVector fiePrim
+          , let Reduction nco nty = normaliseType fam Nominal narg
+          , Just (SomeNat @n _) <- isNumLitTy nty >>= someNatVal -> do
+            -- Coercion on the entire value for the type-level natural.
+            let co = mkTyConAppCo Representational tc [mkSymCo nco]
+
+            -- Construct the inner value and cast it.
+            let inner = mkLit $ mkWordN @n symbolic (coercionLKind co)
             mkCast inner co
 
-      if
-        -- Haskell Primitive:
-        ---------------------
-        -- FIXME: Generate proper platform size.
-        | ty `eqType` intPrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-        | ty `eqType` int8PrimTy -> pure $ mkLit (mkIntN @8 symbolic ty)
-        | ty `eqType` int16PrimTy -> pure $ mkLit (mkIntN @16 symbolic ty)
-        | ty `eqType` int32PrimTy -> pure $ mkLit (mkIntN @32 symbolic ty)
-        | ty `eqType` int64PrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-        -- FIXME: Generate proper platform size.
-        | ty `eqType` wordPrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
-        | ty `eqType` word8PrimTy -> pure $ mkLit (mkWordN @8 symbolic ty)
-        | ty `eqType` word16PrimTy -> pure $ mkLit (mkWordN @16 symbolic ty)
-        | ty `eqType` word32PrimTy -> pure $ mkLit (mkWordN @32 symbolic ty)
-        | ty `eqType` word64PrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
-        -- | ty `eqType` floatPrimTy -> undefined
-        -- | ty `eqType` doublePrimTy -> undefined
+          -- TODO: Add remaining primitives
 
-        -- Pantomime Primitive:
-        -----------------------
-        -- Integer:
-        | ty `eqType` mkTyConTy (Primitive.tcInteger fiePrim) -> do
-          let value = mkInteger symbolic ty
-          pure $ mkLit value
+          -- User Interpretation:
+          -----------------------
+          | Just (tc, args) <- splitTyConApp_maybe ty
+          , Just tc' <- lookupTyConEnv fieUser tc -> do
+            -- Construct the plugin coercion
+            let prov = PluginProv "pantomime user-defined"
+            let tyL = mkTyConTy tc
+            let tyR = mkTyConTy tc'
+            let univ = mkUnivCo prov Representational tyL tyR
+            let co = mkAppCos univ $ mkReflCo Nominal <$> args
 
-        -- BitVector:
-        | Just (tc, [narg]) <- splitTyConApp_maybe ty
-        , tc == Primitive.tcBitVector fiePrim
-        , let Reduction nco nty = normaliseType fieFam Nominal narg
-        , Just (SomeNat @n _) <- isNumLitTy nty >>= someNatVal -> do
-          -- Coercion on the entire value for the type-level natural.
-          let co = mkTyConAppCo Representational tc [mkSymCo nco]
+            -- Create the final expression.
+            mkReductionCast $ mkReduction co (coercionRKind co)
 
-          -- Construct the inner value and cast it.
-          let inner = mkLit $ mkWordN @n symbolic (coercionLKind co)
-          mkCast inner co
+          -- Type-Family:
+          ---------------
+          | Just (tc, args) <- splitTyConApp_maybe ty
+          , Just hreduction <- topReduceTyFamApp_maybe fam tc args -> do
+            mkReductionCast $ homogeniseHetRedn Representational hreduction
 
-        -- TODO: Add remaining primitives
+          -- Newtype:
+          -----------
+          -- NOTE: It is important we first do primitive and user lookups before
+          -- unfolding newtypes (i.e. the ordering of the guards are important).
+          -- The primitive and user definitions diverge from the normal Haskell
+          -- newtype definition. In all cases, we want the pick primitive and user
+          -- definitions over newtypes.
+          | Just (tc, args) <- splitTyConApp_maybe ty
+          , Just (ty', co) <- instNewTyCon_maybe tc args -> do
+            mkReductionCast $ mkReduction co ty'
 
-        -- User Interpretation:
-        -----------------------
-        | Just (tc, args) <- splitTyConApp_maybe ty
-        , Just tc' <- lookupTyConEnv fieUser tc -> do
-          -- Construct the plugin coercion
-          let prov = PluginProv "pantomime user-defined"
-          let tyL = mkTyConTy tc
-          let tyR = mkTyConTy tc'
-          let univ = mkUnivCo prov Representational tyL tyR
-          let co = mkAppCos univ $ mkReflCo Nominal <$> args
+          -- Algebraic Data Type:
+          -----------------------
+          | Just (tc, args) <- splitTyConApp_maybe ty
+          , or $ fmap ($ tc)
+            [ isDataTyCon
+            , isUnboxedTupleTyCon
+            , isUnboxedSumTyCon
+            ]
+          , Just dataCons <- tyConDataCons_maybe tc -> if
+            -- TODO: I really, really hate this level of indentation!
+            | isEnumerationTyCon tc -> do
+              -- FIXME: This should get the proper platform size.
+              let tag = symbolicVar @(IntN S 64) var Tag
 
-          -- Create the final expression.
-          mkReductionCast $ mkReduction co (coercionRKind co)
+              -- Tag is within bounds.
+              let upper = fromIntegral $ tyConFamilySize tc
+              let inBounds = 0 .<= tag .&& tag .< upper
 
-        -- Type-Family:
-        ---------------
-        | Just (tc, args) <- splitTyConApp_maybe ty
-        , Just hreduction <- topReduceTyFamApp_maybe fieFam tc args -> do
-          mkReductionCast $ homogeniseHetRedn Representational hreduction
+              -- Construct the data constructor and its type arguments.
+              let dc = pure $ mkLit (EnumCon tag tc)
+              mrgIf inBounds dc mkUnreachable
 
-        -- Newtype:
-        -----------
-        -- NOTE: It is important we first do primitive and user lookups before
-        -- unfolding newtypes (i.e. the ordering of the guards are important).
-        -- The primitive and user definitions diverge from the normal Haskell
-        -- newtype definition. In all cases, we want the pick primitive and user
-        -- definitions over newtypes.
-        | Just (tc, args) <- splitTyConApp_maybe ty
-        , Just (ty', co) <- instNewTyCon_maybe tc args -> do
-          mkReductionCast $ mkReduction co ty'
+            -- Create cascading if for all possible cases. Note, we avoid
+            -- Unreachable at the root, as it would introduce obsolute
+            -- constraints.
+            | (dcN : dcs) <- reverse dataCons -> do
+              let goDataCon dc = do
+                    let fieldTys = scaledThing <$> dataConInstArgTys dc args
+                    let valArgs = zip [0..] fieldTys <&> \(idx, ty') -> go var
+                          { varType = ty'
+                          , varAccessor = Accessor dc idx : varAccessor var
+                          }
 
-        -- Algebraic Data Type:
-        -----------------------
-        | Just (tc, args) <- splitTyConApp_maybe ty
-        , or $ fmap ($ tc)
-          [ isDataTyCon
-          , isUnboxedTupleTyCon
-          , isUnboxedSumTyCon
-          ]
-        , Just dataCons <- tyConDataCons_maybe tc -> if
-          -- TODO: I really, really hate this level of indentation!
-          | isEnumerationTyCon tc -> do
-            -- FIXME: This should get the proper platform size.
-            let tag = symbolicVar @(IntN S 64) var Tag
+                    let dc' = mkLit $ DataCon dc
+                    let tyArgs = pure . mkType <$> args
+                    mkApps dc' $ tyArgs <> valArgs
 
-            -- Tag is within bounds.
-            let upper = fromIntegral $ tyConFamilySize tc
-            let inBounds = 0 .<= tag .&& tag .< upper
+              foldlBy (goDataCon dcN) dcs \acc dc -> do
+                let scrut = symbolicVar var $ Select dc
+                let expr = goDataCon dc
+                mrgIte scrut expr acc
 
-            -- Construct the data constructor and its type arguments.
-            let dc = pure $ mkLit (EnumCon tag tc)
-            mrgIf inBounds dc mkUnreachable
+            -- Unreachable otherwise.
+            | otherwise -> mkUnreachable
 
-          -- Create cascading if for all possible cases. Note, we avoid
-          -- Unreachable at the root, as it would introduce obsolute
-          -- constraints.
-          | (dcN : dcs) <- reverse dataCons -> do
-            let goDataCon dc = do
-                  let fieldTys = scaledThing <$> dataConInstArgTys dc args
-                  let valArgs = zip [0..] fieldTys <&> \(idx, ty') -> go var
-                        { varType = ty'
-                        , varAccessor = Accessor dc idx : varAccessor var
-                        }
+            -- NOTE: I'll leave this todo here for now, because I think the stuff
+            -- in here should become a detailed comment at some point in the
+            -- future on why we create these values in certain ways.
+            --
+            -- It would be good to note that we don't use tag at all in non-enum
+            -- data con. That is, it is just an fold using boolean conditions:
+            -- ite isDC0 DC0 (ite isDC1 DC1 ...)
+            --
+            -- I guess since we now fully swap to an EnumCon/DataCon sum, this is
+            -- probably a bit more obvious. Still, it is good to mention!
+            -- TODO: This creates a long list of negated equalities for the
+            -- unreachable case: tag != 0 && tag != 1 ... tag != n
+            -- Instead, I wonder if it is not better to generate tag < n?
+            --
+            -- I guess another way to solve this would be order the Unreachable
+            -- state at the end? That way, we just get a natural chain of if-then
+            -- else until unreachable. I feel like this might hurt other merges
+            -- though...
+            --
+            -- Another thing to look out for is that for enumeration TyCon, we
+            -- generate.
+            -- ite
+            --   (tag == 0)
+            --   0
+            --   (ite
+            --     (tag == 1)
+            --     1
+            --     ...)
+            --
+            -- But really, we should just generate the equivalent expression:
+            -- tag
+            --
+            -- Note I skipped writing the Unreachable case in both examples.
+            --
+            -- Another thing: we don't really need the Unreachable case in a
+            -- normal (non-enumeration) TyCon. They're encoded as e.g.
+            -- ite
+            --   (tag == 0)
+            --   Just
+            --   (ite
+            --     (tag == 1)
+            --     Nothing
+            --     Unreachable)
+            -- However, it would make more sense to just write:
+            -- ite cond Just Nothing
+            --
+            -- Where 'cond' is just any conditional. It doesn't need to check
+            -- anything about bitvectors! We never use the tag elsewhere! Hmm,
+            -- I guess the nice thing about bitvectors is that they make the other
+            -- cases exclusive by default. I.e. tag == 0 and tag == 1 are mutually
+            -- exclusive, cond1 and cond2 aren't and putting extra conditions like
+            -- that is not better than having the unreachable...
+            --
+            -- Actually, there is an implied order due to the cascading anyway,
+            -- so I'm not sure it matters.
+            --
+            -- It is especially bad for types with a single datacon:
+            -- ite
+            --   (tag == 0)
+            --   I# ...
+            --   Unreachable
+            --
+            -- Why?? :(
+            --
+            -- I guess we can use the unreachable for DataCon without constructors
+            -- like Void? Otherwise, we have no value for it.
+            --
+            -- For enum TyCon, we of course do plan to use it, so there we do need
+            -- the Unreachable statement.
 
-                  let dc' = mkLit $ DataCon dc
-                  let tyArgs = pure . mkType <$> args
-                  mkApps dc' $ tyArgs <> valArgs
+          -- TODO: Throw proper error!
+          | otherwise -> do
+            dbgE ["could not create fresh value for", ppr ty]
+            throwE ()
 
-            foldlBy (goDataCon dcN) dcs \acc dc -> do
-              let scrut = symbolicVar var $ Select dc
-              let expr = goDataCon dc
-              mrgIte scrut expr acc
-
-          -- Unreachable otherwise.
-          | otherwise -> mkUnreachable
-
-          -- NOTE: I'll leave this todo here for now, because I think the stuff
-          -- in here should become a detailed comment at some point in the
-          -- future on why we create these values in certain ways.
-          --
-          -- It would be good to note that we don't use tag at all in non-enum
-          -- data con. That is, it is just an fold using boolean conditions:
-          -- ite isDC0 DC0 (ite isDC1 DC1 ...)
-          --
-          -- I guess since we now fully swap to an EnumCon/DataCon sum, this is
-          -- probably a bit more obvious. Still, it is good to mention!
-          -- TODO: This creates a long list of negated equalities for the
-          -- unreachable case: tag != 0 && tag != 1 ... tag != n
-          -- Instead, I wonder if it is not better to generate tag < n?
-          --
-          -- I guess another way to solve this would be order the Unreachable
-          -- state at the end? That way, we just get a natural chain of if-then
-          -- else until unreachable. I feel like this might hurt other merges
-          -- though...
-          --
-          -- Another thing to look out for is that for enumeration TyCon, we
-          -- generate.
-          -- ite
-          --   (tag == 0)
-          --   0
-          --   (ite
-          --     (tag == 1)
-          --     1
-          --     ...)
-          --
-          -- But really, we should just generate the equivalent expression:
-          -- tag
-          --
-          -- Note I skipped writing the Unreachable case in both examples.
-          --
-          -- Another thing: we don't really need the Unreachable case in a
-          -- normal (non-enumeration) TyCon. They're encoded as e.g.
-          -- ite
-          --   (tag == 0)
-          --   Just
-          --   (ite
-          --     (tag == 1)
-          --     Nothing
-          --     Unreachable)
-          -- However, it would make more sense to just write:
-          -- ite cond Just Nothing
-          --
-          -- Where 'cond' is just any conditional. It doesn't need to check
-          -- anything about bitvectors! We never use the tag elsewhere! Hmm,
-          -- I guess the nice thing about bitvectors is that they make the other
-          -- cases exclusive by default. I.e. tag == 0 and tag == 1 are mutually
-          -- exclusive, cond1 and cond2 aren't and putting extra conditions like
-          -- that is not better than having the unreachable...
-          --
-          -- Actually, there is an implied order due to the cascading anyway,
-          -- so I'm not sure it matters.
-          --
-          -- It is especially bad for types with a single datacon:
-          -- ite
-          --   (tag == 0)
-          --   I# ...
-          --   Unreachable
-          --
-          -- Why?? :(
-          --
-          -- I guess we can use the unreachable for DataCon without constructors
-          -- like Void? Otherwise, we have no value for it.
-          --
-          -- For enum TyCon, we of course do plan to use it, so there we do need
-          -- the Unreachable statement.
-
-        -- TODO: Throw proper error!
-        | otherwise -> do
-          dbgE ["could not create fresh value for", ppr ty]
-          throwE ()
+  go Variable
+    { varName = GHC.varName root
+    , varAccessor = []
+    , varType = GHC.varType root
+    , varArgs = []
+    }
 
 freshArgs
   :: HasCallStack
   => Error () :> es
+  => HasFamInstEnvs :> es
   => FreshInstEnv
   -> Type
   -> InScopeSet
