@@ -1,5 +1,5 @@
-{-# LANGUAGE QuantifiedConstraints #-}
-{-# LANGUAGE UndecidableInstances #-}
+-- TODO: I'm not using this module anymore. Perhaps it's better to remove it
+-- from the repo...
 {-# LANGUAGE PatternSynonyms #-}
 
 module Pantomime.Grisette.Union
@@ -11,7 +11,12 @@ module Pantomime.Grisette.Union
   , pattern If
   ) where
 
-import Grisette.Unified (EvalModeTag (..), BaseMonad, DecideEvalMode, withMode)
+import Grisette.Unified
+  ( EvalModeTag (..)
+  , BaseMonad
+  , DecideEvalMode
+  , withMode
+  )
 import Grisette
   ( Mergeable (..)
   , Mergeable1 (..)
@@ -43,7 +48,11 @@ import Grisette
   , pattern If
   )
 
-import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1)
+import Data.Functor.Classes
+  ( Eq1 (..)
+  , Show1 (..)
+  , eq1
+  )
 
 import Control.Applicative (Alternative (..))
 
@@ -56,8 +65,6 @@ import Control.Applicative (Alternative (..))
 newtype Union (mode :: EvalModeTag) a where
   Union :: BaseMonad mode a -> Union  mode a
 
--- TODO: This is not really a good way to unwrap. We should provide some other
--- methods.
 -- | Gather the underlying Grisette BaseMonad.
 unUnion :: Union mode a -> BaseMonad mode a
 unUnion (Union m) = m
@@ -88,8 +95,10 @@ instance DecideEvalMode mode => Foldable (Union mode) where
       go acc m = if
         | Just x <- singleView m -> f x acc
         | Just (IfViewResult _ tr fl) <- ifView m -> go (go acc fl) tr
-        -- TODO: This is aweful. Shouldn't Grisette just change the interface on
-        -- this or something?...
+        -- TODO: This is awful. Shouldn't Grisette just change the interface on
+        -- this or something?... Note, we cannot use 'Single' and 'If' pattern
+        -- as we cannot introduce a mergeable constraint on the values of the
+        -- Union.
         | otherwise -> error "BUG: union should always be either Single or If"
 
 instance DecideEvalMode mode => Traversable (Union mode) where
@@ -97,9 +106,11 @@ instance DecideEvalMode mode => Traversable (Union mode) where
     | Just x <- singleView m -> pure <$> f x
     | Just (IfViewResult cond tr fl) <- ifView m -> do
       mrgIfPropagatedStrategy cond <$> traverse f tr <*> traverse f fl
-    -- TODO: This is aweful. Shouldn't Grisette just change the interface on
-    -- this or something?...
-    | otherwise -> error "BUG: union should always be either Single or If"
+    -- TODO: This is awful. Shouldn't Grisette just change the interface on
+    -- this or something?... Note, we cannot use 'Single' and 'If' pattern
+    -- as we cannot introduce a mergeable constraint on the values of the
+    -- Union.
+    | otherwise -> error "BUG: union should always be either 'Single' or 'If'"
 
 instance DecideEvalMode mode => TryMerge (Union mode) where
   tryMergeWithStrategy strategy (Union m) = do
@@ -114,23 +125,21 @@ instance DecideEvalMode mode => Mergeable1 (Union mode) where
     let op = withMode @mode liftRootStrategy liftRootStrategy
     wrapStrategy (op strategy) Union unUnion
 
-instance SimpleMergeable a => SimpleMergeable (Union C a) where
-  mrgIte = mrgIte1
+instance
+  ( DecideEvalMode mode
+  , SimpleMergeable a
+  ) => SimpleMergeable (Union mode a) where
+  mrgIte = withMode @mode mrgIte1 mrgIf
 
-instance SimpleMergeable1 (Union C) where
-  liftMrgIte f cond (Union tr) (Union fl) = do
-    Union $ liftMrgIte f cond tr fl
-
-instance Mergeable a => SimpleMergeable (Union S a) where
+instance {-# OVERLAPPING #-} Mergeable a => SimpleMergeable (Union S a) where
   mrgIte = mrgIf
 
-instance SimpleMergeable1 (Union S) where
-  liftMrgIte f cond (Union tr) (Union fl) = do
-    Union $ liftMrgIte f cond tr fl
+instance DecideEvalMode mode => SimpleMergeable1 (Union mode) where
+  liftMrgIte f cond (Union true) (Union false) = do
+    let op = withMode @mode liftMrgIte liftMrgIte
+    Union $ op f cond true false
 
--- TODO: I'm not sure I understand what the purpose of this is. Identity does
--- not implement it, so we can only allow symbolic versions.
-instance (forall a. Mergeable a => SimpleMergeable (Union S a))=> SymBranching (Union S) where
+instance SymBranching (Union S) where
   mrgIfWithStrategy strategy cond (Union tr) (Union fl) = do
     Union $ mrgIfWithStrategy strategy cond tr fl
 
@@ -170,8 +179,8 @@ instance DecideEvalMode mode => Eq1 (Union mode) where
     let op = withMode @mode liftEq liftEq
     op f lhs rhs
 
-instance DecideEvalMode mode => Show (Union mode a) where
-  show = withMode @mode show show
+instance (DecideEvalMode mode, Show a) => Show (Union mode a) where
+  show = withMode @mode show show . unUnion
 
 instance DecideEvalMode mode => Show1 (Union mode) where
   liftShowsPrec sp sl d (Union m) = do
