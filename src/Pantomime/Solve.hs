@@ -32,23 +32,23 @@ import GHC.Utils.Outputable
   , (<+>)
   )
 
-import Grisette (LogicalOp (..), EvalSym (..), onUnion)
+import Grisette (LogicalOp (..), EvalSym (..), Union, onUnion)
 
 import Control.Monad.Except (ExceptT (..))
 
+import Data.Coerce (coerce)
 import Data.Foldable (for_)
-import Data.Traversable (for)
 
 import Language.Haskell.TH qualified as TH
 
-import Pantomime.Expr qualified as Pantomime
-import Pantomime.Symbolise qualified as Pantomime
-import Pantomime.Subst qualified as Pantomime
-import Pantomime.Fresh qualified as Pantomime
-import Pantomime.Primitive.GHC qualified as Primitive
-import Pantomime.Result (handle, ok)
-import Pantomime.Util (withCallStack, dbg)
+import Pantomime.Expr (Eval (..), Variant (..), mkApps, exprToBool, pprArg)
+import Pantomime.Symbolise
+import Pantomime.Subst
+import Pantomime.Fresh
+import Pantomime.Primitive.GHC
+import Pantomime.Util (dbg)
 import Pantomime.Axiom (PluginAxiomsR (..))
+import Pantomime.Grisette.UnionT (UnionT (..))
 
 import Effectful
 import Effectful.Context
@@ -81,61 +81,50 @@ checkValid PluginAxiomsR { .. } expr = do
   -- TODO: Somehow this code doesn't read very nice. I think I should review it.
   program <- get @CoreProgram
 
-  reifiedBitVector <- Primitive.reifiedBitVector
-  reifiedUnsafeRefl <- Primitive.reifiedUnsafeRefl
+  bitVector <- reifiedBitVector
+  unsafeRefl <- reifiedUnsafeRefl
 
   fam <- getFamInstEnvs
 
-  let subst = do
-        subst0 <- Pantomime.extendIdSubstMany Pantomime.mkEmptySubst $ reifiedUnsafeRefl : reifiedBitVector
-        -- TODO: I think there is an ordering problem here between user
-        -- mappings and program definitions. I guess user mappings should
-        -- go first? The problem is that we don't want local definitions to
-        -- overwrite them. I guess for now, we can keep the ordering like this,
-        -- but this essentially restricts mappings to be used only outside of
-        -- their defining module. Not the worst thing though, as the functions
-        -- should truly be opaque outside of the defining module and they cannot
-        -- be guaranteed to not be misused within the module.
-        let axioms' = uncurry NonRec <$> termAxiomsR
-        subst1 <- Pantomime.symboliseBindMany fam subst0 axioms'
-        Pantomime.symboliseBindMany fam subst1 program
+  subst0 <- extendIdSubstMany mkEmptySubst $ unsafeRefl : bitVector
+  -- TODO: I think there is an ordering problem here between user
+  -- mappings and program definitions. I guess user mappings should
+  -- go first? The problem is that we don't want local definitions to
+  -- overwrite them. I guess for now, we can keep the ordering like this,
+  -- but this essentially restricts mappings to be used only outside of
+  -- their defining module. Not the worst thing though, as the functions
+  -- should truly be opaque outside of the defining module and they cannot
+  -- be guaranteed to not be misused within the module.
+  let axioms' = uncurry NonRec <$> termAxiomsR
+  subst1 <- symboliseBindMany fam subst0 axioms'
+  subst <- symboliseBindMany fam subst1 program
 
-  subst' <- case handle subst of
-    Left (cs, ()) -> withCallStack cs throwError_ ()
-    Right value -> pure $ ok value
-
-  primTys <- Primitive.getTypes
-  let freshEnv = Pantomime.FreshInstEnv
-        { Pantomime.fieFam = fam
-        , Pantomime.fiePrim = primTys
-        , Pantomime.fieUser = typeAxiomsR
+  primTys <- getTypes
+  let freshEnv = FreshInstEnv
+        { fieFam = fam
+        , fiePrim = primTys
+        , fieUser = typeAxiomsR
         }
 
+  -- Create fresh arguments.
   let ty = exprType expr
-  let (args, _scope) = Pantomime.freshArgs freshEnv ty emptyInScopeSet
-  let fun = Pantomime.symbolise fam subst' expr
-  let result = fun >>= flip Pantomime.mkApps (snd <$> args)
+  let (args, _scope) = freshArgs freshEnv ty emptyInScopeSet
+
+  -- Apply the function to the fresh arguments and convert it to a boolean.
+  let result = do
+        fun <- symbolise fam subst expr
+        res <- mkApps fun $ fmap snd args
+        exprToBool res
 
   -- TODO: I was thinking of making a 'handleE' function for 'Eval', but it
   -- seems like the 'Raise' constructor prohibits this (as it also contains
   -- an error field). Still, I feel like there should be a better way to
   -- construct this...
-  let Pantomime.Eval (ExceptT boolResult) = result >>= Pantomime.exprToBool
-  -- TODO: We use an orphan Traversable instance for Union. We should just make
-  -- a pull request for this in Grisette.
-  let boolResult' = for boolResult \case
-        Left (Left err) -> Left err
-        Left (Right alt) -> Right $ Left alt
-        Right value -> Right $ Right value
-
-  evalBool <- case handle boolResult' of
-    Left (cs, ()) -> withCallStack cs throwError_ ()
-    Right value -> pure $ ok value
-
-  let eq = flip onUnion evalBool \case
-        Left Pantomime.Unreachable -> true
-        Left Pantomime.UB -> false
-        Left Pantomime.Raise {} -> false
+  union <- coerce result
+  let eq = flip (onUnion @Union) union \case
+        Left Unreachable -> true
+        Left UB -> false
+        Left Raise {} -> false
         Right value -> value
 
   solution <- provide_ @Solver $ solve (symNot eq)
@@ -162,16 +151,16 @@ checkValid PluginAxiomsR { .. } expr = do
       -- before printing? Alternatively, I could just have a maximum depth.
       for_ args \(bndr, arg) -> do
         let arg' = evalSym True model arg
+        argdoc <- pprArg id arg'
         dbg $ vcat
           [ "==================="
           , ppr bndr <+> "::" <+> ppr (varType bndr)
-          , ppr arg'
+          , argdoc
           ]
       error "Expression was **not** valid!"
     Unsatisfiable -> do
       dbg @SDoc "Expression was valid!"
       pure ()
-    -- FIXME: I don't think this is always true. Especially so w.r.t. allowing
-    -- user define Opaque types. Also not sure about some of the floating point
-    -- stuff for example.
+    -- FIXME: I don't think this is always true. e.g. not sure about some of the
+    -- floating point stuff for example.
     Unknown -> throwIO $ ErrorCall "checks are in decidable fragment"

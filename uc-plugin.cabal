@@ -35,11 +35,9 @@ library
       Effectful.GHC.Display
       Effectful.GHC.DynFlags
       Effectful.GHC.External
-      Effectful.GHC.ModGuts
       Effectful.GHC.TH
       Effectful.GHC.TyThing
       Effectful.GHC.Unique
-      Effectful.Grisette.Fresh
       Effectful.Grisette.Solver
       Pantomime
       Pantomime.Annotation
@@ -53,7 +51,7 @@ library
       Pantomime.Grisette.Mergeable
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.SomeBV
-      Pantomime.Grisette.Union
+      Pantomime.Grisette.UnionT
       Pantomime.Orphan.Effectful
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
@@ -62,7 +60,6 @@ library
       Pantomime.Primitive.GHC
       Pantomime.Primitive.Operation
       Pantomime.Primitive.Reify
-      Pantomime.Result
       Pantomime.Solve
       Pantomime.Subst
       Pantomime.Symbolise

@@ -12,10 +12,8 @@ module Pantomime.Subst
   ) where
 
 import Pantomime.Expr
-import Pantomime.Result
 
 import GHC.Core.Type qualified as GHC
-import GHC.Stack (HasCallStack)
 import GHC.Plugins
   ( Var
   , Id
@@ -34,6 +32,9 @@ import GHC.Plugins
   )
 
 import Control.Monad (foldM)
+
+import Effectful
+import Effectful.Error.Static
 
 -- | A substitution map for 'Expr'.
 --
@@ -59,11 +60,11 @@ mkEmptySubst = Subst
 -- | Extend the substitution with the given mapping.
 extendSubst
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Subst es
   -> Var
   -> Arg es
-  -> Result es (Subst es)
+  -> Eff es (Subst es)
 extendSubst subst var arg = if
   | isTyVar var -> do
     -- Ensure that the variables are only types. Note that we force the
@@ -91,36 +92,36 @@ extendSubst subst var arg = if
 -- | Extend the substitution with the given mappings.
 extendSubstMany
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Foldable f
   => Subst es
   -> f (Var, Arg es)
-  -> Result es (Subst es)
+  -> Eff es (Subst es)
 extendSubstMany = foldM $ uncurry . extendSubst
 
 -- | Extend the identifier substitution with the given mapping.
 extendIdSubst
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Subst fs
   -> Id
   -> EvalExpr fs
-  -> Result es (Subst fs)
+  -> Eff es (Subst fs)
 extendIdSubst subst var arg = if
   | isId var -> do
     -- Extend the identifier substitution.
     let idSubst' = extendVarEnv (idSubst subst) var arg
     pure subst { idSubst = idSubst' }
-  | otherwise -> throw ()
+  | otherwise -> throwError ()
 
 -- | Extend the identifier substitution with the given mappings.
 extendIdSubstMany
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Foldable f
   => Subst fs
   -> f (Id, EvalExpr fs)
-  -> Result es (Subst fs)
+  -> Eff es (Subst fs)
 extendIdSubstMany = foldM $ uncurry . extendIdSubst
 
 -- | Lookup a variable in the current substitution environment.

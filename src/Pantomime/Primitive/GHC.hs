@@ -54,7 +54,6 @@ import Pantomime.Primitive.Operation qualified as Primitive
 import Pantomime.Primitive.BitVector qualified as BitVector
 import Pantomime.Primitive.BitVector (BitVector)
 import Pantomime.Primitive.Reify
-import Pantomime.Result (type (!>))
 import Pantomime.Dict
   ( SomeNat' (..)
   , Dict (..)
@@ -172,7 +171,7 @@ lookupReify
   => HasThings :> es
   => THNameToGHCName :> es
   => HasFamInstEnvs :> es
-  => () !> fs
+  => Error () :> fs
   => Reify a
   => TH.Name
   -> Eval fs (InterpRep fs a)
@@ -209,7 +208,7 @@ lookupReifyMany
   => HasThings :> es
   => THNameToGHCName :> es
   => HasFamInstEnvs :> es
-  => () !> fs
+  => Error () :> fs
   => Traversable f
   => f (Interpretation fs)
   -> Eff es (f (Var, EvalExpr fs))
@@ -230,7 +229,7 @@ reifiedUnsafeRefl
   => HasThings :> es
   => THNameToGHCName :> es
   => HasFamInstEnvs :> es
-  => () !> fs
+  => Error () :> fs
   => Eff es (Var, EvalExpr fs)
 reifiedUnsafeRefl = staticReifyError do
   lookupReify @UnsafeEqProof 'unsafeEqualityProof $ liftF3 \_k tyL tyR -> do
@@ -341,7 +340,7 @@ reifiedBitVector
   => HasThings :> es
   => HasFamInstEnvs :> es
   => THNameToGHCName :> es
-  => () !> fs
+  => Error () :> fs
   => Eff es [(Var, EvalExpr fs)]
 reifiedBitVector = staticReifyError $ lookupReifyMany
   [ binary 'BitVector.add (+)
@@ -528,7 +527,7 @@ reifiedBitVector = staticReifyError $ lookupReifyMany
       pure $ SomeBV @n 0
 
 concreteKnownNat
-  :: () !> es
+  :: Error () :> es
   => Either (SomeBV (WordN S)) ()
   -> Eval es SomeNat
 concreteKnownNat value = do

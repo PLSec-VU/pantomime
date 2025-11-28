@@ -48,9 +48,9 @@ module Pantomime.Expr
   , collectArgs
   , collectScrut
 
+  , liftEff
   , throwE
   , failWithE
-  , liftR
   , dbgE
   ) where
 
@@ -117,7 +117,7 @@ import GHC.Plugins
 
 import GHC.TypeNats (KnownNat)
 import GHC.Generics (Generic)
-import GHC.Stack (HasCallStack, withFrozenCallStack)
+import GHC.Stack (withFrozenCallStack)
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette qualified (LogicalOp (..))
@@ -149,14 +149,11 @@ import Grisette
 
 import Pantomime.Orphan.Grisette ()
 import Pantomime.Orphan.GHC ()
-import Pantomime.Result
+import Pantomime.Grisette.UnionT
 import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Grisette.Mergeable
-  ( NoEval (..)
-  , NoMerge (..)
-  , impossible
-  )
+import Pantomime.Grisette.Mergeable (NoEval1 (..), impossible)
 import Pantomime.Grisette.BitVector (IntN, WordN)
+import Pantomime.Util (failWith, dbg)
 
 import Data.Composition ((.:))
 import Data.Coerce (coerce)
@@ -166,18 +163,11 @@ import Data.Typeable (type (:~:) (..), eqT)
 
 import Control.Arrow (Arrow(..))
 import Control.Monad.Except (ExceptT (..))
-import Control.Monad
-  ( (>=>)
-  , foldM
-  , unless
-  )
+import Control.Monad ((>=>), foldM, unless)
+import Control.Monad.Trans (MonadTrans(..))
 
-import Debug.Trace qualified as Debug
-
--- TODO: This should be removed at some point? Or perhaps it's usage should
--- give an error? Idk, it is a really nice utility to have when debugging stuff.
-dbgE :: GHC.Outputable o => o -> Eval es ()
-dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
+import Effectful
+import Effectful.Error.Static
 
 -- TODO: I recently swapped this implementation from another one because I
 -- thought the old one was broken w.r.t. laziness. I found out later that the
@@ -230,27 +220,28 @@ dbgE m = Debug.trace (GHC.showSDocUnsafe $ GHC.ppr m) $ pure ()
 -- Still, having to redefine an effect-like monad restricted to the correct
 -- effects feels a tad bit silly. Would it not make more sense to just have a
 -- big warning of which effects are actually allowed by this?
+--
+-- TODO: So I've changed Eval now to allow full commutative effects. The text
+-- above should probably be compiled into some sort of reasoning why we chose
+-- for this setup. There also should be a big warning sign of the commutativity
+-- restriction, we can refer to UnionT for this as I explain much of how it
+-- works there.
 newtype Eval es a where
-  Eval :: ExceptT (Result es (Variant es)) Union a -> Eval es a
+  Eval :: ExceptT (Variant es) (UnionT (Eff es)) a -> Eval es a
   deriving Functor
   deriving Applicative
   deriving Monad
-  deriving TryMerge via (EvalMerge es)
-  deriving Mergeable via (EvalMerge es a)
-  deriving Mergeable1 via (EvalMerge es)
-  deriving SimpleMergeable via (EvalMerge es a)
-  deriving SimpleMergeable1 via (EvalMerge es)
-  deriving SymBranching via (EvalMerge es)
-  deriving EvalSym via (EvalSymEval es a)
-  deriving EvalSym1 via (EvalSymEval es)
+  deriving TryMerge
+  deriving Mergeable
+  deriving Mergeable1
+  deriving SimpleMergeable
+  deriving SimpleMergeable1
+  deriving SymBranching
+  deriving EvalSym via (EvalEvalSym es a)
+  deriving EvalSym1 via (EvalEvalSym es)
 
--- | Mergeable coercion for inner value of 'Eval' monad, useful for derivations
--- and coercions.
-type EvalMerge es = ExceptT (Either (NoMerge (Error es)) (Variant es)) Union
-
--- | SymEval coercion for inner value of 'Eval' monad, useful for derivations
--- and coercions.
-type EvalSymEval es = ExceptT (Either (NoEval (Error es)) (Variant es)) Union
+-- | SymEval coercion for inner value of 'Eval' monad, useful for derivations.
+type EvalEvalSym es = ExceptT (Variant es) (UnionT (NoEval1 (Eff es)))
 
 -- TODO: I'm not sure if I like this name. Perhaps we can think about what other
 -- options these have. Unlike the other error types, these ones don't need a
@@ -485,19 +476,25 @@ instance EvalSym (Thunk es) where
 pprExpr
   :: (SDoc -> SDoc)
   -> Expr es
-  -> SDoc
+  -> Eff es SDoc
 pprExpr addParens = \case
-  Lit lit -> ppr lit
-  Type ty -> "@" GHC.<> ppr ty
-  Coercion co -> "@~" GHC.<> ppr co
-  Cast expr co -> addParens $ sep
-    [ pprUnion parens pprExpr expr
-    , "`cast`" <+> pprOptCo co
-    ]
+  Lit lit -> pure $ ppr lit
+  Type ty -> pure $ "@" GHC.<> ppr ty
+  Coercion co -> pure $ "@~" GHC.<> ppr co
+  Cast expr co -> do
+    expr' <- pprUnion expr parens pprExpr
+    pure . addParens $ sep
+      [ expr'
+      , "`cast`" <+> pprOptCo co
+      ]
   -- TODO: This one is a bit more difficult. Really the only way to print a
   -- lambda is to provide it with fresh arguments. The problem is that we need
   -- a lot more context for printing in that way.
-  Lam {} -> "TODO lambda"
+  --
+  -- Since we actually changed the underyling monad in Eval to allow for more
+  -- effects, we could actually implement this now. :) The only annoying thing
+  -- is the dependency on the fresh variable generation here...
+  Lam {} -> pure "TODO lambda"
     -- (result, args) <- saturateLam @64 $ mkExpr expr
     -- let bndrs = fst <$> args
     -- let bndr = "\\" <+> sep (ppr <$> bndrs) <+> GHC.arrow
@@ -505,38 +502,40 @@ pprExpr addParens = \case
     -- pure . addParens $ hang bndr 2 body
   expr@App {} -> do
     let (fun, args) = collectArgs expr
-    let header = pprExpr parens fun
-    let body = sep $ pprArg parens <$> args
-    addParens $ hang header 2 body
+    header <- pprExpr parens fun
+    args' <- for args $ pprArg parens
+    let body = sep args'
+    pure . addParens $ hang header 2 body
 
 pprArg
   :: (SDoc -> SDoc)
   -> Arg es
-  -> SDoc
+  -> Eff es SDoc
 pprArg addParens = pprEval addParens pprExpr
 
 pprEval
   :: forall a es
    . Mergeable a
   => (SDoc -> SDoc)
-  -> ((SDoc -> SDoc) -> a -> SDoc)
+  -> ((SDoc -> SDoc) -> a -> Eff es SDoc)
   -> Eval es a
-  -> SDoc
-pprEval addParens f = coerce $ pprUnion addParens \p -> \case
-  Left (Left (NoMerge err)) -> GHC.prettyCallStackDoc $ location err
-  Left (Right alt) -> case alt of
-    UB -> "UB"
-    Unreachable -> "Unreachable"
-    Raise expr -> "raise#" <+> pprArg p expr
-  Right expr -> f p expr
+  -> Eff es SDoc
+pprEval addParens f m = do
+  value :: Union (Either (Variant es) a) <- coerce m
+  pprUnion value addParens \p -> \case
+    Left alt -> case alt of
+      UB -> pure "UB"
+      Unreachable -> pure "Unreachable"
+      Raise expr -> ("raise#" <+>) <$> pprArg p expr
+    Right expr -> f p expr
 
 pprUnion
   :: Mergeable a
-  => (SDoc -> SDoc)
-  -> ((SDoc -> SDoc) -> a -> SDoc)
-  -> Union a
-  -> SDoc
-pprUnion addParens inner = \case
+  => Union a
+  -> (SDoc -> SDoc)
+  -> ((SDoc -> SDoc) -> a -> Eff es SDoc)
+  -> Eff es SDoc
+pprUnion union addParens inner = case union of
   Single value -> inner addParens value
   If scrut true false -> do
     -- Vertically concatenate using ($+$).
@@ -545,21 +544,16 @@ pprUnion addParens inner = \case
     -- Hang that always aligns vertically.
     let hang' d1 n d2 = vcat' [d1, nest n d2]
 
-    addParens . hang' "ite" 2 $ vcat'
+    -- Pretty print branches.
+    true' <- pprUnion true parens inner
+    false' <- pprUnion false parens inner
+
+    -- Hange the branches below an if-then-else.
+    pure . addParens . hang' "ite" 2 $ vcat'
       [ text $ show scrut
-      , pprUnion parens inner true
-      , pprUnion parens inner false
+      , true'
+      , false'
       ]
-
--- TODO: I don't like this too much, ideally it is polymorphic over any Expr,
--- but I don't now how to properly parenthesise an Expr in this case (as
--- the inner expression needs to get a function which parenthesises it, if
--- necessary).
-instance Outputable (EvalExpr es) where
-  ppr = pprArg id
-
-instance Outputable (Expr es) where
-  ppr = pprExpr id
 
 instance Outputable Literal where
   ppr = \case
@@ -574,6 +568,11 @@ instance Outputable Literal where
       -- TODO: Technically this print is wrong as the type application should be
       -- the whole type, not just the TyCon.
       | otherwise -> "tagToEnum#" <+> "@" GHC.<> ppr tc <+> ppr (SomeBV tag)
+    -- TODO: We are printing the grisette primitives using show which is
+    -- oblivious to indentation. We should make an actual pretty printer for
+    -- symbolic variables. Ideally, the variable names get the pretty printing
+    -- that is similar to how their naming works in the fresh variable
+    -- generation.
     Int value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
     Word value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
     Integer value ty -> text (show value) <+> "::" <+> ppr ty
@@ -598,7 +597,7 @@ mkDataCon dc = if
 mkEnumCon
   :: forall n es
    . KnownNat n
-  => () !> es
+  => Error () :> es
   => IntN S n
   -> Type
   -> EvalExpr es
@@ -664,7 +663,7 @@ mkLam = Lam
 
 mkApp
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Expr es
   -> Arg es
   -> EvalExpr es
@@ -676,17 +675,17 @@ mkApp fun arg = case fun of
     mkCastMCo expr rco
   Lam _ty closure -> closure arg
   _ -> do
-    ty <- liftR $ exprType fun
+    ty <- liftEff $ exprType fun
     if
       | isFunTy ty -> pure $ App fun (Thunked arg)
       | isForAllTy ty -> do
-        forced <- liftR $ forceTyCo arg
+        forced <- liftEff $ forceTyCo arg
         pure $ App fun (Forced forced)
       | otherwise -> throwE ()
 
 pushCoArg
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => CoercionR
   -> Arg es
   -> Eval es (Arg es, MCoercionR)
@@ -694,7 +693,7 @@ pushCoArg co arg = if
   | tyL <- coercionLKind co
   , isForAllTy_ty tyL -> do
     -- The argument needs to be a type. As such, we can force it.
-    ty <- liftR $ forceTy arg
+    ty <- liftEff $ forceTy arg
 
     -- Attempt to push the coercion into the type argument.
     (ty', rco) <- failWithE () $ pushCoTyArg co ty
@@ -712,7 +711,7 @@ pushCoArg co arg = if
 
 mkApps
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Expr es
   -> [Arg es]
   -> EvalExpr es
@@ -720,7 +719,7 @@ mkApps = foldM mkApp
 
 mkCastMCo
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Expr es
   -> MCoercionR
   -> EvalExpr es
@@ -730,7 +729,7 @@ mkCastMCo expr = \case
 
 mkCast
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Expr es
   -> CoercionR
   -> EvalExpr es
@@ -741,7 +740,7 @@ mkCast expr co = do
     throwE ()
 
   -- Ensure the cast can be applied to the expression.
-  ty <- liftR $ exprType expr
+  ty <- liftEff $ exprType expr
   unless (eqType ty $ coercionLKind co) do
     -- FIXME: Make this a proper error.
     throwE ()
@@ -770,7 +769,7 @@ mkCast expr co = do
     _ -> pure $ Cast (pure expr) co
 
 mkVariant :: Variant es -> Eval es a
-mkVariant = Eval . ExceptT . pure . Left . Right
+mkVariant = Eval . ExceptT . pure . Left
 
 mkUnreachable :: Eval es a
 mkUnreachable = mkVariant Unreachable
@@ -791,17 +790,12 @@ mkRaise = mkVariant . Raise
 forceTyCo
   :: forall es
    . HasCallStack
-  => () !> es
+  => Error () :> es
   => Arg es
-  -> Result es (Either Type Coercion)
-forceTyCo (Eval (ExceptT arg)) = do
+  -> Eff es (Either Type Coercion)
+forceTyCo arg = do
   -- Simply pass an already existing error, if possible.
-  -- TODO: We use an orphan Traversable instance for Union here. We should
-  -- really make a pull request to Grisette for it!
-  arg' <- for arg \case
-    Left (Left err) -> Left err
-    Left (Right alt) -> Right $ Left alt
-    Right expr -> Right $ Right expr
+  arg' :: Union (Either (Variant es) (Expr es)) <- coerce arg
 
   case arg' of
     -- Attempt to get a single 'Type' or 'Coercion'.
@@ -810,28 +804,28 @@ forceTyCo (Eval (ExceptT arg)) = do
       | Coercion co <- value -> pure $ Right co
 
     -- The expression was not in the expected shape.
-    _ -> throw ()
+    _ -> throwError ()
 
 -- | Force an expression into a type using 'forceTyCo'.
 forceTy
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Arg es
-  -> Result es Type
-forceTy = forceTyCo >=> either pure (const $ throw ())
+  -> Eff es Type
+forceTy = forceTyCo >=> either pure (const $ throwError ())
 
 -- | Force an expression into a coercion using 'forceTyCo'.
 forceCo
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Arg es
-  -> Result es Coercion
-forceCo = forceTyCo >=> either (const $ throw ()) pure
+  -> Eff es Coercion
+forceCo = forceTyCo >=> either (const $ throwError ()) pure
 
 -- | Convert an expression of type Bool to a symbolic boolean.
 exprToBool
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Expr es
   -> Eval es SymBool
 exprToBool = \case
@@ -861,10 +855,10 @@ exprToBool = \case
 -- NOTE: This only handles cases that may occur in a case expression.
 eqLit
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Literal
   -> Literal
-  -> Result es SymBool
+  -> Eff es SymBool
 eqLit = \cases
   (DataCon ldc) (DataCon rdc)
     | dataConTyCon ldc == dataConTyCon rdc -> pure $ toSym (ldc == rdc)
@@ -877,18 +871,18 @@ eqLit = \cases
   (Word @l lval lty) (Word @r rval rty) 
     | eqType lty rty
     , Just Refl <- eqT @l @r -> pure $ lval .== rval
-  _ _ -> throw ()
+  _ _ -> throwError ()
 
 -- TODO: This function deserves some clean-up! My syntax highlighter is even
 -- breaking on it...
 exprType
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Expr fs
-  -> Result es Type
+  -> Eff es Type
 exprType = \case
   Lit lit -> litType lit
-  Type _ -> throw ()
+  Type _ -> throwError ()
   Coercion co -> pure $ coercionType co
   Lam ty _ -> pure ty
   App fun arg -> do
@@ -899,27 +893,27 @@ exprType = \case
         aty <- case arg of
           Forced (Right co) -> pure $ mkCoercionTy co
           Forced (Left ty) -> pure ty
-          _ -> throw ()
+          _ -> throwError ()
         let scope = mkInScopeSet $ tyCoVarsOfTypes [aty, rty]
         let subst = GHC.extendTCvSubst (GHC.mkEmptySubst scope) var aty
         pure $ GHC.substTy subst rty
 
       | Just (_, _, _, rty) <- splitFunTy_maybe fty -> pure rty
 
-      | otherwise -> throw ()
+      | otherwise -> throwError ()
   Cast _ co -> pure $ coercionRKind co
 
 litType
-  :: () !> es
+  :: Error () :> es
   => Literal
-  -> Result es Type
+  -> Eff es Type
 litType = \case
   DataCon dc -> pure $ dataConRepType dc
   EnumCon _ tc -> do
     -- TODO: I guess a safe head function, with failWith would read better.
     dc <- case tyConDataCons tc of
       dc : _ -> pure dc
-      _ -> throw ()
+      _ -> throwError ()
     pure $ dataConRepType dc
   Int _ ty -> pure ty
   Word _ ty -> pure ty
@@ -960,7 +954,7 @@ unthunk = \case
 -- arguments of a DataCon if possible.
 collectScrut
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => Expr es
   -> Eval es (Either Coercion Literal, [Arg es])
 collectScrut = \case
@@ -985,7 +979,7 @@ collectScrut = \case
       _ -> throwE ()
 
     -- Push the coercion into the arguments.
-    (_univ, args') <- liftR $ pushCoDataCon dc args co
+    (_univ, args') <- liftEff $ pushCoDataCon dc args co
     pure (Right spine', unthunk <$> args')
 
   -- If not a cast, we attempt to get the literal at the spine and return the
@@ -1017,17 +1011,17 @@ collectScrut = \case
 -- | Push a TyConAppCo into the arguments of a DataCon.
 pushCoDataCon
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => DataCon
   -> [Thunk es]
   -> Coercion
-  -> Result es ([Type], [Thunk es])
+  -> Eff es ([Type], [Thunk es])
 pushCoDataCon dc args co = do
   -- Check whether the outer type is a TyConAppCo.
   let tyR = coercionRKind co
   (tcR, univArgsR) <- failWith () $ splitTyConApp_maybe tyR
   unless (tcR == dataConTyCon dc) do
-    throw ()
+    throwError ()
 
   -- Gather information on type variables of the DataCon.
   let dcUnivVars = dataConUnivTyVars dc
@@ -1039,10 +1033,10 @@ pushCoDataCon dc args co = do
     exTys <- for exArgs \case
       -- TODO: Do we need to wrap Coercions with mkCoercionTy?
       Forced (Left ty) -> pure ty
-      _ -> throw ()
+      _ -> throwError ()
     valArgs' <- for valArgs \case
       Thunked value -> pure value
-      Forced _ -> throw ()
+      Forced _ -> throwError ()
     pure (exTys, valArgs')
 
   -- Get coercions for the universal type variables.
@@ -1063,23 +1057,28 @@ pushCoDataCon dc args co = do
 
   pure (univArgsR, exArgs ++ valArgs')
 
+-- | Lift a result into the evaluation context.
+liftEff :: Eff es a -> Eval es a
+liftEff = Eval . lift . lift
+
 -- | Throw an error within the 'Eval' monadic context.
 throwE
   :: HasCallStack
-  => e !> es
+  => Error e :> es
   => e
   -> Eval es a
-throwE = Eval . ExceptT . pure . Left . withFrozenCallStack throw
+throwE = liftEff . withFrozenCallStack throwError_
 
 -- | Throw the given error on 'Nothing' within the 'Eval' monadic context.
 failWithE
   :: HasCallStack
-  => e !> es
+  => Error e :> es
   => e
   -> Maybe a
   -> Eval es a
-failWithE = liftR .: withFrozenCallStack failWith
+failWithE = liftEff .: withFrozenCallStack failWith
 
--- | Lift a result into the evaluation context.
-liftR :: Result es a -> Eval es a
-liftR = Eval . ExceptT . pure . either (Left . Left) Right
+-- TODO: This should be removed at some point? Or perhaps it's usage should
+-- give an error? Idk, it is a really nice utility to have when debugging stuff.
+dbgE :: GHC.Outputable o => o -> Eval es ()
+dbgE = liftEff . dbg

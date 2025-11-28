@@ -40,7 +40,6 @@ import GHC.Plugins
   , TyCon
   , Name
   , DataCon
-  , HasCallStack
   , InScopeSet
   , Role (..)
   , dataConTagZ
@@ -94,7 +93,9 @@ import Pantomime.Grisette.BitVector (IntN)
 import Pantomime.Expr
 import Pantomime.Primitive.GHC qualified as Primitive
 import Pantomime.Util (freshIds, freshTyVars, foldlBy)
-import Pantomime.Result (type (!>))
+
+import Effectful
+import Effectful.Error.Static
 
 data FreshInstEnv where
   FreshInstEnv ::
@@ -167,7 +168,7 @@ symbolicVar var dst = case varArgs var of
 -- The freshness hinges on the freshness of the Var.
 freshExpr
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => FreshInstEnv
   -> Var
   -> EvalExpr es
@@ -385,7 +386,7 @@ freshExpr FreshInstEnv { .. } root = go Variable
 
 freshArgs
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => FreshInstEnv
   -> Type
   -> InScopeSet

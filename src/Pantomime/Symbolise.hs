@@ -23,7 +23,6 @@ import GHC.Builtin.Types.Prim
   , byteArrayPrimTy
   )
 
-import GHC.Stack (HasCallStack)
 import GHC.TypeNats (KnownNat, natVal)
 
 import Pantomime.Expr
@@ -32,7 +31,6 @@ import Pantomime.Util (foldlBy)
 import Pantomime.Grisette.SizedBV (sizedBVResize)
 import Pantomime.Primitive.Reify
 import Pantomime.Grisette.BitVector (IntN)
-import Pantomime.Result
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -55,9 +53,12 @@ import Control.Monad (foldM, unless)
 import Data.Bits (Bits (..), (.^.))
 import Data.Typeable (Proxy (..), type (:~:) (..), eqT)
 
+import Effectful
+import Effectful.Error.Static
+
 symbolise
   :: HasCallStack
-  => () !> es
+  => Error () :> es
   => FamInstEnvs
   -> Subst es
   -> GHC.CoreExpr
@@ -123,7 +124,7 @@ symbolise fam = go
             ]
           throwE ()
 
-      GHC.Lit lit -> liftR $ mkLit <$> symboliseLit lit
+      GHC.Lit lit -> liftEff $ mkLit <$> symboliseLit lit
 
       GHC.App fun arg -> do
         fun' <- go subst fun
@@ -133,11 +134,11 @@ symbolise fam = go
       expr@(GHC.Lam bndr body) -> do
         let ty = substTy subst $ GHC.exprType expr
         pure $ mkLam ty \arg -> do
-          subst' <- liftR $ extendSubst subst bndr arg
+          subst' <- liftEff $ extendSubst subst bndr arg
           go subst' body
 
       GHC.Let bind body -> do
-        subst' <- liftR $ symboliseBind fam subst bind
+        subst' <- liftEff $ symboliseBind fam subst bind
         go subst' body
 
       GHC.Case scrut bndr _ty alts -> do
@@ -150,12 +151,12 @@ symbolise fam = go
         -- the few places where we can perform a sanity check without messing
         -- with the evaluation semantic.
         let expectedTy = substTy subst $ GHC.varType bndr
-        scrutTy <- liftR $ exprType scrut'
+        scrutTy <- liftEff $ exprType scrut'
         unless (eqType scrutTy expectedTy) do
           throwE ()
 
         -- Extend the substitution with the case binder.
-        subst' <- liftR $ extendSubst subst bndr (pure scrut')
+        subst' <- liftEff $ extendSubst subst bndr (pure scrut')
 
         -- Create if-statement for every alternative.
         foldlBy mkUB alts \acc (GHC.Alt con bndrs rhs) -> do
@@ -167,7 +168,7 @@ symbolise fam = go
               | otherwise -> throwE ()
 
             -- A literal spine should match the pattern.
-            Right spine' -> liftR $ case con of
+            Right spine' -> liftEff $ case con of
               -- FIXME: Create proper data con size.
               GHC.DataAlt dc -> eqLit spine' $ mkDataCon @64 dc
               GHC.LitAlt lit -> symboliseLit lit >>= eqLit spine'
@@ -180,7 +181,7 @@ symbolise fam = go
           -- Extend the substitution with the binders and evaluate the
           -- right-hand side.
           let branch = do
-                subst'' <- liftR $ extendSubstMany subst' (zip bndrs args)
+                subst'' <- liftEff $ extendSubstMany subst' (zip bndrs args)
                 go subst'' rhs
 
           -- We want to lazily evaluate branches. As such, we keep them unforced
@@ -207,40 +208,40 @@ symbolise fam = go
 symboliseBind
   :: forall es fs
    . HasCallStack
-  => () !> es
-  => () !> fs
+  => Error () :> es
+  => Error () :> fs
   => FamInstEnvs
   -> Subst fs
   -> GHC.CoreBind
-  -> Result es (Subst fs)
+  -> Eff es (Subst fs)
 symboliseBind fam subst = \case
   GHC.NonRec bndr rhs -> do
     let rhs' = symbolise fam subst rhs
     extendIdSubst subst bndr rhs'
 
   GHC.Rec pairs -> do
-    let subst' :: forall gs. () !> gs => Result gs (Subst fs)
+    let subst' :: forall gs. Error () :> gs => Eff gs (Subst fs)
         subst' = extendIdSubstMany subst pairs'
         pairs' = second symbolise' <$> pairs
-        symbolise' rhs = liftR subst' >>= \s -> symbolise fam s rhs
+        symbolise' rhs = liftEff subst' >>= \s -> symbolise fam s rhs
     subst'
 
 symboliseBindMany
   :: forall f es fs
    . HasCallStack
-  => () !> es
-  => () !> fs
+  => Error () :> es
+  => Error () :> fs
   => Foldable f
   => FamInstEnvs
   -> Subst fs
   -> f GHC.CoreBind
-  -> Result es (Subst fs)
+  -> Eff es (Subst fs)
 symboliseBindMany = foldM . symboliseBind
 
 symboliseLit
-  :: () !> es
+  :: Error () :> es
   => GHC.Literal
-  -> Result es Literal
+  -> Eff es Literal
 symboliseLit = \case
   GHC.LitNumber ty num -> do
     let num' :: Num s => s
@@ -274,12 +275,12 @@ symboliseLit = \case
   --   let num' = pure $ fromRational num
   --   pure $ Double num'
 
-  _ -> throw ()
+  _ -> throwError ()
 
 symbolisePrimOp
   :: forall n es
    . HasCallStack
-  => () !> es
+  => Error () :> es
   => KnownNat n
   => FamInstEnvs
   -> PrimOp
@@ -630,7 +631,7 @@ symbolisePrimOp fam = \case
       arg' <- arg
 
       -- Ensure the argument is of the correct type.
-      argTy <- liftR $ exprType arg'
+      argTy <- liftEff $ exprType arg'
       unless (eqType ty argTy) do
         throwE ()
 

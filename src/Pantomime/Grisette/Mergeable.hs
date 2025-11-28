@@ -1,6 +1,7 @@
 module Pantomime.Grisette.Mergeable
   ( NoMerge (..)
   , NoEval (..)
+  , NoEval1 (..)
   , partialStrategy
   , ifStrategy
   , tupleStrategy
@@ -43,6 +44,15 @@ instance EvalSym (NoEval a) where
   evalSym _ _ = id
 
 instance EvalSym1 NoEval where
+  liftEvalSym _ _ _ = id
+
+newtype NoEval1 m a where
+  NoEval1 :: m a -> NoEval1 m a
+
+instance EvalSym (NoEval1 m a) where
+  evalSym _ _ = id
+
+instance EvalSym1 (NoEval1 m) where
   liftEvalSym _ _ _ = id
 
 -- | Partial merging strategy.

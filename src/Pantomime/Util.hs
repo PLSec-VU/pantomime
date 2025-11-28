@@ -7,6 +7,7 @@ module Pantomime.Util
   , foldlBy
 
   , whyFail
+  , failWith
   , withCallStack
   , dbg
 
@@ -74,9 +75,14 @@ foldrM' acc xs f = foldrM f acc xs
 foldlBy :: Foldable t => b -> t a -> (b -> a -> b) -> b
 foldlBy acc xs f = foldl' f acc xs
 
+-- TODO: Remove whyFail in favor of failWith.
 -- | Annotate why there was no result.
 whyFail :: HasCallStack => Error e :> es => e -> Maybe a -> Eff es a
 whyFail err = maybe (throwError_ err) pure
+
+-- | Annotate why there was no result.
+failWith :: HasCallStack => Error e :> es => e -> Maybe a -> Eff es a
+failWith err = maybe (throwError_ err) pure
 
 -- | Fill a 'HasCallStack' constraint with a local call stack.
 withCallStack :: CallStack -> (HasCallStack => a) -> a

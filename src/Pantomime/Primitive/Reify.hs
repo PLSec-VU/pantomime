@@ -88,7 +88,7 @@ import Pantomime.Expr
   , exprType
   , throwE
   , failWithE
-  , liftR
+  , liftEff
   )
 import Pantomime.Subst
   ( extendSubst
@@ -98,7 +98,6 @@ import Pantomime.Subst
 import Pantomime.Primitive.BitVector (BitVector)
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Result (type (!>))
 
 import GHC.TypeNats (type (<=), KnownNat, Nat, natVal)
 import GHC.Builtin.Types.Literals (typeNatAddTyCon, typeNatSubTyCon)
@@ -173,13 +172,14 @@ import GHC.Plugins
 
 import Language.Haskell.TH qualified as TH
 
-import Data.Kind qualified as Kind
 import Data.Type.Bool (type (||))
 import Data.Type.Equality (type (==))
 import Data.Typeable (Proxy(..), type (:~:) (..), eqT)
 
 import Control.Applicative (liftA3)
 import Control.Monad (unless)
+
+import Unsafe.Coerce (UnsafeEquality)
 
 import Grisette.Unified (EvalModeTag(..))
 import Grisette (SymBool, SimpleMergeable (..), liftUnion)
@@ -188,7 +188,6 @@ import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.TyThing
 import Effectful.GHC.TH
-import Unsafe.Coerce (UnsafeEquality)
 
 -- | Any marker type that represents some type within GHC Core.
 class CoreType a where
@@ -214,7 +213,7 @@ class CoreType a => CoreTypeBuiltin a where
 -- surjective: multiple expressions may have the same interpretation. As such,
 -- we generally use a sort of marker value as the implementor of this function.
 class CoreType a => Reify a where
-  type InterpRep (es :: [Kind.Type]) a
+  type InterpRep (es :: [Effect]) a
 
   -- TODO: For now, just having the generic () !> es error suffices. Ideally
   -- though, we have a type family that spells out which errors may occur during
@@ -228,7 +227,7 @@ class CoreType a => Reify a where
   -- error we might want to give. It could be a stop-gap solution...
   reify
     :: HasCallStack
-    => () !> es
+    => Error () :> es
     => FamInstEnvs
     -> Type
     -> Eval es (InterpRep es a)
@@ -236,7 +235,7 @@ class CoreType a => Reify a where
 
   interpret
     :: HasCallStack
-    => () !> es
+    => Error () :> es
     => FamInstEnvs
     -> Type
     -> Eval es (Expr es)
@@ -246,7 +245,7 @@ type ReifyBuiltin a = (CoreTypeBuiltin a, Reify a)
 
 builtinReify
   :: forall a es
-   . () !> es
+   . Error () :> es
   => ReifyBuiltin a
   => FamInstEnvs
   -> Eval es (InterpRep es a)
@@ -257,7 +256,7 @@ builtinReify fam expr = do
 
 builtinInterpret
   :: forall a es
-   . () !> es
+   . Error () :> es
   => ReifyBuiltin a
   => FamInstEnvs
   -> Eval es (Expr es)
@@ -299,7 +298,7 @@ instance (KnownNat n, CoreType k) => Reify (RTyVar n k) where
 
   reify _ ty expr = do
     expr' <- expr
-    ty' <- liftR $ exprType expr'
+    ty' <- liftEff $ exprType expr'
 
     -- Ensure the expression has the correct type.
     unless (eqType ty ty') do
@@ -309,7 +308,7 @@ instance (KnownNat n, CoreType k) => Reify (RTyVar n k) where
 
   interpret _ ty expr = do
     expr' <- expr
-    ty' <- liftR $ exprType expr'
+    ty' <- liftEff $ exprType expr'
 
     -- Ensure the expression has the correct type.
     unless (eqType ty ty') do
@@ -350,12 +349,12 @@ instance (KnownNat n, CoreType k, Reify b) => Reify (RTyVar n k +> b) where
     (tvar, tbody) <- failWithE () $ splitForAllTyCoVar_maybe ty
     pure $ mkLam ty \arg -> do
       -- Get the type of the body.
-      subst <- liftR $ extendSubst mkEmptySubst tvar arg
+      subst <- liftEff $ extendSubst mkEmptySubst tvar arg
       let tbody' = substTy subst tbody
 
       -- Compute the actual function.
       fun' <- fun
-      arg' <- liftR $ forceTy arg
+      arg' <- liftEff $ forceTy arg
 
       reify @b fam tbody' $ fun' arg'
 
@@ -367,7 +366,7 @@ instance (KnownNat n, CoreType k, Reify b) => Reify (RTyVar n k +> b) where
       let arg' = pure $ mkType arg
 
       -- Get the type of the body.
-      subst <- liftR $ extendSubst mkEmptySubst tvar arg'
+      subst <- liftEff $ extendSubst mkEmptySubst tvar arg'
       let tbody' = substTy subst tbody
 
       interpret @b fam tbody' $ mkApp fun' arg'
@@ -448,6 +447,12 @@ instance CoreType n => Reify (RBitVector n) where
   -- is the correct TyCon. In 'reify' though, we would have to reconstruct the
   -- coercion (and I don't want to use PluginProv coercions for this!). This
   -- direction seems harder without the FamInstEnvs.
+  --
+  -- NOTE: I changed Eval to include effects, so the family instance lookup can
+  -- be made an effect instead of an input. The next step might be to only have
+  -- this requirement on the BitVector reification by means of a type family. We
+  -- can see if we really want to do this last thing, but the effect lookup
+  -- seems worthwhile!
   interpret fam ty expr = do
     -- Reduction for type-level naturals.
     let reduction = normaliseType fam Representational ty
@@ -735,7 +740,7 @@ instance (CoreType k, CoreType a, CoreType b) => Reify (RUnsafeEquality k a b) w
 
   interpret _ ty expr = do
     expr' <- expr
-    ty' <- liftR $ exprType expr'
+    ty' <- liftEff $ exprType expr'
 
     -- Ensure the expression has the correct type.
     unless (eqType ty ty') do
@@ -744,7 +749,7 @@ instance (CoreType k, CoreType a, CoreType b) => Reify (RUnsafeEquality k a b) w
     -- Gather just the coercion argument.
     let (_spine, args) = collectArgs expr'
     case args of
-      [_kind, _ty, co] -> liftR $ forceCo co
+      [_kind, _ty, co] -> liftEff $ forceCo co
       _ -> throwE ()
 
 -- | Reify marker for Haskell sized integer primitives.
@@ -996,7 +1001,7 @@ instance (CoreType n, CoreType m) => Reify (RLEq n m) where
   -- more accurate sometime!
   reify _ ty expr = do
     expr' <- expr
-    ty' <- liftR $ exprType expr'
+    ty' <- liftEff $ exprType expr'
 
     -- Ensure the expression has the correct type.
     unless (eqType ty ty') do
@@ -1006,7 +1011,7 @@ instance (CoreType n, CoreType m) => Reify (RLEq n m) where
 
   interpret _ ty expr = do
     expr' <- expr
-    ty' <- liftR $ exprType expr'
+    ty' <- liftEff $ exprType expr'
 
     -- Ensure the expression has the correct type.
     unless (eqType ty ty') do
