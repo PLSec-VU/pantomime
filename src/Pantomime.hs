@@ -4,6 +4,7 @@ module Pantomime
   ( plugin
 
   , Theory (..)
+  , PluginAxioms (..)
   , Circuit
 
   , Pantomime (..)
@@ -17,6 +18,7 @@ module Pantomime
 import GHC.Plugins hiding (empty, (<>))
 
 import Pantomime.Annotation
+import Pantomime.Axiom
 import Pantomime.Passes
 
 plugin :: Plugin
