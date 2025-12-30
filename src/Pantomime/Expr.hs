@@ -3,6 +3,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Pantomime.Expr
   ( Eval (..)
@@ -140,26 +141,32 @@ import Grisette
   , EvalSym (..)
   , EvalSym1 (..)
   , Default (..)
+  , LinkedRep
+  , ConRep (..)
   , wrapStrategy
   , liftUnion
   , mrgIf
   , pattern Single
   , pattern If
   )
+-- TODO: Change import once we fully integrate SymArray into grisette! Right
+-- now, we still need to touch these internal things...
+import Grisette.Internal.SymPrim.SymArray (SymArray)
+import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim (..))
 
 import Pantomime.Orphan.Grisette ()
 import Pantomime.Orphan.GHC ()
 import Pantomime.Grisette.UnionT
 import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Grisette.Mergeable (NoEval1 (..), impossible)
+import Pantomime.Grisette.Mergeable (NoEval1 (..), DynIdx (..), impossible)
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Util (failWith, dbg)
 
 import Data.Composition ((.:))
 import Data.Coerce (coerce)
-import Data.List ((!?))
+import Data.List ((!?), uncons)
 import Data.Traversable (for)
-import Data.Typeable (type (:~:) (..), eqT)
+import Data.Typeable (type (:~:) (..), Typeable, eqT)
 
 import Control.Arrow (Arrow(..))
 import Control.Monad.Except (ExceptT (..))
@@ -361,6 +368,13 @@ data Thunk es where
   deriving Generic
   deriving Mergeable via Default (Thunk es)
 
+-- TODO: Since we have this whole user-axiom/interpretation scheme now, we
+-- really don't need to track types for primitive literals (i.e. the
+-- non-constructor ones). That is, there should only be one type for each of
+-- these as even Haskell primitives should just go through the user-axioms at
+-- this point. As such, we should change this at some point! The first step
+-- would be to remove the built-in support for Haskell primitives. From there,
+-- it is probably relatively simple the get rid of the types!
 data Literal where
   -- TODO: I think it makes sense to place the universal type arguments of a
   -- DataCon inside of the literal.
@@ -408,15 +422,44 @@ data Literal where
     :: SymInteger
     -> Type
     -> Literal
+  Bool
+    :: SymBool
+    -> Type
+    -> Literal
+  Array ::
+     ( SupportedNonFuncSymPrim k
+     , SupportedNonFuncSymPrim v
+     , Typeable k
+     , Typeable v
+     )
+    => SymArray k v
+    -> Type
+    -> Literal
+
+-- TODO: I guess I should move this thing somewhere. I only have this as I need
+-- use it in a 'Dict' once. Still, I don't like it particularly. Also, I think
+-- Grisette doesn't expose SupportedNonFuncPrim. It is only visible in an
+-- internal module and other users (like SymGeneralFun) actually have it stored
+-- locally. To be fair though, that's honestly just bad practise.
+class
+  ( SupportedNonFuncPrim (ConType a)
+  , LinkedRep (ConType a) a
+  ) => SupportedNonFuncSymPrim a
+instance
+  ( SupportedNonFuncPrim (ConType a)
+  , LinkedRep (ConType a) a
+  ) => SupportedNonFuncSymPrim a
 
 instance Mergeable Literal where
   rootStrategy = SortedStrategy
     (\case
-      DataCon _ -> 0 :: Int
-      EnumCon _ _ -> 1
-      Int _ _ -> 2
-      Word _ _ -> 3
-      Integer _ _ -> 4)
+      DataCon {} -> 0 :: Int
+      EnumCon {} -> 1
+      Int {} -> 2
+      Word {} -> 3
+      Integer {} -> 4
+      Bool {} -> 5
+      Array {} -> 6)
     \case
       0 -> wrapStrategy
         rootStrategy
@@ -443,6 +486,27 @@ instance Mergeable Literal where
         (\case (value, ty) -> Integer value ty)
         \case Integer value ty -> (value, ty) ; _ -> impossible
 
+      5 -> wrapStrategy
+        rootStrategy
+        (\case (value, ty) -> Bool value ty)
+        \case Bool value ty -> (value, ty) ; _ -> impossible
+
+      6 -> SortedStrategy
+        (\case
+          Array @k @v _ _ -> do
+            let idxK = DynIdx @k @SupportedNonFuncSymPrim
+            let idxV = DynIdx @v @SupportedNonFuncSymPrim
+            (idxK, idxV)
+          _ -> impossible)
+        \(DynIdx @k, DynIdx @v) -> wrapStrategy @(SymArray k v, Type)
+          rootStrategy
+          (\case (value, ty) -> Array value ty)
+          \case
+            Array @k' @v' value ty
+              | Just Refl <- eqT @k @k'
+              , Just Refl <- eqT @v @v' -> (value, ty)
+            _ -> impossible
+
       _ -> impossible
 
 instance EvalSym (Expr es) where
@@ -464,6 +528,8 @@ instance EvalSym Literal where
     Int value ty -> Int (evalSym' value) ty
     Word value ty -> Word (evalSym' value) ty
     Integer value ty -> Integer (evalSym' value) ty
+    Bool value ty -> Bool (evalSym' value) ty
+    Array value ty -> Array (evalSym' value) ty
     where
       evalSym' :: EvalSym a => a -> a
       evalSym' = evalSym fill model
@@ -576,6 +642,8 @@ instance Outputable Literal where
     Int value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
     Word value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
     Integer value ty -> text (show value) <+> "::" <+> ppr ty
+    Bool value ty -> text (show value) <+> "::" <+> ppr ty
+    Array value ty -> text (show value) <+> "::" <+> ppr ty
 
 mkLit
   :: Literal
@@ -910,14 +978,13 @@ litType
 litType = \case
   DataCon dc -> pure $ dataConRepType dc
   EnumCon _ tc -> do
-    -- TODO: I guess a safe head function, with failWith would read better.
-    dc <- case tyConDataCons tc of
-      dc : _ -> pure dc
-      _ -> throwError ()
+    (dc, _) <- failWith () $ uncons (tyConDataCons tc)
     pure $ dataConRepType dc
   Int _ ty -> pure ty
   Word _ ty -> pure ty
   Integer _ ty -> pure ty
+  Bool _ ty -> pure ty
+  Array _ ty -> pure ty
 
 -- | Collect the arguments of an application.
 collectArgs
@@ -996,6 +1063,10 @@ collectScrut = \case
           Int {} -> 0
           Word {} -> 0
           Integer {} -> 0
+          Bool {} -> 0
+          -- TODO: I'm not sure if this 2 is actually correct. I'll have to
+          -- double check!
+          Array {} -> 2
 
     -- Gather the spine as either a literal or coercion and the number of
     -- universal arguments.

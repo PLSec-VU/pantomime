@@ -2,6 +2,7 @@ module Pantomime.Grisette.Mergeable
   ( NoMerge (..)
   , NoEval (..)
   , NoEval1 (..)
+  , DynIdx (..)
   , partialStrategy
   , ifStrategy
   , tupleStrategy
@@ -11,6 +12,9 @@ module Pantomime.Grisette.Mergeable
 import GHC.Stack (HasCallStack)
 
 import Data.Either (isLeft)
+import Data.Maybe (isJust)
+import Data.Typeable (Proxy (..), Typeable, heqT)
+import Type.Reflection (someTypeRep)
 
 import Grisette
   ( EvalSym (..)
@@ -54,6 +58,17 @@ instance EvalSym (NoEval1 m a) where
 
 instance EvalSym1 (NoEval1 m) where
   liftEvalSym _ _ _ = id
+
+-- | An index for sorted merge strategy, sorting by type.
+data DynIdx c where
+  DynIdx :: (Typeable a, c a) => DynIdx c
+
+instance Eq (DynIdx c) where
+  DynIdx @l == DynIdx @r = isJust $ heqT @l @r
+
+instance Ord (DynIdx c) where
+  compare (DynIdx @l) (DynIdx @r) = do
+    compare (someTypeRep @_ @l Proxy) (someTypeRep @_ @r Proxy)
 
 -- | Partial merging strategy.
 --
