@@ -1,4 +1,4 @@
-# Changelog for `uc-plugin`
+# Changelog for `pantomime`
 
 All notable changes to this project will be documented in this file.
 
