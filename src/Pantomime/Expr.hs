@@ -25,6 +25,7 @@ module Pantomime.Expr
   , mkIntN
   , mkWordN
   , mkInteger
+  , mkBool
   , mkType
   , mkCoercion
   , mkLam
@@ -408,6 +409,12 @@ data Literal where
   -- the solver just has a single bitvector. This just seems like it adds
   -- maintanence burden without actually adding anything...
   -- We should make a single BitVector field!
+  -- I also think we should switch back to the grisette WordN with this. I say
+  -- this because it eases up the constraints when trying to fit these into an
+  -- Array. That is, the SMT only allows bitvectors with a bitsize larger than
+  -- 0. Any user that want to support zero-sized bitvectors should just
+  -- implement the bitvector at the frontend in the way we now did for the
+  -- backend.
   Int
     :: KnownNat n
     => IntN S n
@@ -712,6 +719,12 @@ mkInteger
   -> Type
   -> Literal
 mkInteger = Integer
+
+mkBool
+  :: SymBool
+  -> Type
+  -> Literal
+mkBool = Bool
 
 mkType
   :: Type

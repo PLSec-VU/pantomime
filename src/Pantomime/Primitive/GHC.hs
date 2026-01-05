@@ -3,6 +3,9 @@
 -- can perform the interpretations. I think we will at some point remove all
 -- bindings of base. For this reason, perhaps 'Builtin' might be a good name for
 -- this module.
+--
+-- In fact, it's looking more and more like we are removing any Haskell values.
+-- All we do is create an interpretation for the SMT primitives.
 {-# LANGUAGE OverloadedStrings #-}
 
 module Pantomime.Primitive.GHC
@@ -12,6 +15,7 @@ module Pantomime.Primitive.GHC
   , ReifyMismatch (..)
   , reifiedUnsafeRefl
   , reifiedBitVector
+  , reifiedBool
 
   , thNameToTyCon
   , thNameToId
@@ -53,6 +57,7 @@ import Pantomime.Grisette.BitVector (WordN, IntN)
 import Pantomime.Primitive.Operation qualified as Primitive
 import Pantomime.Primitive.BitVector qualified as BitVector
 import Pantomime.Primitive.BitVector (BitVector)
+import Pantomime.Primitive.Bool qualified as Bool
 import Pantomime.Primitive.Reify
 import Pantomime.Dict
   ( SomeNat' (..)
@@ -96,6 +101,8 @@ import Grisette
   , SymShift (..)
   , SymRotate (..)
   , BitCast (..)
+  , LogicalOp (..)
+  , SimpleMergeable (..)
   )
 
 thNameToTyCon
@@ -126,6 +133,7 @@ data Types where
   Types ::
     { tcBitVector :: TyCon
     , tcInteger :: TyCon
+    , tcBool :: TyCon
     } -> Types
 
 getTypes
@@ -136,8 +144,10 @@ getTypes
   => THNameToGHCName :> es
   => Eff es Types
 getTypes = do
+  -- TODO: Make the module naming consistent!
   tcBitVector <- thNameToTyCon ''BitVector
   tcInteger <- thNameToTyCon ''Primitive.Integer
+  tcBool <- thNameToTyCon ''Bool.Bool
   pure Types { .. }
 
 data ReifyMismatch where
@@ -524,6 +534,32 @@ reifiedBitVector = staticReifyError $ lookupReifyMany
     bnd name = Interpretation @MBndBitVector name $ pure \n -> do
       SomeNat @n _ <- failWithE () $ someTyNat n
       pure $ SomeBV @n 0
+
+type IfThenElse
+  =  RTyVar_ 0
+  +> RSBool
+  ~> RTyVar_ 0
+  ~> RTyVar_ 0
+  ~> RTyVar_ 0
+
+reifiedBool
+  :: forall es fs
+   . HasCallStack
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => HasThings :> es
+  => THNameToGHCName :> es
+  => Error () :> fs
+  => HasFamInstEnvs :> fs
+  => Eff es [(Var, EvalExpr fs)]
+reifiedBool = staticReifyError $ lookupReifyMany
+  [ Interpretation @RSBool 'Bool.true $ pure true
+  , Interpretation @RSBool 'Bool.false $ pure false
+  , Interpretation @IfThenElse 'Bool.ite $
+    liftF4 \_ value tr fl -> do
+      value' <- value
+      mrgIte value' tr fl
+  ]
 
 concreteKnownNat
   :: Error () :> es

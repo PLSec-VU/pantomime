@@ -32,6 +32,7 @@ module Pantomime.Primitive.Reify
 
   -- | Pantomime primitives.
   , RBitVector
+  , RSBool
 
   -- | Haskell primitives.
   , RHIntN
@@ -78,6 +79,7 @@ import Pantomime.Expr
   , mkDataCon
   , mkEnumCon
   , mkWordN
+  , mkBool
   , mkCast
   , mkApps
   , mkCoercion
@@ -95,7 +97,8 @@ import Pantomime.Subst
   , substTy
   , mkEmptySubst
   )
-import Pantomime.Primitive.BitVector (BitVector)
+import Pantomime.Primitive.BitVector qualified as Primitive
+import Pantomime.Primitive.Bool qualified as Primitive
 import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Grisette.SomeBV (SomeBV (..))
 
@@ -129,6 +132,7 @@ import GHC.Plugins
   , CoercionN
   , Role (..)
   , FunTyFlag (..)
+  , mkTyConTy
   , mkTyConApp
   , mkSymCo
   , mkFunTy
@@ -280,6 +284,8 @@ mkRTyVarTy
   -> Type
 mkRTyVarTy kind = do
   -- SAFETY: This list is infinite.
+  -- TODO: This probably is not the best way to define the name (in case
+  -- someone tries a very large number, this will be incredibly slow...)
   let idx = natVal @n Proxy
   let tv = alphaTyVars !! fromIntegral idx
 
@@ -417,7 +423,7 @@ data RBitVector n
 
 instance CoreType n => CoreType (RBitVector n) where
   coreType = do
-    name <- thNameToGhcName ''BitVector
+    name <- thNameToGhcName ''Primitive.BitVector
     tc <- lookupTyCon name
     size <- coreType @n
     pure $ mkTyConApp tc [size]
@@ -467,6 +473,30 @@ instance CoreType n => Reify (RBitVector n) where
     -- After the coercion, the value should be just a literal.
     case value of
       Lit (Word value' _) -> pure $ SomeBV value'
+      _ -> throwE ()
+
+-- TODO: I hate the inconsistent naming here. For now, I'll just add it here
+-- as I'm likely to remove many of these instances anyway once I fade out
+-- hard-coded support for Haskell primitives.
+data RSBool
+
+instance CoreType RSBool where
+  coreType = do
+    name <- thNameToGhcName ''Primitive.Bool
+    tc <- lookupTyCon name
+    pure $ mkTyConTy tc
+
+instance Reify RSBool where
+  type InterpRep es RSBool = SymBool
+
+  reify ty value = do
+    value' <- value
+    pure $ mkLit (mkBool value' ty)
+
+  interpret ty expr = do
+    expr' <- expr
+    case expr' of
+      Lit (Bool value ty') | eqType ty ty' -> pure value
       _ -> throwE ()
 
 -- | KnownNat constraint reify marker.

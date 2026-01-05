@@ -56,7 +56,9 @@ library
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes
+      Pantomime.Primitive.Array
       Pantomime.Primitive.BitVector
+      Pantomime.Primitive.Bool
       Pantomime.Primitive.GHC
       Pantomime.Primitive.Operation
       Pantomime.Primitive.Reify

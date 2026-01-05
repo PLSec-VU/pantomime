@@ -83,6 +83,9 @@ checkValid PluginAxiomsR { .. } expr = do
 
   bitVector <- reifiedBitVector
   unsafeRefl <- reifiedUnsafeRefl
+  bool <- reifiedBool
+
+  let reified = unsafeRefl : bool ++ bitVector
 
   -- TODO: Does it make sense to build this up on every invocation? I feel like
   -- it would be better to do this once per module. In fact, the final symbolise
@@ -91,7 +94,7 @@ checkValid PluginAxiomsR { .. } expr = do
   -- on the setup if the module does not have any (active) annotations. Not sure
   -- if the setup is actually a lot of work, but it seems odd to do it like
   -- this...
-  subst0 <- extendIdSubstMany mkEmptySubst $ unsafeRefl : bitVector
+  subst0 <- extendIdSubstMany mkEmptySubst reified
   -- TODO: I think there is an ordering problem here between user
   -- mappings and program definitions. I guess user mappings should
   -- go first? The problem is that we don't want local definitions to
@@ -118,6 +121,12 @@ checkValid PluginAxiomsR { .. } expr = do
   let (args, _scope) = freshArgs freshEnv ty emptyInScopeSet
 
   -- Apply the function to the fresh arguments and convert it to a boolean.
+  -- TODO: Once we also have external support for symbolic booleans, maybe it
+  -- makes sense to require those as the final assertion? We can simply create
+  -- a function on the front-end to convert a Bool to a pantomime symbolic
+  -- boolean. Ideally, a user can write expressions using only the Pantomime
+  -- primitives and not get any overhead of the expression being written in
+  -- Haskell.
   let result = do
         fun <- symbolise subst expr
         res <- mkApps fun $ fmap snd args

@@ -361,6 +361,12 @@ stupidSlice x = runIdentity do
 -- of nice as it accurately reflects what Pantomime does under the hood? I guess
 -- here it could be symbolic, but in Pantomime it really cannot. I'm starting to
 -- like magicKnownNat actually :)
+--
+-- One thing actually is that we now have some reliance on how Integer is
+-- interpreted by Pantomime (as KnownNat interprets it). It might be better to
+-- have a local KnownNat that is implemented using native Pantomime Integer.
+-- If one wants to use the normal KnownNat, they can simply define a conversion
+-- function from their interpretation of Integer to our version.
 {-# OPAQUE stupidMinBound #-}
 stupidMinBound :: BitVector n
 stupidMinBound = Prelude.undefined

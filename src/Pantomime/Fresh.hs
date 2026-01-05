@@ -221,6 +221,11 @@ freshExpr FreshInstEnv { .. } root = do
             let inner = mkLit $ mkWordN @n symbolic (coercionLKind co)
             mkCast inner co
 
+          -- Bool:
+          | ty `eqType` mkTyConTy (Primitive.tcBool fiePrim) -> do
+            let value = mkBool symbolic ty
+            pure $ mkLit value
+
           -- TODO: Add remaining primitives
 
           -- User Interpretation:
