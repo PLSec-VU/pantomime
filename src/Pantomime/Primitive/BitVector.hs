@@ -1,5 +1,16 @@
 {-# LANGUAGE RoleAnnotations #-}
 
+-- TODO: Maybe we should just export pantomime primitives under the single
+-- module 'Pantomime.Base', reflecting how GHC/Haskell exports their primitive
+-- operations. For now, this name is occupied by the UserAxioms for Base. Once
+-- we fade those into a separate repository, we can move this as well.
+-- Otherwise, 'Pantomime.BuiltIn' would also be suitable. Though perhaps we
+-- should use this name for the hardcoded mapping of the base functions and
+-- their pantomime representation.
+--
+-- We could also make a separate file for only the 'OPAQUE' functions. Then the
+-- 'Pantomime.Base' could contain helpers. Right now it is a little bit blurry,
+-- so it seems like a good idea.
 module Pantomime.Primitive.BitVector
   ( BitVector
 
@@ -367,6 +378,10 @@ stupidSlice x = runIdentity do
 -- have a local KnownNat that is implemented using native Pantomime Integer.
 -- If one wants to use the normal KnownNat, they can simply define a conversion
 -- function from their interpretation of Integer to our version.
+--
+-- Actually, it's probably easier on the Reify side if we don't expose a
+-- KnownNat-like class and instead just use Pantomime.Integer directly. Then we
+-- can also make it 'magicTypeInteger :: forall (n :: Nat). Pantomime.Integer'.
 {-# OPAQUE stupidMinBound #-}
 stupidMinBound :: BitVector n
 stupidMinBound = Prelude.undefined
