@@ -31,22 +31,22 @@ module Pantomime.Primitive.Reify
   , RLEq
 
   -- | Pantomime primitives.
-  , RBitVector
-  , RSBool
-  , RArray
+  , RBitVec
+  , RBool
+  -- , RArray
 
-  -- | Haskell primitives.
-  , RHIntN
-  , RHIntPW
-  , RHWordN
-  , RHWordPW
+  -- -- | Haskell primitives.
+  -- , RHIntN
+  -- , RHIntPW
+  -- , RHWordN
+  -- , RHWordPW
 
   -- | Common Haskell types.
-  , RKnownNat
-  , RNatural
-  , RInteger
-  , RBool
-  , RInt
+  -- , RKnownNat
+  -- , RNatural
+  -- , RInteger
+  -- , RBool
+  -- , RInt
   , RUnsafeEquality
 
   -- | Lifting function for ease of use.
@@ -71,25 +71,19 @@ import Pantomime.Expr
   ( Type
   , Expr (..)
   , Eval
-  , Literal (..)
-  , SomeSymArray (..)
+  , EvalExpr
   , mkLam
   , mkType
   , mkApp
+  , mkCon
   , mkLit
-  , mkIntN
   , mkDataCon
-  , mkEnumCon
-  , mkWordN
-  , mkBool
-  , mkArray
   , mkCast
   , mkApps
   , mkCoercion
   , collectArgs
   , forceTy
   , forceCo
-  , exprToBool
   , exprType
   , throwE
   , failWithE
@@ -100,30 +94,16 @@ import Pantomime.Subst
   , substTy
   , mkEmptySubst
   )
-import Pantomime.Primitive.Array qualified as Primitive
+-- import Pantomime.Primitive.Array qualified as Primitive
 import Pantomime.Primitive.BitVector qualified as Primitive
-import Pantomime.Grisette.BitVector (IntN, WordN)
+-- import Pantomime.Grisette.BitVector (IntN, WordN)
 import Pantomime.Primitive.Bool qualified as Primitive
-import Pantomime.Grisette.SomeBV (SomeBV (..))
+import Pantomime.Literal (Literal (..), BuiltInTyCon)
+import Pantomime.Util (SymBitVec, SomeBitVec (..))
 
 import GHC.TypeNats (type (<=), KnownNat, Nat, natVal)
 import GHC.Builtin.Types.Literals (typeNatAddTyCon, typeNatSubTyCon)
-import GHC.Builtin.Types.Prim
-  ( wordPrimTy
-  , intPrimTy
-  , intPrimTy
-  , int8PrimTy
-  , int16PrimTy
-  , int32PrimTy
-  , int64PrimTy
-  , wordPrimTy
-  , word8PrimTy
-  , word16PrimTy
-  , word32PrimTy
-  , word64PrimTy
-  , alphaTyVars
-  )
-import GHC.Data.Pair (Pair(..))
+import GHC.Builtin.Types.Prim (alphaTyVars)
 import GHC.Core.TyCo.Rep (LevityType)
 import GHC.Core.FamInstEnv (normaliseType)
 import GHC.Core.Reduction (Reduction(..))
@@ -148,25 +128,9 @@ import GHC.Plugins
   , splitFunTy_maybe
   , splitTyConApp_maybe
   , tyConDataCons_maybe
-  , dataConTyCon
   , coercionLKind
   , coercionRKind
   , coercionRole
-  , topNormaliseNewType_maybe
-  , coercionKind
-  , naturalTy
-  , naturalTyCon
-  , naturalNSDataCon
-  , naturalNBDataCon
-  , integerTy
-  , integerTyCon
-  , integerINDataCon
-  , integerISDataCon
-  , integerIPDataCon
-  , boolTy
-  , intTy
-  , intTyCon
-  , intDataCon
   , tYPETyCon
   , levityTy
   , runtimeRepTy
@@ -180,24 +144,30 @@ import GHC.Plugins
 
 import Language.Haskell.TH qualified as TH
 
-import Data.Type.Bool (type (||))
-import Data.Type.Equality (type (==))
-import Data.Typeable (Proxy(..), type (:~:) (..), eqT)
+import Data.Proxy (Proxy(..))
 
 import Control.Applicative (liftA3)
 import Control.Monad (unless)
 
 import Unsafe.Coerce (UnsafeEquality)
 
-import Grisette.Unified (EvalModeTag(..))
-import Grisette (SymBool, SimpleMergeable (..), liftUnion)
+import Grisette (SymBool)
 
 import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.TyThing
 import Effectful.GHC.TH
 import Effectful.GHC.External
+import Effectful.Context
 
+-- TODO: We should move this from CoreType to BuiltinType perhaps. That is, we
+-- are completely moving away from the reify working for GHC types. We only want
+-- to support our own types, without caring about any interfacing. This should
+-- be used only to implement primitives. This being said, we will change the
+-- effect stack to only allow lookups for Pantomime primitive types.
+--
+-- Then there can be a simple module that connects all primitive operations to
+-- their API version.
 -- | Any marker type that represents some type within GHC Core.
 class CoreType a where
   coreType
@@ -224,22 +194,13 @@ class CoreType a => CoreTypeBuiltin a where
 class CoreType a => Reify a where
   type InterpRep (es :: [Effect]) a
 
-  -- TODO: For now, just having the generic () !> es error suffices. Ideally
-  -- though, we have a type family that spells out which errors may occur during
-  -- either reification or intepretation. Perhaps we even need a type family for
-  -- each, though I would rather not go there... In any case, I cannot write a
-  -- type family of ReifyError a :: [Kind.Type] here, as Haskell type families
-  -- are too slow to have a type family for (!>>). I would need to write
-  -- ReifyError a es :: Kind.Constraint, which I think it much worse. With that
-  -- one, I'm also still a little bit worried about compile times... I guess we
-  -- could alternatively have a single error type that existentially wraps any
-  -- error we might want to give. It could be a stop-gap solution...
   -- TODO: 'reify' is not a good word for this no? The Expr is more abstract
   -- than the representation...
   reify
     :: HasCallStack
     => Error () :> es
     => HasFamInstEnvs :> es
+    => Context Reader BuiltInTyCon :> es
     => Type
     -> Eval es (InterpRep es a)
     -> Eval es (Expr es)
@@ -248,6 +209,7 @@ class CoreType a => Reify a where
     :: HasCallStack
     => Error () :> es
     => HasFamInstEnvs :> es
+    => Context Reader BuiltInTyCon :> es
     => Type
     -> Eval es (Expr es)
     -> Eval es (InterpRep es a)
@@ -259,6 +221,7 @@ builtinReify
    . Error () :> es
   => ReifyBuiltin a
   => HasFamInstEnvs :> es
+  => Context Reader BuiltInTyCon :> es
   => Eval es (InterpRep es a)
   -> Eval es (Expr es)
 builtinReify expr = do
@@ -270,6 +233,7 @@ builtinInterpret
    . Error () :> es
   => ReifyBuiltin a
   => HasFamInstEnvs :> es
+  => Context Reader BuiltInTyCon :> es
   => Eval es (Expr es)
   -> Eval es (InterpRep es a)
 builtinInterpret expr = do
@@ -421,338 +385,117 @@ instance (Reify a, Reify b) => Reify (a ~> b) where
 --
 -- Note that this is not restricted to just machine words (i.e. it can be any
 -- size).
--- TODO: It is not clear that this is a Pantomime primitive... Perhaps change
--- the name a bit? 'RPWordN' maybe works (similar to how the Haskell version is
--- 'RHWordN'). Idk, it's mostly an issue for other types e.g. Integer and the
--- Pantomime symbolic Integer primitive.
-data RBitVector n
+data RBitVec n
 
-instance CoreType n => CoreType (RBitVector n) where
+instance CoreType n => CoreType (RBitVec n) where
   coreType = do
     name <- thNameToGhcName ''Primitive.BitVector
     tc <- lookupTyCon name
     size <- coreType @n
     pure $ mkTyConApp tc [size]
 
-instance CoreType n => Reify (RBitVector n) where
-  type InterpRep es (RBitVector n) = SomeBV (WordN S)
+instance CoreType n => Reify (RBitVec n) where
+  type InterpRep es (RBitVec n) = SomeBitVec SymBitVec
 
   reify ty value = do
-    -- Reduction for type-level naturals.
-    fam <- liftEff getFamInstEnvs
-    let reduction = normaliseType fam Representational ty
+    SomeBitVec value' <- value
+    let lit = BitVec value'
+    embedLiteral lit ty
 
-    -- Create the inner type.
-    SomeBV value' <- value
-    let ty' = reductionReducedType reduction
-    let inner =  mkLit $ mkWordN value' ty'
-
-    -- Apply the reduction coercion.
-    let co = mkSymCo $ reductionCoercion reduction
-    mkCast inner co
-
-  -- TODO: For now, I modified the function signature of interpret such that we
-  -- also pass in the FamInstEnvs. I don't quite like it though, as this is the
-  -- only place where we actually use it... Maybe there is a nicer way to do
-  -- this than to require this for every call when it isn't used for most
-  -- of them...
-  --
-  -- I guess here we could still simply unwrap the coercion, given that the root
-  -- is the correct TyCon. In 'reify' though, we would have to reconstruct the
-  -- coercion (and I don't want to use PluginProv coercions for this!). This
-  -- direction seems harder without the FamInstEnvs.
-  --
-  -- NOTE: I changed Eval to include effects, so the family instance lookup can
-  -- be made an effect instead of an input. The next step might be to only have
-  -- this requirement on the BitVector reification by means of a type family. We
-  -- can see if we really want to do this last thing, but the effect lookup
-  -- seems worthwhile!
   interpret ty expr = do
-    -- Reduction for type-level naturals.
-    fam <- liftEff getFamInstEnvs
-    let reduction = normaliseType fam Representational ty
-
-    -- Apply the reduction coercion.
-    let co = reductionCoercion reduction
-    value <- expr >>= flip mkCast co
-
-    -- After the coercion, the value should be just a literal.
-    case value of
-      Lit (Word value' _) -> pure $ SomeBV value'
+    expr' <- expr
+    lit <- reifyLiteral expr' ty
+    case lit of
+      BitVec value' -> pure $ SomeBitVec value'
       _ -> throwE ()
 
--- TODO: I hate the inconsistent naming here. For now, I'll just add it here
--- as I'm likely to remove many of these instances anyway once I fade out
--- hard-coded support for Haskell primitives.
-data RSBool
+data RBool
 
-instance CoreType RSBool where
+instance CoreType RBool where
   coreType = do
     name <- thNameToGhcName ''Primitive.Bool
     tc <- lookupTyCon name
     pure $ mkTyConTy tc
 
-instance Reify RSBool where
-  type InterpRep es RSBool = SymBool
+instance Reify RBool where
+  type InterpRep es RBool = SymBool
 
   reify ty value = do
     value' <- value
-    pure $ mkLit (mkBool value' ty)
+    let lit = Bool value'
+    embedLiteral lit ty
 
   interpret ty expr = do
     expr' <- expr
-    case expr' of
-      Lit (Bool value ty') | eqType ty ty' -> pure value
+    lit <- reifyLiteral expr' ty
+    case lit of
+      Bool value' -> pure value'
       _ -> throwE ()
 
-data RArray k v
+-- data RArray k v
 
-instance (CoreType k, CoreType v) => CoreType (RArray k v) where
-  coreType = do
-    name <- thNameToGhcName ''Primitive.Array
-    tc <- lookupTyCon name
-    keyTy <- coreType @k
-    valTy <- coreType @v
-    pure $ mkTyConApp tc [keyTy, valTy]
+-- instance (CoreType k, CoreType v) => CoreType (RArray k v) where
+--   coreType = do
+--     name <- thNameToGhcName ''Primitive.Array
+--     tc <- lookupTyCon name
+--     keyTy <- coreType @k
+--     valTy <- coreType @v
+--     pure $ mkTyConApp tc [keyTy, valTy]
 
-instance (CoreType k, CoreType v) => Reify (RArray k v) where
-  type InterpRep es (RArray k v) = SomeSymArray
+-- instance (CoreType k, CoreType v) => Reify (RArray k v) where
+--   type InterpRep es (RArray k v) = SomeSymArray
 
-  reify ty value = do
-    SomeSymArray value' <- value
-    pure $ mkLit (mkArray value' ty)
+--   reify ty value = do
+--     SomeSymArray value' <- value
+--     pure $ mkLit (mkArray value' ty)
 
-  interpret ty expr = do
-    expr' <- expr
-    case expr' of
-      Lit (Array value ty') | eqType ty ty' -> pure $ SomeSymArray value
-      _ -> throwE ()
+--   interpret ty expr = do
+--     expr' <- expr
+--     case expr' of
+--       Lit (Array value ty') | eqType ty ty' -> pure $ SomeSymArray value
+--       _ -> throwE ()
 
--- | KnownNat constraint reify marker.
-data RKnownNat n
+embedLiteral
+  :: HasCallStack
+  => Error () :> es
+  => HasFamInstEnvs :> es
+  => Context Reader BuiltInTyCon :> es
+  => Literal
+  -> Type
+  -> EvalExpr es
+embedLiteral lit ty = do
+  -- Reduction for type-level naturals.
+  fam <- liftEff getFamInstEnvs
+  let reduction = normaliseType fam Representational ty
 
-instance CoreType n => CoreType (RKnownNat n) where
-  coreType = do
-    name <- thNameToGhcName ''KnownNat
-    tc <- lookupTyCon name
-    size <- coreType @n
-    pure $ mkTyConApp tc [size]
+  -- Apply the reduction coercion.
+  let lit' = mkLit lit
+  let co = mkSymCo $ reductionCoercion reduction
+  mkCast lit' co
 
-instance CoreType n => Reify (RKnownNat n) where
-  type InterpRep es (RKnownNat n) = InterpRep es RNatural
+-- | Literals might have nominal coercions which make them match the given type.
+--
+-- Instead of discarding a cast on a literal, we nominally normalise the given
+-- type and apply this coercion. These coercions should cancel each other out,
+-- which should return the final literal without any cast.
+reifyLiteral
+  :: HasCallStack
+  => Error () :> es
+  => HasFamInstEnvs :> es
+  => Context Reader BuiltInTyCon :> es
+  => Expr es
+  -> Type
+  -> Eval es Literal
+reifyLiteral expr ty = do
+  fam <- liftEff getFamInstEnvs
+  let reduction = normaliseType fam Representational ty
 
-  reify ty value = do
-    (co, ty') <- failWithE () $ topNormaliseNewType_maybe ty
-    inner <- reify @RNatural ty' value
-    mkCast inner $ mkSymCo co
-
-  interpret ty value = do
-    -- Unwrap the KnownNat typeclass (which is a cast over a Natural).
-    (tyL, body) <- value >>= \case
-      Cast body co
-        | Pair tyL tyR <- coercionKind co
-        , eqType ty tyR -> pure (tyL, liftUnion body)
-      _ -> throwE ()
-
-    interpret @RNatural tyL body
-
--- | Natural reify marker.
-data RNatural
-
-instance CoreType RNatural
-
-instance CoreTypeBuiltin RNatural where
-  coreTypeBuiltin = naturalTy
-
-instance Reify RNatural where
-  type InterpRep es RNatural = Either (SomeBV (WordN S)) ()
-
-  reify ty expr = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty naturalTy) do
-      throwE ()
-
-    expr >>= \case
-      Left (SomeBV value) -> do
-        -- FIXME: Give proper platform size
-        let dc = mkLit $ mkDataCon @64 naturalNSDataCon
-        let arg = pure $ mkLit (mkWordN value wordPrimTy)
-        mkApp dc arg
-
-      Right _value -> do
-        -- let _dc = mkLit $ mkDataCon @64 naturalNBDataCon
-        -- let arg = pure $ mkLit (mkByteArray value byteArrayPrimTy)
-        -- mkApp dc arg
-        -- FIXME: Implement this once we have byte array primitives.
-        undefined
-
-  interpret ty expr = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty naturalTy) do
-      throwE ()
-
-    -- Gather the arguments.
-    (spine, args) <- collectArgs <$> expr
-
-    -- Check whether the spine is indeed a natural datacon.
-    dc <- case spine of
-      Lit (DataCon dc) | dataConTyCon dc == naturalTyCon -> pure dc
-      _ -> throwE ()
-
-    -- All natural DataCon have only one argument exactly. Note that we also
-    -- force it here already.
-    arg <- case args of
-      [arg] -> arg
-      _ -> throwE ()
-
-    if
-      | dc == naturalNSDataCon
-      , Lit (Word value ty') <- arg
-      -- TODO: We could consider turning the Int into a ByteArray, such that we
-      -- have a uniform way of interpreting a Natural. I guess this would reduce
-      -- the number of permitted operations though, so perhaps it's not worth
-      -- it...
-      , eqType ty' wordPrimTy -> pure $ Left (SomeBV value)
-
-      | dc == naturalNBDataCon
-      -- FIXME: We should have a ByteArray primitive to match on here!
-      , Lit _ <- arg -> pure $ Right ()
-
-      | otherwise -> throwE ()
-
--- | Integer reify marker.
-data RInteger
-
-instance CoreType RInteger
-
-instance CoreTypeBuiltin RInteger where
-  coreTypeBuiltin = integerTy
-
-instance Reify RInteger where
-  type InterpRep es RInteger = Either (SomeBV (IntN S)) ()
-
-  reify ty expr = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty integerTy) do
-      throwE ()
-
-    expr >>= \case
-      Left (SomeBV value) -> do
-        -- FIXME: Give proper platform size
-        let dc = mkLit $ mkDataCon @64 integerISDataCon
-        let arg = pure $ mkLit (mkIntN value intPrimTy)
-        mkApp dc arg
-      Right _value -> do
-        -- let _dc = mkLit $ mkDataCon @64 naturalNBDataCon
-        -- let arg = pure $ mkLit (mkByteArray value byteArrayPrimTy)
-        -- mkApp dc arg
-        -- FIXME: Implement this once we have byte array primitives.
-        undefined
-
-  interpret ty expr = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty integerTy) do
-      throwE ()
-
-    -- Gather the arguments.
-    (spine, args) <- collectArgs <$> expr
-
-    -- Check whether the spine is indeed a natural datacon.
-    dc <- case spine of
-      Lit (DataCon dc) | dataConTyCon dc == integerTyCon -> pure dc
-      _ -> throwE ()
-
-    -- All natural DataCon have only one argument exactly. Note that we also
-    -- force it here already.
-    arg <- case args of
-      [arg] -> arg
-      _ -> throwE ()
-
-    if
-      | dc == integerISDataCon
-      , Lit (Int value ty') <- arg
-      -- TODO: We could consider turning the Int into a ByteArray, such that we
-      -- have a uniform way of interpreting a Integer.
-      , eqType ty' intPrimTy -> pure $ Left (SomeBV value)
-
-      | dc == integerIPDataCon
-      -- FIXME: We should have a ByteArray primitive to match on here!
-      , Lit _ <- arg -> pure $ Right ()
-
-      | dc == integerINDataCon
-      -- FIXME: We should have a ByteArray primitive to match on here!
-      , Lit _ <- arg -> pure $ Right ()
-
-      | otherwise -> throwE ()
-
--- | Boolean reify marker.
-data RBool
-
-instance CoreType RBool
-
-instance CoreTypeBuiltin RBool where
-  coreTypeBuiltin = boolTy
-
-instance Reify RBool where
-  type InterpRep _ RBool = SymBool
-
-  reify ty expr = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty boolTy) do
-      throwE ()
-
-    -- Convert the symbolic boolean into a tag.
-    value <- expr
-    let tag = mrgIte value 1 0
-
-    -- FIXME: Provide proper tag size.
-    mkEnumCon @64 tag boolTy
-
-  interpret ty expr = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty boolTy) do
-      throwE ()
-
-    -- Convert the expression into a SymBool, if possible.
-    expr >>= exprToBool
-
--- | Haskell boxed integer marker.
-data RInt (n :: Nat)
-
-instance CoreType (RInt n)
-
-instance CoreTypeBuiltin (RInt n) where
-  coreTypeBuiltin = intTy
-
-instance KnownNat n => Reify (RInt n) where
-  type InterpRep es (RInt n) = IntN S n
-
-  reify ty expr = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty intTy) do
-      throwE ()
-
-    let spine = mkLit $ mkDataCon @n intDataCon
-    let arg = reify @(RHIntPW n) intPrimTy expr
-    mkApp spine arg
-
-  interpret ty expr = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty intTy) do
-      throwE ()
-
-    (spine, args) <- collectArgs <$> expr
-
-    -- Check the spine to be the correct type.
-    case spine of
-      Lit (DataCon dc) | dataConTyCon dc == intTyCon -> pure ()
-      _ -> throwE ()
-
-    arg <- case args of
-      [arg] -> pure arg
-      _ -> throwE ()
-
-    interpret @(RHIntPW n) intPrimTy arg
+  -- Apply the reduction coercion.
+  let co = reductionCoercion reduction
+  expr' <- mkCast expr co
+  case expr' of
+    Lit lit -> pure lit
+    _ -> throwE ()
 
 data RUnsafeEquality k a b
 
@@ -783,7 +526,7 @@ instance (CoreType k, CoreType a, CoreType b) => Reify (RUnsafeEquality k a b) w
       _ -> throwE ()
 
     -- Get the spine of this expression.
-    let spine = mkLit $ mkDataCon @64 dc
+    let spine = mkCon $ mkDataCon @64 dc
 
     -- Force the coercion.
     co' <- co
@@ -813,135 +556,6 @@ instance (CoreType k, CoreType a, CoreType b) => Reify (RUnsafeEquality k a b) w
     case args of
       [_kind, _ty, co] -> liftEff $ forceCo co
       _ -> throwE ()
-
--- | Reify marker for Haskell sized integer primitives.
-data RHIntN (n :: Nat)
-
-instance
-  ( KnownNat n
-  , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
-  ) => CoreType (RHIntN n) where
-
-instance
-  ( KnownNat n
-  , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
-  ) => CoreTypeBuiltin (RHIntN n) where
-  coreTypeBuiltin = case natVal @n Proxy of
-    8 -> int8PrimTy
-    16 -> int16PrimTy
-    32 -> int32PrimTy
-    64 -> int64PrimTy
-    _ -> error "unreachable due to typeclass constraint"
-
-instance
-  ( KnownNat n
-  , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
-  ) => Reify (RHIntN n) where
-  type InterpRep es (RHIntN n) = IntN S n
-
-  reify ty value = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty $ coreTypeBuiltin @(RHIntN n)) do
-      throwE ()
-
-    value' <- value
-    pure $ mkLit (mkIntN value' ty)
-
-  interpret ty value = value >>= \case
-    Lit (Int @m value' ty')
-      | Just Refl <- eqT @n @m
-      , eqType ty ty' -> pure value'
-    _ -> throwE ()
-
--- | Reify marker for the Haskell platform sized integer primitives.
-data RHIntPW (n :: Nat)
-
-instance CoreType (RHIntPW n)
-
-instance CoreTypeBuiltin (RHIntPW n) where
-  coreTypeBuiltin = intPrimTy
-
-instance KnownNat n => Reify (RHIntPW n) where
-  type InterpRep es (RHIntPW n) = IntN S n
-
-  reify ty value = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty $ coreTypeBuiltin @(RHIntPW n)) do
-      throwE ()
-
-    value' <- value
-    pure $ mkLit (mkIntN value' ty)
-
-  interpret ty value = value >>= \case
-    Lit (Int @m value' ty')
-      | Just Refl <- eqT @n @m
-      , eqType ty ty' -> pure value'
-    _ -> throwE ()
-
--- | Reify marker for Haskell sized integer primitives.
-data RHWordN (n :: Nat)
-
-instance
-  ( KnownNat n
-  , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
-  ) => CoreType (RHWordN n) where
-
-instance
-  ( KnownNat n
-  , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
-  ) => CoreTypeBuiltin (RHWordN n) where
-
-  coreTypeBuiltin = case natVal @n Proxy of
-    8 -> word8PrimTy
-    16 -> word16PrimTy
-    32 -> word32PrimTy
-    64 -> word64PrimTy
-    _ -> error "unreachable due to typeclass constraint"
-
-instance
-  ( KnownNat n
-  , (n == 8 || n == 16 || n == 32 || n == 64) ~ True
-  ) => Reify (RHWordN n) where
-  type InterpRep es (RHWordN n) = WordN S n
-
-  reify ty value = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty $ coreTypeBuiltin @(RHWordN n)) do
-      throwE ()
-
-    value' <- value
-    pure $ mkLit (mkWordN value' ty)
-
-  interpret ty value = value >>= \case
-    Lit (Word @m value' ty')
-      | Just Refl <- eqT @n @m
-      , eqType ty ty' -> pure value'
-    _ -> throwE ()
-
--- | Reify marker for the Haskell platform sized integer primitives.
-data RHWordPW (n :: Nat)
-
-instance CoreType (RHWordPW n)
-
-instance CoreTypeBuiltin (RHWordPW n) where
-  coreTypeBuiltin = wordPrimTy
-
-instance KnownNat n => Reify (RHWordPW n) where
-  type InterpRep es (RHWordPW n) = WordN S n
-
-  reify ty value = do
-    -- Though not strictly necessary, we ensure we have the correct type.
-    unless (eqType ty $ coreTypeBuiltin @(RHWordPW n)) do
-      throwE ()
-
-    value' <- value
-    pure $ mkLit (mkWordN value' ty)
-
-  interpret ty value = value >>= \case
-    Lit (Word @m value' ty')
-      | Just Refl <- eqT @n @m
-      , eqType ty ty' -> pure value'
-    _ -> throwE ()
 
 -- | Alias for the most common kinded type variables.
 type RTyVar_ n = RTyVar n RTypeKind

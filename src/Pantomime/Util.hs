@@ -1,7 +1,12 @@
 {-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Pantomime.Util
   ( KnownPos
+  , SymBitVec
+  , BitVec
+  , SomeBitVec (..)
 
   , foldM'
   , foldM_'
@@ -24,7 +29,16 @@ module Pantomime.Util
 
 import GHC.Plugins hiding (empty)
 import GHC.Core.Multiplicity (Scaled(..))
-import GHC.TypeLits (KnownNat, type (<=))
+import GHC.TypeLits (KnownNat, SomeNat (..), type (<=))
+
+import Grisette
+  ( SymWordN
+  , WordN
+  , Mergeable (..)
+  , MergingStrategy (..)
+  , EvalSym (..)
+  , wrapStrategy
+  )
 
 import Data.Foldable (foldrM)
 
@@ -36,9 +50,40 @@ import Lens.Micro (Lens)
 import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, CallStack, throwError_)
 import Effectful.Dispatch.Static (unsafeEff_)
+import Data.Data (Proxy(..))
+import Data.Constraint (Dict(..))
+import Pantomime.Dict (unsafeDict)
+import Data.Typeable (type (:~:)(..), eqT)
+import Pantomime.Grisette.Mergeable (impossible)
 
 -- | Type alias for known naturals that are positive.
 type KnownPos n = (KnownNat n, 1 <= n)
+
+-- | Alias for sized symbolic word.
+type SymBitVec = SymWordN
+
+-- | Alias for sized word.
+type BitVec = WordN
+
+-- | Bitvector whose size is existentially wrapped.
+data SomeBitVec bv where
+  SomeBitVec :: KnownPos n => bv n -> SomeBitVec bv
+
+instance
+  (forall n. KnownPos n => Mergeable (bv n))
+  => Mergeable (SomeBitVec bv) where
+  rootStrategy = SortedStrategy
+    (\(SomeBitVec @n _) -> SomeNat @n Proxy)
+    (\(SomeNat @n _) -> case unsafeDict @(1 <= n) of
+      Dict -> wrapStrategy @(bv n)
+        rootStrategy
+        SomeBitVec
+        \case SomeBitVec @m bv | Just Refl <- eqT @n @m -> bv ; _ -> impossible)
+
+instance
+  (forall n. EvalSym (bv n))
+  => EvalSym (SomeBitVec bv) where
+  evalSym fill model (SomeBitVec value) = SomeBitVec $ evalSym fill model value
 
 -- TODO: Wouldn't a better name be foldByM or foldMBy?
 -- | The usual 'foldM', but with its arguments switched.

@@ -15,12 +15,11 @@ module Pantomime.Literal
   , eqLiteralType
   , SomeLiteralType (..)
 
-  -- TODO: Where to place this?
-  , SymBitVec
-
   -- | Conversion between 'LiteralType' and 'Type'.
   , BuiltInTyCon (..)
   , embedLitTy
+  , embedSomeLitTy
+  , embedLitTyOf
   , reifyLitTy
   ) where
 
@@ -45,6 +44,8 @@ import GHC.Plugins
   , TyCon
   , CoercionN
   , Role (..)
+  , Outputable (..)
+  , IsLine (..)
   , mkTyConTy
   , mkNumLitTy
   , mkTyConApp
@@ -55,7 +56,6 @@ import GHC.TypeLits (SomeNat (..), natVal, someNatVal)
 
 import Grisette
   ( SymBool
-  , SymWordN
   , SymInteger
   , Solvable
   , ConRep(..)
@@ -70,7 +70,7 @@ import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim)
 import Grisette.Internal.SymPrim.SymArray (SymArray)
 
 import Pantomime.Dict (posNat)
-import Pantomime.Util (KnownPos, failWith)
+import Pantomime.Util (KnownPos, SymBitVec, failWith)
 import Pantomime.Grisette.Mergeable (impossible)
 
 class
@@ -82,6 +82,10 @@ class
   , SimpleMergeable a
   , EvalSym a
   , Typeable a
+  -- TODO: I want to switch away from show, into Outputable. Maybe I should just
+  -- get an Outputable instance for Literal though, as these types actually
+  -- don't have an instance themselves.
+  , Show a
   )
   => LiteralTypeable a where
   literalType :: LiteralType a
@@ -193,14 +197,17 @@ instance Ord SomeLiteralType where
 instance Mergeable SomeLiteralType where
   rootStrategy = SortedStrategy id $ \_ -> SimpleStrategy \_ value _ -> value
 
--- TODO: Not sure where to keep this. I like the uniformity of having this, so
--- I'll keep it here for now. Perhaps it should go into Util?
--- | Symbolic bitvector type.
-type SymBitVec = SymWordN
-
 -- | Symbolic literals supported by the symbolic execution engine.
 data Literal where
   Literal :: LiteralType a -> a -> Literal
+
+instance Outputable Literal where
+  -- TODO: We are printing the grisette primitives using show which is
+  -- oblivious to indentation. We should make an actual pretty printer for
+  -- symbolic variables. Ideally, the variable names get the pretty printing
+  -- that is similar to how their naming works in the fresh variable
+  -- generation.
+  ppr (Literal ty value) = withDict ty $ text (show value)
 
 instance Mergeable Literal where
   rootStrategy = SortedStrategy
@@ -269,7 +276,7 @@ data BuiltInTyCon where
     , tcArray :: TyCon
     } -> BuiltInTyCon
 
--- | Convert a 'LiteralType' into a normal Haskell 'Type'.
+-- | Convert a 'LiteralType' into a Haskell 'Type'.
 embedLitTy
   :: Context Reader BuiltInTyCon :> es
   => LiteralType a
@@ -288,6 +295,20 @@ embedLitTy ty = do
       keyTy' <- embedLitTy keyTy
       valTy' <- embedLitTy valTy
       pure $ mkTyConApp tcArray [keyTy', valTy']
+
+-- | Convert a 'SomeLiteralType' into a Haskell 'Type'.
+embedSomeLitTy
+  :: Context Reader BuiltInTyCon :> es
+  => SomeLiteralType
+  -> Eff es Type
+embedSomeLitTy (SomeLiteralType ty) = embedLitTy ty
+
+-- | Convert the 'LiteralType' of a 'Literal' into a Haskell 'Type'.
+embedLitTyOf
+  :: Context Reader BuiltInTyCon :> es
+  => Literal
+  -> Eff es Type
+embedLitTyOf (Literal ty _) = embedLitTy ty
 
 -- | Fetch a 'LiteralType' from a GHC 'Type', if possible.
 --

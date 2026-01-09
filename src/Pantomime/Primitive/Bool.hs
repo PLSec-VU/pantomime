@@ -7,8 +7,14 @@ module Pantomime.Primitive.Bool
   , false
   , ite
   , concrete
+  , not
+  , (&&)
+  , (||)
+  , xor
+  , iff
   ) where
 
+import Data.Composition ((.:))
 import Prelude qualified
 
 -- TODO: We should provide implementations for many of the common typeclasses.
@@ -45,10 +51,6 @@ ite (Bool scrut) tr fl = case scrut of
 -- roundabout way. This is intentional, do not change them unless you know what
 -- you're doing!
 
--- | Convert a symbolic Boolean to the standard Haskell Boolean.
-concrete :: Bool -> Prelude.Bool
-concrete value = ite value Prelude.True Prelude.False
-
 pattern True :: Bool
 pattern True <- (concrete -> Prelude.True)
   where
@@ -60,3 +62,41 @@ pattern False <- (concrete -> Prelude.False)
     False = false
 
 {-# COMPLETE True, False #-}
+
+-- | Convert a symbolic Boolean to the standard Haskell Boolean.
+concrete :: Bool -> Prelude.Bool
+concrete value = ite value Prelude.True Prelude.False
+
+-- TODO: Although I now implemented these operations through only ite, it is
+-- likely better to use OPAQUE interpretations for these as well. Especially for
+-- xor and ite, Grisette is not able to optimise the current definition into
+-- their succinct form.
+not :: Bool -> Bool
+not = \case
+  True -> False
+  False -> True
+
+(&&) :: Bool -> Bool -> Bool
+(&&) = \cases
+  True y -> y
+  False _ -> False
+
+(||) :: Bool -> Bool -> Bool
+(||) = \cases
+  True _ -> True
+  False y -> y
+
+xor :: Bool -> Bool -> Bool
+xor = \cases
+  True False -> True
+  False True -> True
+  _ _ -> False
+
+iff :: Bool -> Bool -> Bool
+iff = \cases
+  True True -> True
+  False False -> True
+  _ _ -> False
+
+instance Prelude.Eq Bool where
+  (==) = concrete .: iff

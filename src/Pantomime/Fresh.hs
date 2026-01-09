@@ -7,18 +7,6 @@ module Pantomime.Fresh
 
 import GHC.Core.Reduction (Reduction (..), mkReduction, homogeniseHetRedn)
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
-import GHC.Builtin.Types.Prim
-  ( intPrimTy
-  , int8PrimTy
-  , int16PrimTy
-  , int32PrimTy
-  , int64PrimTy
-  , wordPrimTy
-  , word8PrimTy
-  , word16PrimTy
-  , word32PrimTy
-  , word64PrimTy
-  )
 import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe)
 import GHC.Types.Unique (Uniquable (..), getKey)
 import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
@@ -56,13 +44,11 @@ import GHC.Plugins
   , bytesFS
   )
 
-import Grisette.Unified (EvalModeTag (..))
 import Grisette
   ( Symbol
   , Solvable (..)
   , ConRep (..)
   , SExpr (..)
-  , LogicalOp (..)
   , SymOrd (..)
   , SimpleMergeable (..)
   , simple
@@ -74,16 +60,14 @@ import Data.Constraint (Dict (..))
 import Data.Functor ((<&>))
 import Data.Text.Encoding (decodeUtf8)
 
-import Pantomime.Grisette.BitVector (IntN)
 import Pantomime.Expr
 import Pantomime.Literal
   ( BuiltInTyCon
   , SomeLiteralType (..)
-  , Literal (..)
   , HasDict (..)
   , reifyLitTy
   )
-import Pantomime.Util (freshIds, freshTyVars, foldlBy)
+import Pantomime.Util (freshIds, freshTyVars, foldlBy, SymBitVec)
 
 import Effectful
 import Effectful.Error.Static
@@ -212,28 +196,8 @@ freshExpr axioms root = do
           -----------------------
           | Right (co, SomeLiteralType ty') <- result -> do
             Dict <- pure $ evidence ty'
-            let value = Literal ty' $ symbolic
-            -- TODO: We don't need this convert anymore once we switch literal
-            -- format!
-            value' <- liftEff $ newToOldLit value
-            mkCast (mkLit value') $ mkSubCo co
-
-          -- Haskell Primitive:
-          ---------------------
-          -- FIXME: Generate proper platform size.
-          | ty `eqType` intPrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-          | ty `eqType` int8PrimTy -> pure $ mkLit (mkIntN @8 symbolic ty)
-          | ty `eqType` int16PrimTy -> pure $ mkLit (mkIntN @16 symbolic ty)
-          | ty `eqType` int32PrimTy -> pure $ mkLit (mkIntN @32 symbolic ty)
-          | ty `eqType` int64PrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-          -- FIXME: Generate proper platform size.
-          | ty `eqType` wordPrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
-          | ty `eqType` word8PrimTy -> pure $ mkLit (mkWordN @8 symbolic ty)
-          | ty `eqType` word16PrimTy -> pure $ mkLit (mkWordN @16 symbolic ty)
-          | ty `eqType` word32PrimTy -> pure $ mkLit (mkWordN @32 symbolic ty)
-          | ty `eqType` word64PrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
-          -- | ty `eqType` floatPrimTy -> undefined
-          -- | ty `eqType` doublePrimTy -> undefined
+            let value = Literal ty' symbolic
+            mkCast (mkLit value) $ mkSubCo co
 
           -- User Interpretation:
           -----------------------
@@ -278,14 +242,16 @@ freshExpr axioms root = do
             -- TODO: I really, really hate this level of indentation!
             | isEnumerationTyCon tc -> do
               -- FIXME: This should get the proper platform size.
-              let tag = symbolicVar @(IntN S 64) var Tag
+              let tag = symbolicVar @(SymBitVec 64) var Tag
 
-              -- Tag is within bounds.
+              -- Tag is within bounds. Note that we only need to check the
+              -- upper bound, as the lower bound 0 is already captured by the
+              -- fact that the tag is unsigned.
               let upper = fromIntegral $ tyConFamilySize tc
-              let inBounds = 0 .<= tag .&& tag .< upper
+              let inBounds = tag .< upper
 
               -- Construct the data constructor and its type arguments.
-              let dc = pure $ mkLit (EnumCon tag tc)
+              let dc = pure $ mkCon (EnumCon tag tc)
               mrgIf inBounds dc mkUnreachable
 
             -- Create cascading if for all possible cases. Note, we avoid
@@ -299,7 +265,7 @@ freshExpr axioms root = do
                           , varAccessor = Accessor dc idx : varAccessor var
                           }
 
-                    let dc' = mkLit $ DataCon dc
+                    let dc' = mkCon $ DataCon dc
                     let tyArgs = pure . mkType <$> args
                     mkApps dc' $ tyArgs <> valArgs
 

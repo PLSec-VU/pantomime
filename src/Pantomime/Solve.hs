@@ -43,10 +43,12 @@ import Language.Haskell.TH qualified as TH
 
 import Pantomime.Expr
   ( Eval (..)
+  , Expr (..)
   , Variant (..)
+  , Literal (..)
   , mkApps
-  , exprToBool
   , pprArg
+  , throwE, pprEval
   )
 import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Symbolise
@@ -99,11 +101,11 @@ checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
   -- TODO: Somehow this code doesn't read very nice. I think I should review it.
   program <- get @CoreProgram
 
-  bitVector <- reifiedBitVector
+  -- bitVector <- reifiedBitVector
   unsafeRefl <- reifiedUnsafeRefl
   bool <- reifiedBool
 
-  let reified = unsafeRefl : bool ++ bitVector
+  let reified = unsafeRefl : bool -- ++ bitVector
 
   -- TODO: Does it make sense to build this up on every invocation? I feel like
   -- it would be better to do this once per module. In fact, the final symbolise
@@ -139,7 +141,9 @@ checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
   let result = do
         fun <- symbolise subst expr
         res <- mkApps fun $ fmap snd args
-        exprToBool res
+        case res of
+          Lit (Bool value) -> pure value
+          _ -> throwE ()
 
   -- TODO: What to do about raise? Do we really just want to return false? I
   -- guess for now it makes sense.
