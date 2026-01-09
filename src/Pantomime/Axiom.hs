@@ -153,6 +153,8 @@ instance Monoid PluginAxioms where
     , termAxioms = mempty
     }
 
+-- TODO: I think it would be good to have type synonyms for both of these fields
+-- as we use them independently as well.
 -- | Fully resolved plugin axioms. These may be used as-is by the solver.
 data PluginAxiomsR where
   PluginAxiomsR ::

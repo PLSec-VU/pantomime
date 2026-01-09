@@ -18,22 +18,18 @@ module Pantomime.Dict
   ) where
 
 import GHC.Plugins hiding (empty)
+import GHC.Builtin.Types.Literals
 import GHC.TypeNats
 
-import Data.Type.Ord
+import Data.Constraint (Dict (..))
 import Data.Data (Proxy(..))
+import Data.Type.Ord
 
 import Control.Applicative (Alternative (..))
 import Control.Monad (guard)
 import Control.Monad.Identity (runIdentity)
 
 import Unsafe.Coerce (unsafeCoerce)
-import GHC.Builtin.Types.Literals
-
--- TODO: This file is a bit all over the place. I think we should just import
--- the small library that exposes Dict instead of redefining it.
-data Dict c where
-  Dict :: c => Dict c
 
 unsafeDict :: Dict c
 unsafeDict = unsafeCoerce $ Dict @()

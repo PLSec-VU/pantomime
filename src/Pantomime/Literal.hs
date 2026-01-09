@@ -3,18 +3,22 @@
 {-# LANGUAGE ViewPatterns #-}
 
 module Pantomime.Literal
-  ( LiteralTypeable (..)
+  -- | The primary export of this module.
+  --
+  -- This contains the 'Literal' itself as well as its type and typeclass
+  -- constraint.
+  ( Literal (Literal, Bool, Integer, BitVec, Array)
+  , LiteralTypeable (..)
   , HasDict (..)
   , literalTypeOf
-
   , LiteralType (..)
   , eqLiteralType
   , SomeLiteralType (..)
 
+  -- TODO: Where to place this?
   , SymBitVec
 
-  , Literal (Literal, Bool, Integer, BitVec, Array)
-
+  -- | Conversion between 'LiteralType' and 'Type'.
   , BuiltInTyCon (..)
   , embedLitTy
   , reifyLitTy
@@ -254,7 +258,7 @@ viewArray = \case
 
 -- | Built-in type constructors.
 data BuiltInTyCon where
-  BuiltInTypes ::
+  BuiltInTyCon ::
     { tcBool :: TyCon
     , tcInteger :: TyCon
     , tcBitVec :: TyCon
@@ -269,7 +273,7 @@ embedLitTy
 embedLitTy ty = do
   -- TODO: I feel like this is not the best way to have the effect. Probably we
   -- just want to wrap the other lookup effect stack!
-  BuiltInTypes { .. } <- get
+  BuiltInTyCon { .. } <- get
   case ty of
     BoolType -> pure $ mkTyConTy tcBool
     IntegerType -> pure $ mkTyConTy tcInteger
@@ -314,7 +318,7 @@ reifyLitType'
 reifyLitType' ty = do
   -- TODO: We should fix the recursive callstack grow!
   (tc, targs) <- failWith () $ splitTyConApp_maybe ty
-  BuiltInTypes { .. } <- get
+  BuiltInTyCon { .. } <- get
   if
     | tc == tcBool
     , [] <- targs -> pure $ SomeLiteralType BoolType

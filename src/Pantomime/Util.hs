@@ -1,7 +1,9 @@
 {-# LANGUAGE ImplicitParams #-}
 
 module Pantomime.Util
-  ( foldM'
+  ( KnownPos
+
+  , foldM'
   , foldM_'
   , foldrM'
   , foldlBy
@@ -22,6 +24,7 @@ module Pantomime.Util
 
 import GHC.Plugins hiding (empty)
 import GHC.Core.Multiplicity (Scaled(..))
+import GHC.TypeLits (KnownNat, type (<=))
 
 import Data.Foldable (foldrM)
 
@@ -33,6 +36,9 @@ import Lens.Micro (Lens)
 import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, CallStack, throwError_)
 import Effectful.Dispatch.Static (unsafeEff_)
+
+-- | Type alias for known naturals that are positive.
+type KnownPos n = (KnownNat n, 1 <= n)
 
 -- TODO: Wouldn't a better name be foldByM or foldMBy?
 -- | The usual 'foldM', but with its arguments switched.
