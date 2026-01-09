@@ -46,6 +46,8 @@ pattern If c t f <- (ifView -> Just (IfViewResult c t f))
 -- not want the 'Mergeable' constraint that Grisette imposes.
 {-# COMPLETE Single, If #-}
 
+-- TODO: We should create a merge request for these. Having them as orphans
+-- doesn't really make sense.
 instance Foldable Union where
   foldr f = go
     where
