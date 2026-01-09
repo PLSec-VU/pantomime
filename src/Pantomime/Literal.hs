@@ -106,6 +106,10 @@ instance
 literalTypeOf :: LiteralTypeable a => a -> LiteralType a
 literalTypeOf _ = literalType
 
+-- TODO: There are more literal types to consider here. At the very least floats
+-- and sequences. I don't think we would want ADT or functions here, as they
+-- can also be encoded in the expression language already. We can reconsider it
+-- later perhaps.
 -- | The type of literals supported within the symbolic executor.
 --
 -- This is like a version of 'TypeRep' for a fixed domain of types.
