@@ -33,6 +33,7 @@ module Pantomime.Primitive.Reify
   -- | Pantomime primitives.
   , RBitVector
   , RSBool
+  , RArray
 
   -- | Haskell primitives.
   , RHIntN
@@ -71,6 +72,7 @@ import Pantomime.Expr
   , Expr (..)
   , Eval
   , Literal (..)
+  , SomeSymArray (..)
   , mkLam
   , mkType
   , mkApp
@@ -80,6 +82,7 @@ import Pantomime.Expr
   , mkEnumCon
   , mkWordN
   , mkBool
+  , mkArray
   , mkCast
   , mkApps
   , mkCoercion
@@ -97,9 +100,10 @@ import Pantomime.Subst
   , substTy
   , mkEmptySubst
   )
+import Pantomime.Primitive.Array qualified as Primitive
 import Pantomime.Primitive.BitVector qualified as Primitive
-import Pantomime.Primitive.Bool qualified as Primitive
 import Pantomime.Grisette.BitVector (IntN, WordN)
+import Pantomime.Primitive.Bool qualified as Primitive
 import Pantomime.Grisette.SomeBV (SomeBV (..))
 
 import GHC.TypeNats (type (<=), KnownNat, Nat, natVal)
@@ -230,6 +234,8 @@ class CoreType a => Reify a where
   -- one, I'm also still a little bit worried about compile times... I guess we
   -- could alternatively have a single error type that existentially wraps any
   -- error we might want to give. It could be a stop-gap solution...
+  -- TODO: 'reify' is not a good word for this no? The Expr is more abstract
+  -- than the representation...
   reify
     :: HasCallStack
     => Error () :> es
@@ -497,6 +503,29 @@ instance Reify RSBool where
     expr' <- expr
     case expr' of
       Lit (Bool value ty') | eqType ty ty' -> pure value
+      _ -> throwE ()
+
+data RArray k v
+
+instance (CoreType k, CoreType v) => CoreType (RArray k v) where
+  coreType = do
+    name <- thNameToGhcName ''Primitive.Array
+    tc <- lookupTyCon name
+    keyTy <- coreType @k
+    valTy <- coreType @v
+    pure $ mkTyConApp tc [keyTy, valTy]
+
+instance (CoreType k, CoreType v) => Reify (RArray k v) where
+  type InterpRep es (RArray k v) = SomeSymArray
+
+  reify ty value = do
+    SomeSymArray value' <- value
+    pure $ mkLit (mkArray value' ty)
+
+  interpret ty expr = do
+    expr' <- expr
+    case expr' of
+      Lit (Array value ty') | eqType ty ty' -> pure $ SomeSymArray value
       _ -> throwE ()
 
 -- | KnownNat constraint reify marker.

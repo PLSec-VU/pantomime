@@ -5,7 +5,7 @@ module Pantomime.Fresh
   , freshArgs
   ) where
 
-import GHC.Core.Reduction (Reduction(..), mkReduction, homogeniseHetRedn)
+import GHC.Core.Reduction (Reduction (..), mkReduction, homogeniseHetRedn)
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
 import GHC.Builtin.Types.Prim
   ( intPrimTy
@@ -19,8 +19,8 @@ import GHC.Builtin.Types.Prim
   , word32PrimTy
   , word64PrimTy
   )
-import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe, normaliseType)
-import GHC.Types.Unique (Uniquable(..), getKey)
+import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe)
+import GHC.Types.Unique (Uniquable (..), getKey)
 import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
 import GHC.Utils.Outputable (Outputable (..))
 import GHC.Plugins qualified as GHC
@@ -36,7 +36,6 @@ import GHC.Plugins
   , isUnboxedTupleTyCon
   , isUnboxedSumTyCon
   , isEnumerationTyCon
-  , isNumLitTy
   , tyConDataCons_maybe
   , dataConInstArgTys
   , splitForAllTyVars
@@ -48,18 +47,14 @@ import GHC.Plugins
   , mkUnivCo
   , mkAppCos
   , mkReflCo
-  , mkTyConAppCo
   , mkSymCo
+  , mkSubCo
   , coreFullView
-  , coercionLKind
   , coercionRKind
   , instNewTyCon_maybe
   , getOccFS
   , bytesFS
   )
-
-import GHC.TypeLits (someNatVal)
-import GHC.TypeNats (SomeNat (..))
 
 import Grisette.Unified (EvalModeTag (..))
 import Grisette
@@ -75,22 +70,29 @@ import Grisette
   , mrgIf
   )
 
+import Data.Constraint (Dict (..))
 import Data.Functor ((<&>))
 import Data.Text.Encoding (decodeUtf8)
 
 import Pantomime.Grisette.BitVector (IntN)
 import Pantomime.Expr
-import Pantomime.Primitive.GHC qualified as Primitive
+import Pantomime.Literal
+  ( BuiltInTyCon
+  , SomeLiteralType (..)
+  , Literal (..)
+  , HasDict (..)
+  , reifyLitTy
+  )
 import Pantomime.Util (freshIds, freshTyVars, foldlBy)
 
 import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.External
+import Effectful.Context (Context, ContextMode (..))
 
 data FreshInstEnv where
   FreshInstEnv ::
     { fieUser :: TyConEnv TyCon
-    , fiePrim :: Primitive.Types
     } -> FreshInstEnv
 
 data Variable es where
@@ -120,6 +122,15 @@ data VarType where
   Select :: DataCon -> VarType
   -- ^ Select a specific DataCon.
 
+-- TODO: This is not a great way to build identifiers for the tree. That is, the
+-- identifiers grow with the size of the tree. We just want them to be a small
+-- word ideally. Of course, this is better for id readability, but I think it
+-- likely hurts performance. I'm not sure how Grisette implements this though.
+-- I.e. whether they actually compare the full identifier. An alternative for
+-- example would be to generate identifiers impurely with just a counter
+-- (pure identifiers would have dependencies and thus would not work). For now,
+-- this is better for debugging. I'll have to profile to see if this is actually
+-- that bad. :)
 varToSymbol
   :: Variable es
   -> VarType
@@ -153,16 +164,20 @@ symbolicVar var dst = case varArgs var of
   -- method of creation is the same it should work.
   _ -> error "Not implemented yet :("
 
+-- TODO: I wonder if we could not push this creation to the front-end of
+-- Pantomime. That is, we expose some functions to create fresh primitives.
+-- Then we could probably use a Data instance to create remaining expression.
 -- TODO: This name isn't great. We really are making a symbolic expression here.
 -- The freshness hinges on the freshness of the Var.
 freshExpr
   :: HasCallStack
   => Error () :> es
   => HasFamInstEnvs :> es
-  => FreshInstEnv
+  => Context Reader BuiltInTyCon :> es
+  => TyConEnv TyCon
   -> Var
   -> EvalExpr es
-freshExpr FreshInstEnv { .. } root = do
+freshExpr axioms root = do
   -- TODO: Is it better to this lookup once? Whilst it is a reader-like effect,
   -- it is implemented through IO, so I'm a bit wary of running it in a hot loop
   -- like this one. The only way to know is just to profile I guess, but for now
@@ -175,6 +190,8 @@ freshExpr FreshInstEnv { .. } root = do
   let go var = do
         let ty = coreFullView $ varType var
 
+        -- TODO: We can probably move the definition of this thing inwards once
+        -- we remove the haskell primitives.
         let symbolic :: Solvable (ConType s) s => s
             symbolic = symbolicVar var Field
 
@@ -184,7 +201,23 @@ freshExpr FreshInstEnv { .. } root = do
               inner <- go var'
               mkCast inner co
 
+        -- TODO: Wouldn't it make more sense to have all the options be run by
+        -- some sort of 'asum' like operation? Actually, NonDet from 'effectful'
+        -- would be perfect! We should move the code that deals with
+        -- reifyLitType adjecent to its call once we do this!
+        result <- liftEff . runErrorNoCallStack @() $ reifyLitTy ty
+
         if
+          -- Pantomime Primitive:
+          -----------------------
+          | Right (co, SomeLiteralType ty') <- result -> do
+            Dict <- pure $ evidence ty'
+            let value = Literal ty' $ symbolic
+            -- TODO: We don't need this convert anymore once we switch literal
+            -- format!
+            value' <- liftEff $ newToOldLit value
+            mkCast (mkLit value') $ mkSubCo co
+
           -- Haskell Primitive:
           ---------------------
           -- FIXME: Generate proper platform size.
@@ -202,36 +235,10 @@ freshExpr FreshInstEnv { .. } root = do
           -- | ty `eqType` floatPrimTy -> undefined
           -- | ty `eqType` doublePrimTy -> undefined
 
-          -- Pantomime Primitive:
-          -----------------------
-          -- Integer:
-          | ty `eqType` mkTyConTy (Primitive.tcInteger fiePrim) -> do
-            let value = mkInteger symbolic ty
-            pure $ mkLit value
-
-          -- BitVector:
-          | Just (tc, [narg]) <- splitTyConApp_maybe ty
-          , tc == Primitive.tcBitVector fiePrim
-          , let Reduction nco nty = normaliseType fam Nominal narg
-          , Just (SomeNat @n _) <- isNumLitTy nty >>= someNatVal -> do
-            -- Coercion on the entire value for the type-level natural.
-            let co = mkTyConAppCo Representational tc [mkSymCo nco]
-
-            -- Construct the inner value and cast it.
-            let inner = mkLit $ mkWordN @n symbolic (coercionLKind co)
-            mkCast inner co
-
-          -- Bool:
-          | ty `eqType` mkTyConTy (Primitive.tcBool fiePrim) -> do
-            let value = mkBool symbolic ty
-            pure $ mkLit value
-
-          -- TODO: Add remaining primitives
-
           -- User Interpretation:
           -----------------------
           | Just (tc, args) <- splitTyConApp_maybe ty
-          , Just tc' <- lookupTyConEnv fieUser tc -> do
+          , Just tc' <- lookupTyConEnv axioms tc -> do
             -- Construct the plugin coercion
             let prov = PluginProv "pantomime user-defined"
             let tyL = mkTyConTy tc
@@ -389,12 +396,15 @@ freshExpr FreshInstEnv { .. } root = do
 freshArgs
   :: HasCallStack
   => Error () :> es
+  => Context Reader BuiltInTyCon :> es
   => HasFamInstEnvs :> es
-  => FreshInstEnv
+  -- TODO: This TyConEnv argument is unclear on what it is. Maybe we could use
+  -- a type alias as it is an TypeAxiomR.
+  => TyConEnv TyCon
   -> Type
   -> InScopeSet
   -> ([(Var, Arg es)], InScopeSet)
-freshArgs freshEnv ty scope0 = do
+freshArgs axioms ty scope0 = do
   -- Gather the argument types.
   let (tyVars, funTy) = splitForAllTyVars ty
   let (argTys, _resTy) = splitFunTys funTy
@@ -416,7 +426,7 @@ freshArgs freshEnv ty scope0 = do
   let args = tyArgs <> valArgs
 
   -- Create symbolic instance of the arguments.
-  let symbolic = freshExpr freshEnv <$> args
+  let symbolic = freshExpr axioms <$> args
 
   -- Zip the binders together with their symbolic instance.
   let binders = zip args symbolic

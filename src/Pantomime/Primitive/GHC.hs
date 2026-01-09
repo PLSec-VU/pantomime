@@ -9,13 +9,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Pantomime.Primitive.GHC
-  ( Types (..)
-  , getTypes
+  ( getBuiltInTypes
 
   , ReifyMismatch (..)
   , reifiedUnsafeRefl
   , reifiedBitVector
   , reifiedBool
+  , reifiedArray
 
   , thNameToTyCon
   , thNameToId
@@ -43,9 +43,28 @@ import GHC.Plugins
   , callStackDoc
   , idInlinePragma
   , mkUnivCo
+  , mkSubCo
   )
 
-import Pantomime.Expr (Eval, EvalExpr, failWithE)
+import Pantomime.Expr
+  ( Eval
+  , EvalExpr
+  , SomeSymArray (..)
+  , Expr (..)
+  , failWithE
+  , throwE
+  , liftEff
+  , mkCast
+  , mkLit
+  , oldToNewLit
+  , newToOldLit
+  )
+import Pantomime.Literal
+  ( BuiltInTyCon (..)
+  , Literal (..)
+  , SomeLiteralType (..)
+  , reifyLitTy
+  )
 import Pantomime.Grisette.SomeBV (SomeBV(..))
 import Pantomime.Grisette.SizedBV
   ( SizedBV (..)
@@ -58,6 +77,7 @@ import Pantomime.Primitive.Operation qualified as Primitive
 import Pantomime.Primitive.BitVector qualified as BitVector
 import Pantomime.Primitive.BitVector (BitVector)
 import Pantomime.Primitive.Bool qualified as Bool
+import Pantomime.Primitive.Array qualified as Array
 import Pantomime.Primitive.Reify
 import Pantomime.Dict
   ( SomeNat' (..)
@@ -104,6 +124,10 @@ import Grisette
   , LogicalOp (..)
   , SimpleMergeable (..)
   )
+-- TODO: Remove internal import once we fix the Grisette API.
+import Grisette.Internal.SymPrim.SymArray qualified as SymArray
+import Effectful.Context
+import Data.Constraint (HasDict(..))
 
 thNameToTyCon
   :: HasCallStack
@@ -129,26 +153,20 @@ thNameToId th = do
   name <- thNameToGhcName th
   lookupId name
 
-data Types where
-  Types ::
-    { tcBitVector :: TyCon
-    , tcInteger :: TyCon
-    , tcBool :: TyCon
-    } -> Types
-
-getTypes
+getBuiltInTypes
   :: HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Eff es Types
-getTypes = do
+  => Eff es BuiltInTyCon
+getBuiltInTypes = do
   -- TODO: Make the module naming consistent!
-  tcBitVector <- thNameToTyCon ''BitVector
+  tcBitVec <- thNameToTyCon ''BitVector
   tcInteger <- thNameToTyCon ''Primitive.Integer
   tcBool <- thNameToTyCon ''Bool.Bool
-  pure Types { .. }
+  tcArray <- thNameToTyCon ''Array.Array
+  pure BuiltInTyCon { .. }
 
 data ReifyMismatch where
   ReifyMismatch
@@ -559,6 +577,58 @@ reifiedBool = staticReifyError $ lookupReifyMany
     liftF4 \_ value tr fl -> do
       value' <- value
       mrgIte value' tr fl
+  ]
+
+-- forall k v. Array k v -> k -> v
+type SelectArray
+  =  RTyVar_ 0
+  +> RTyVar_ 1
+  +> RArray (RTyVar_ 0) (RTyVar_ 1)
+  ~> RTyVar_ 0
+  ~> RTyVar_ 1
+
+-- {-# OPAQUE store #-}
+-- store :: forall k v. Array k v -> k -> v -> Array k v
+-- store = undefined
+
+-- {-# OPAQUE const #-}
+-- const :: forall k v. v -> Array k v
+
+reifiedArray
+  :: forall es fs
+   . HasCallStack
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => HasThings :> es
+  => THNameToGHCName :> es
+  => Error () :> fs
+  => Context Reader BuiltInTyCon :> fs
+  => HasFamInstEnvs :> fs
+  => Eff es [(Var, EvalExpr fs)]
+reifiedArray = staticReifyError $ lookupReifyMany
+  -- TODO: I feel like it would be cleaner to have the expressions for all
+  -- primitive operations within the 'Literal' module, or maybe adjecent to it.
+  -- This file should only connect these expression to the API version. This
+  -- would be in line with how this file handles the types.
+  [ Interpretation @SelectArray 'Array.select $ liftF4 \_kty vty arr key -> do
+    -- TODO: This whole function is garbage due to the mix of literal formats.
+    -- It's probably better to swap completely first!
+    SomeSymArray @k arr' <- arr
+    -- TODO: I probably should reify the type for the key here so we can get rid
+    -- of any nominal coercions that are on it. This pattern match might fail on
+    -- nominal coercions now.
+    Literal @k' kty' key' <- key >>= \case
+      Lit key' -> liftEff $ oldToNewLit key'
+      _ -> throwE ()
+    Dict <- pure $ evidence kty'
+    Refl <- failWithE () $ eqT @k @k'
+    result :: v <- pure $ SymArray.select arr' key'
+    (co, SomeLiteralType @v' vty') <- liftEff $ reifyLitTy vty
+    Dict <- pure $ evidence vty'
+    Refl <- failWithE () $ eqT @v @v'
+    result' <- liftEff . newToOldLit $ Literal vty' result
+    -- result' <- liftEff $ wrapPrimLit result vty' >>= convertOld
+    mkCast (mkLit result') $ mkSubCo co
   ]
 
 concreteKnownNat

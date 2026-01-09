@@ -41,7 +41,14 @@ import Data.Foldable (for_)
 
 import Language.Haskell.TH qualified as TH
 
-import Pantomime.Expr (Eval (..), Variant (..), mkApps, exprToBool, pprArg)
+import Pantomime.Expr
+  ( Eval (..)
+  , Variant (..)
+  , mkApps
+  , exprToBool
+  , pprArg
+  )
+import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Symbolise
 import Pantomime.Subst
 import Pantomime.Fresh
@@ -60,6 +67,17 @@ import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
 
+runBuiltInTypes
+  :: Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => HasThings :> es
+  => THNameToGHCName :> es
+  => Eff (Context Reader BuiltInTyCon : es) b
+  -> Eff es b
+runBuiltInTypes eff = do
+  tys <- getBuiltInTypes
+  runContextReader tys eff
+
 checkValid
   :: forall es
    . HasCallStack
@@ -77,7 +95,7 @@ checkValid
   -> Eff es ()
 -- TODO: I should remove this early error catch. Also, these errors are very
 -- non-proper. We should throw errors that actually inform us about something!
-checkValid PluginAxiomsR { .. } expr = do
+checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
   -- TODO: Somehow this code doesn't read very nice. I think I should review it.
   program <- get @CoreProgram
 
@@ -107,18 +125,9 @@ checkValid PluginAxiomsR { .. } expr = do
   subst1 <- symboliseBindMany subst0 axioms'
   subst <- symboliseBindMany subst1 program
 
-  -- TODO: We should change the fresh variable generation to lookup these
-  -- values via the monad. I'd have to think what is the best way to actually
-  -- implement these effects.
-  primTys <- getTypes
-  let freshEnv = FreshInstEnv
-        { fiePrim = primTys
-        , fieUser = typeAxiomsR
-        }
-
   -- Create fresh arguments.
   let ty = exprType expr
-  let (args, _scope) = freshArgs freshEnv ty emptyInScopeSet
+  let (args, _scope) = freshArgs typeAxiomsR ty emptyInScopeSet
 
   -- Apply the function to the fresh arguments and convert it to a boolean.
   -- TODO: Once we also have external support for symbolic booleans, maybe it

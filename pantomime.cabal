@@ -52,6 +52,7 @@ library
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.SomeBV
       Pantomime.Grisette.UnionT
+      Pantomime.Literal
       Pantomime.Orphan.Effectful
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette

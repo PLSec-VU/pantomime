@@ -1,7 +1,5 @@
 module Pantomime.Grisette.Mergeable
   ( NoMerge (..)
-  , NoEval (..)
-  , NoEval1 (..)
   , DynIdx (..)
   , partialStrategy
   , ifStrategy
@@ -9,17 +7,15 @@ module Pantomime.Grisette.Mergeable
   , impossible
   ) where
 
-import GHC.Stack (HasCallStack)
-
 import Data.Either (isLeft)
 import Data.Maybe (isJust)
 import Data.Typeable (Proxy (..), Typeable, heqT)
 import Type.Reflection (someTypeRep)
 
+import GHC.Stack (HasCallStack)
+
 import Grisette
-  ( EvalSym (..)
-  , EvalSym1 (..)
-  , Mergeable (..)
+  ( Mergeable (..)
   , Mergeable1 (..)
   , MergingStrategy (..)
   , product2Strategy
@@ -36,28 +32,6 @@ instance Mergeable (NoMerge a) where
 
 instance Mergeable1 NoMerge where
   liftRootStrategy _ = NoStrategy
-
--- TODO: This doesn't really belong in this module... I guess we can keep it
--- here for now. Otherwise, we could call this Pantomime.Grisette.Util?
--- | A marker which allows a value that does not implement EvalSym to simply
--- not evaluate.
-newtype NoEval a where
-  NoEval :: a -> NoEval a
-
-instance EvalSym (NoEval a) where
-  evalSym _ _ = id
-
-instance EvalSym1 NoEval where
-  liftEvalSym _ _ _ = id
-
-newtype NoEval1 m a where
-  NoEval1 :: m a -> NoEval1 m a
-
-instance EvalSym (NoEval1 m a) where
-  evalSym _ _ = id
-
-instance EvalSym1 (NoEval1 m) where
-  liftEvalSym _ _ _ = id
 
 -- | An index for sorted merge strategy, sorting by type.
 data DynIdx c where

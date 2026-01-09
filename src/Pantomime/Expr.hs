@@ -19,13 +19,20 @@ module Pantomime.Expr
   , pprArg
   , pprEval
 
-  , mkLit
   , mkDataCon
   , mkEnumCon
   , mkIntN
   , mkWordN
   , mkInteger
   , mkBool
+
+  , newToOldLit
+  , oldToNewLit
+
+  , SomeSymArray (..)
+
+  , mkLit
+  , mkArray
   , mkType
   , mkCoercion
   , mkLam
@@ -143,6 +150,7 @@ import Grisette
   , EvalSym1 (..)
   , Default (..)
   , LinkedRep
+  , Solvable
   , ConRep (..)
   , wrapStrategy
   , liftUnion
@@ -155,14 +163,16 @@ import Grisette
 import Grisette.Internal.SymPrim.SymArray (SymArray)
 import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim (..))
 
-import Pantomime.Orphan.Grisette ()
+import Pantomime.Literal qualified as New
+import Pantomime.Orphan.Effectful ()
 import Pantomime.Orphan.GHC ()
 import Pantomime.Grisette.UnionT
 import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Grisette.Mergeable (NoEval1 (..), DynIdx (..), impossible)
-import Pantomime.Grisette.BitVector (IntN, WordN)
+import Pantomime.Grisette.Mergeable (DynIdx (..), impossible)
+import Pantomime.Grisette.BitVector (IntN (..), WordN (..))
 import Pantomime.Util (failWith, dbg)
 
+import Data.Constraint (Dict (..))
 import Data.Composition ((.:))
 import Data.Coerce (coerce)
 import Data.List ((!?), uncons)
@@ -175,6 +185,7 @@ import Control.Monad ((>=>), foldM, unless)
 import Control.Monad.Trans (MonadTrans(..))
 
 import Effectful
+import Effectful.Context
 import Effectful.Error.Static
 
 -- TODO: I recently swapped this implementation from another one because I
@@ -245,11 +256,8 @@ newtype Eval es a where
   deriving SimpleMergeable
   deriving SimpleMergeable1
   deriving SymBranching
-  deriving EvalSym via (EvalEvalSym es a)
-  deriving EvalSym1 via (EvalEvalSym es)
-
--- | SymEval coercion for inner value of 'Eval' monad, useful for derivations.
-type EvalEvalSym es = ExceptT (Variant es) (UnionT (NoEval1 (Eff es)))
+  deriving EvalSym
+  deriving EvalSym1
 
 -- TODO: I'm not sure if I like this name. Perhaps we can think about what other
 -- options these have. Unlike the other error types, these ones don't need a
@@ -434,28 +442,12 @@ data Literal where
     -> Type
     -> Literal
   Array ::
-     ( SupportedNonFuncSymPrim k
-     , SupportedNonFuncSymPrim v
-     , Typeable k
-     , Typeable v
+     ( Primitive k
+     , Primitive v
      )
     => SymArray k v
     -> Type
     -> Literal
-
--- TODO: I guess I should move this thing somewhere. I only have this as I need
--- use it in a 'Dict' once. Still, I don't like it particularly. Also, I think
--- Grisette doesn't expose SupportedNonFuncPrim. It is only visible in an
--- internal module and other users (like SymGeneralFun) actually have it stored
--- locally. To be fair though, that's honestly just bad practise.
-class
-  ( SupportedNonFuncPrim (ConType a)
-  , LinkedRep (ConType a) a
-  ) => SupportedNonFuncSymPrim a
-instance
-  ( SupportedNonFuncPrim (ConType a)
-  , LinkedRep (ConType a) a
-  ) => SupportedNonFuncSymPrim a
 
 instance Mergeable Literal where
   rootStrategy = SortedStrategy
@@ -500,10 +492,7 @@ instance Mergeable Literal where
 
       6 -> SortedStrategy
         (\case
-          Array @k @v _ _ -> do
-            let idxK = DynIdx @k @SupportedNonFuncSymPrim
-            let idxV = DynIdx @v @SupportedNonFuncSymPrim
-            (idxK, idxV)
+          Array @k @v _ _ -> (DynIdx @k @Primitive, DynIdx @v @Primitive)
           _ -> impossible)
         \(DynIdx @k, DynIdx @v) -> wrapStrategy @(SymArray k v, Type)
           rootStrategy
@@ -652,11 +641,6 @@ instance Outputable Literal where
     Bool value ty -> text (show value) <+> "::" <+> ppr ty
     Array value ty -> text (show value) <+> "::" <+> ppr ty
 
-mkLit
-  :: Literal
-  -> Expr es
-mkLit = Lit
-
 mkDataCon
   :: forall n
    . KnownNat n
@@ -725,6 +709,90 @@ mkBool
   -> Type
   -> Literal
 mkBool = Bool
+
+mkArray
+  :: Primitive k
+  => Primitive v
+  => SymArray k v
+  -> Type
+  -> Literal
+mkArray = Array
+
+-- TODO: I guess I should move this thing somewhere. I only have this as I need
+-- use it in a 'Dict' once. Still, I don't like it particularly. Also, I think
+-- Grisette doesn't expose SupportedNonFuncPrim. It is only visible in an
+-- internal module and other users (like SymGeneralFun) actually have it stored
+-- locally. To be fair though, that's honestly just bad practise.
+--
+-- NOTE: It seems we now have more uses for this. I'm not even sure how we would
+-- do without importing SupportedNonFuncPrim in those instances. In fact, I now
+-- added a method for this typeclass.
+--
+-- NOTE: Actually, we switched away from this again, so we should purge this at
+-- some point!
+class
+  ( SupportedNonFuncPrim (ConType a)
+  , LinkedRep (ConType a) a
+  , Solvable (ConType a) a
+  , Typeable a
+  ) => Primitive a where
+
+instance
+  ( SupportedNonFuncPrim (ConType a)
+  , LinkedRep (ConType a) a
+  , Solvable (ConType a) a
+  , Typeable a
+  ) => Primitive a where
+
+-- oldToNewLit :: Literal -> Maybe New.Literal
+-- oldToNewLit = \case
+
+-- TODO: This is just a helper function to ease the transition between the
+-- literal formats.
+newToOldLit
+  :: Context Reader New.BuiltInTyCon :> es
+  => New.Literal
+  -> Eff es Literal
+newToOldLit (New.Literal ty value) = do
+  ty' <- New.embedLitTy ty
+  case ty of
+    New.BoolType -> pure $ Bool value ty'
+    New.IntegerType -> pure $ Integer value ty'
+    New.BitVecType -> pure $ Word (WordP value) ty'
+    New.ArrayType keyTy valTy -> do
+      Dict <- pure $ New.evidence keyTy
+      Dict <- pure $ New.evidence valTy
+      pure $ Array value ty'
+
+oldToNewLit
+  :: HasCallStack
+  => Error () :> es
+  => Literal
+  -> Eff es New.Literal
+oldToNewLit = \case
+  -- TODO: I guess we should actually check the type. Still, this is probably
+  -- fine since it will be evicted soon anyway.
+  Word (WordP value) _ -> pure $ New.BitVec value
+  Integer value _ -> pure $ New.Integer value
+  Bool value _ -> pure $ New.Bool value
+  -- Array value _ -> pure $ New.Array value
+  _ -> throwError ()
+
+-- TODO: I'm not sure where to put this array. For now, we can keep it here.
+-- I think we're likely going to evict this at some point due to the new literal
+-- format.
+data SomeSymArray where
+  SomeSymArray ::
+     ( Primitive k
+     , Primitive v
+     )
+    => SymArray k v
+    -> SomeSymArray
+
+mkLit
+  :: Literal
+  -> Expr es
+mkLit = Lit
 
 mkType
   :: Type
