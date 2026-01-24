@@ -59,7 +59,7 @@ import Pantomime.Literal
   ( BuiltInTyCon (..)
   , Literal (..)
   , SomeLiteralType (..)
-  , reifyLitTy
+  , projectLitTy
   )
 import Pantomime.Grisette.SomeBV (SomeBV(..))
 import Pantomime.Grisette.BitVector (WordN)
@@ -155,6 +155,7 @@ getBuiltInTypes = do
   tcInteger <- thNameToTyCon ''Primitive.Integer
   tcBool <- thNameToTyCon ''Bool.Bool
   tcArray <- thNameToTyCon ''Array.Array
+  tcKnownNat <- thNameToTyCon ''KnownNat
   pure BuiltInTyCon { .. }
 
 data ReifyMismatch where

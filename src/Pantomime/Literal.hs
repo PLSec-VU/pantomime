@@ -20,7 +20,7 @@ module Pantomime.Literal
   , embedLitTy
   , embedSomeLitTy
   , embedLitTyOf
-  , reifyLitTy
+  , projectLitTy
   ) where
 
 import Control.Applicative (Alternative(..))
@@ -113,7 +113,9 @@ literalTypeOf _ = literalType
 -- TODO: There are more literal types to consider here. At the very least floats
 -- and sequences. I don't think we would want ADT or functions here, as they
 -- can also be encoded in the expression language already. We can reconsider it
--- later perhaps.
+-- later perhaps. I guess if we want to put ADT or functions inside of an array
+-- or sequence, then maybe we do need to support it though. I'm not sure how to
+-- handle that yet.
 -- | The type of literals supported within the symbolic executor.
 --
 -- This is like a version of 'TypeRep' for a fixed domain of types.
@@ -212,12 +214,11 @@ instance Outputable Literal where
 instance Mergeable Literal where
   rootStrategy = SortedStrategy
     (\(Literal ty _value) -> SomeLiteralType ty)
-    \(SomeLiteralType ty) -> SimpleStrategy \cases
+    \_ -> SimpleStrategy \cases
       scrut (Literal lty lval) (Literal rty rval)
-        | Just Refl <- eqLiteralType ty lty
-        , Just Refl <- eqLiteralType ty rty
-        , Dict <- evidence ty -> do
-          Literal ty $ mrgIte scrut lval rval
+        | Just Refl <- eqLiteralType lty rty
+        , Dict <- evidence lty -> do
+          Literal lty $ mrgIte scrut lval rval
       _ _ _ -> impossible
 
 instance EvalSym Literal where
@@ -226,15 +227,19 @@ instance EvalSym Literal where
     let value' = evalSym fill model value
     pure $ Literal ty value'
 
+-- | Boolean pattern for 'Literal'.
 pattern Bool :: SymBool -> Literal
 pattern Bool value = Literal BoolType value
 
+-- | Integer pattern for 'Literal'.
 pattern Integer :: SymInteger -> Literal
 pattern Integer value = Literal IntegerType value
 
+-- | BitVec pattern for 'Literal'.
 pattern BitVec :: () => KnownPos n => SymBitVec n -> Literal
 pattern BitVec value = Literal BitVecType value
 
+-- | Array pattern for 'Literal'.
 pattern Array
   :: () =>
    ( LiteralTypeable k
@@ -267,6 +272,8 @@ viewArray = \case
     pure $ ViewArray value
   _ -> empty
 
+-- TODO: Perhaps we should probably move this one outside of literal, as it
+-- contains TyCon also not for literals.
 -- | Built-in type constructors.
 data BuiltInTyCon where
   BuiltInTyCon ::
@@ -274,6 +281,7 @@ data BuiltInTyCon where
     , tcInteger :: TyCon
     , tcBitVec :: TyCon
     , tcArray :: TyCon
+    , tcKnownNat :: TyCon
     } -> BuiltInTyCon
 
 -- | Convert a 'LiteralType' into a Haskell 'Type'.
@@ -314,33 +322,33 @@ embedLitTyOf (Literal ty _) = embedLitTy ty
 --
 -- This additionally return a nominal coercion for all type-families that were
 -- reduced.
-reifyLitTy
+projectLitTy
   :: HasCallStack
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => HasFamInstEnvs :> es
   => Type
   -> Eff es (CoercionN, SomeLiteralType)
-reifyLitTy ty = do
+projectLitTy ty = do
   fam <- getFamInstEnvs
   -- NOTE: Altough normalising the entire term is slow, we only really do this
   -- if we actually force the entire type within reifyLitType (in which case, we
   -- needed to normalise anyway).
   let Reduction co ty' = normaliseType fam Nominal ty
-  lty <- reifyLitType' ty'
+  lty <- projectLitTy' ty'
   pure (co, lty)
 
 -- | Helper function for 'reifyLitType'.
 --
 -- This will reify the 'LiteralType' from a GHC 'Type' only if it is free from
 -- any type families or aliases.
-reifyLitType'
+projectLitTy'
   :: HasCallStack
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Type
   -> Eff es SomeLiteralType
-reifyLitType' ty = do
+projectLitTy' ty = do
   -- TODO: We should fix the recursive callstack grow!
   (tc, targs) <- failWith () $ splitTyConApp_maybe ty
   BuiltInTyCon { .. } <- get
@@ -360,8 +368,8 @@ reifyLitType' ty = do
 
     | tc == tcArray
     , [keyTy, valTy] <- targs -> do
-      SomeLiteralType keyTy' <- reifyLitType' keyTy
-      SomeLiteralType valTy' <- reifyLitType' valTy
+      SomeLiteralType keyTy' <- projectLitTy' keyTy
+      SomeLiteralType valTy' <- projectLitTy' valTy
       pure $ SomeLiteralType (ArrayType keyTy' valTy')
 
     | otherwise -> throwError ()

@@ -65,7 +65,7 @@ import Pantomime.Literal
   ( BuiltInTyCon
   , SomeLiteralType (..)
   , HasDict (..)
-  , reifyLitTy
+  , projectLitTy
   )
 import Pantomime.Util (freshIds, freshTyVars, foldlBy, SymBitVec)
 
@@ -189,7 +189,7 @@ freshExpr axioms root = do
         -- some sort of 'asum' like operation? Actually, NonDet from 'effectful'
         -- would be perfect! We should move the code that deals with
         -- reifyLitType adjecent to its call once we do this!
-        result <- liftEff . runErrorNoCallStack @() $ reifyLitTy ty
+        result <- liftEff . runErrorNoCallStack @() $ projectLitTy ty
 
         if
           -- Pantomime Primitive:
