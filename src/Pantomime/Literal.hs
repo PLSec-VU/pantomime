@@ -281,7 +281,9 @@ data BuiltInTyCon where
     , tcInteger :: TyCon
     , tcBitVec :: TyCon
     , tcArray :: TyCon
+    , tcPrimitive :: TyCon
     , tcKnownNat :: TyCon
+    , tcLEqNat :: TyCon
     } -> BuiltInTyCon
 
 -- | Convert a 'LiteralType' into a Haskell 'Type'.

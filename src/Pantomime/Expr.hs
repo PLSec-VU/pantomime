@@ -120,8 +120,6 @@ import Grisette
   ( Union
   , SymBool
   , SymInteger
-  , SymWordN
-  , WordN
   , SymEq (..)
   , ToSym (..)
   , ToCon (..)
@@ -149,7 +147,14 @@ import Pantomime.Orphan.Effectful ()
 import Pantomime.Orphan.GHC ()
 import Pantomime.Grisette.UnionT
 import Pantomime.Grisette.Mergeable (impossible)
-import Pantomime.Util (SomeBitVec (..), KnownPos, failWith, dbg)
+import Pantomime.Util
+  ( SomeBitVec (..)
+  , SymBitVec
+  , BitVec
+  , KnownPos
+  , failWith
+  , dbg
+  )
 
 import Data.Composition ((.:))
 import Data.Coerce (coerce)
@@ -284,7 +289,10 @@ data Expr es where
   --
   -- I guess if the cast is not a FunCo or ForAllCo, at some point the execution
   -- will halt anyway once we want to pattern match on it though. Maybe indeed,
-  -- only DataCon needs arguments.
+  -- only DataCon needs arguments. We do actually push over TyConAppCo. This is
+  -- handle by pushCoArg.
+  --
+  -- VERDICT: I don't see a reason to keep the App node.
   App
     :: Expr es
     -> Thunk es
@@ -382,7 +390,7 @@ data Constructor where
     -> Constructor
   EnumCon
     :: KnownPos n
-    => SymWordN n
+    => SymBitVec n
     -> TyCon
     -> Constructor
 
@@ -394,7 +402,7 @@ instance Outputable Constructor where
     -- probably print some sort of error message in that case.
     DataCon dc -> ppr dc
     EnumCon @n tag tc
-      | Just tag' <- toCon @_ @(WordN n) tag
+      | Just tag' <- toCon @_ @(BitVec n) tag
       , Just dc <- tyConDataCons tc !? fromIntegral tag' -> ppr dc
       -- TODO: Technically this print is wrong as the type application should be
       -- the whole type, not just the TyCon.
@@ -444,7 +452,7 @@ mkEnumCon
    . KnownPos n
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => SymWordN n
+  => SymBitVec n
   -> Type
   -> EvalExpr es
 mkEnumCon tag ty = do
@@ -550,7 +558,7 @@ pprUnion union addParens inner = case union of
 -- one would just use the literal constructor no?
 mkBitVec
   :: KnownPos n
-  => SymWordN n
+  => SymBitVec n
   -> Literal
 mkBitVec = BitVec
 

@@ -9,16 +9,12 @@ module Pantomime.Dict
   , posNat
   , cmpNat'
   , geqToLeq
-  , normNumLitTy
-  , someTyNat
   , SomeNat' (..)
   , typeSub
   , typeAdd
   , withSize
   ) where
 
-import GHC.Plugins hiding (empty)
-import GHC.Builtin.Types.Literals
 import GHC.TypeNats
 
 import Data.Constraint (Dict (..))
@@ -26,7 +22,6 @@ import Data.Data (Proxy(..))
 import Data.Type.Ord
 
 import Control.Applicative (Alternative (..))
-import Control.Monad (guard)
 import Control.Monad.Identity (runIdentity)
 
 import Unsafe.Coerce (unsafeCoerce)
@@ -67,36 +62,13 @@ cmpNat'
 cmpNat' = cmpNat @l @r Proxy Proxy
 
 geqToLeq :: forall (n :: Nat) m. n >= m => Dict (m <= n)
---We only match on the dictionary such that the constraint 'n >= m' does not
+-- We only match on the dictionary such that the constraint 'n >= m' does not
 -- give a warning about being unused.
 geqToLeq = case Dict @(n >= m) of Dict -> unsafeDict
 
-normNumLitTy :: Type -> Maybe Integer
-normNumLitTy ty = if
-  | Just value <- isNumLitTy ty -> pure value
-
-  | Just (tyCon, [lhs, rhs]) <- splitTyConApp_maybe ty -> do
-    op <- if
-      | tyCon == typeNatAddTyCon -> pure (+)
-      | tyCon == typeNatSubTyCon -> pure (*)
-      | tyCon == typeNatMulTyCon -> pure (-)
-      | otherwise -> empty
-
-    lhs' <- normNumLitTy lhs
-    rhs' <- normNumLitTy rhs
-
-    pure $ op lhs' rhs'
-
-  | otherwise -> empty
-
-someTyNat :: Type -> Maybe SomeNat
-someTyNat ty = do
-  num <- normNumLitTy ty
-  guard $ num >= 0
-  pure $ someNatVal (fromInteger num)
-
 -- TODO: This one feels a bit obsolote no? Can't we just split any usage of this
--- into a normal SomeNat and a Dict?
+-- into a normal SomeNat and a Dict? Maybe not, but this solution feels very
+-- dirty in any case. We should consider looking into a more clean approach.
 data SomeNat' eq where
   SomeNat' :: forall n eq. (KnownNat n, n ~ eq) => SomeNat' eq
 

@@ -43,8 +43,10 @@ library
       Pantomime.Annotation
       Pantomime.Axiom
       Pantomime.Base
+      Pantomime.BuiltIn
       Pantomime.Clash
       Pantomime.Dict
+      Pantomime.Embed
       Pantomime.Expr
       Pantomime.Fresh
       Pantomime.Grisette.BitVector
@@ -63,6 +65,7 @@ library
       Pantomime.Primitive.GHC
       Pantomime.Primitive.Operation
       Pantomime.Primitive.Reify
+      Pantomime.PrimOps
       Pantomime.Solve
       Pantomime.Subst
       Pantomime.Symbolise
