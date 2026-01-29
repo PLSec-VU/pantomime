@@ -117,7 +117,7 @@ import Prelude
 -- real numbers once we support them?
 
 type PrimOpExpr es
-   = HasCallStack
+  =  HasCallStack
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => HasFamInstEnvs :> es
@@ -439,17 +439,17 @@ bvconcat = embed @ConcatBitVecOp emptySubst $ liftF4 \_ _ lhs rhs -> do
 -- :: forall idx width n
 --  . KnownNat idx
 -- => KnownNat width
--- => 0 <= width
+-- => 1 <= width
 -- => idx + width <= n
--- => BitVector n
--- -> BitVector width
+-- => BitVec n
+-- -> BitVec width
 type SelectBitVecOp
   =   Forall 0 NaturalTy
   :.  Forall 1 NaturalTy
   :.  Forall 2 NaturalTy
   :.  KnownNatTy (TyVar 0 NaturalTy)
   :-> KnownNatTy (TyVar 1 NaturalTy)
-  :-> (Natural 0 :<= (TyVar 1 NaturalTy))
+  :-> (Natural 1 :<= (TyVar 1 NaturalTy))
   :-> (TyVar 0 NaturalTy :+ TyVar 1 NaturalTy :<= TyVar 2 NaturalTy)
   :-> BitVecTy (TyVar 2 NaturalTy)
   :-> BitVecTy (TyVar 1 NaturalTy)

@@ -427,10 +427,7 @@ instance Mergeable Constructor where
 instance EvalSym Constructor where
   evalSym fill model = \case
     DataCon dc -> DataCon dc
-    EnumCon tag tc -> EnumCon (evalSym' tag) tc
-    where
-      evalSym' :: EvalSym a => a -> a
-      evalSym' = evalSym fill model
+    EnumCon tag tc -> EnumCon (evalSym fill model tag) tc
 
 mkDataCon
   :: forall n
@@ -555,7 +552,9 @@ pprUnion union addParens inner = case union of
       ]
 
 -- TODO: I feel like these mkX for literals should create an Expr. Otherwise,
--- one would just use the literal constructor no?
+-- one would just use the literal constructor no? Especially since they're
+-- patterns anyway, so any additional code required in their construction can
+-- just be placed in there.
 mkBitVec
   :: KnownPos n
   => SymBitVec n

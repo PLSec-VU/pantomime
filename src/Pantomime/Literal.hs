@@ -1,6 +1,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Pantomime.Literal
   -- | The primary export of this module.
@@ -45,12 +46,14 @@ import GHC.Plugins
   , CoercionN
   , Role (..)
   , Outputable (..)
+  , SDoc
   , IsLine (..)
   , mkTyConTy
   , mkNumLitTy
   , mkTyConApp
   , splitTyConApp_maybe
   , isNumLitTy
+  , parens
   )
 import GHC.TypeLits (SomeNat (..), natVal, someNatVal)
 
@@ -132,6 +135,9 @@ data LiteralType a where
     -> LiteralType v
     -> LiteralType (SymArray k v)
 
+instance Outputable (LiteralType a) where
+  ppr = pprLitTy id
+
 instance Eq (LiteralType a) where
   (==) _ _ = True
 
@@ -154,6 +160,13 @@ instance HasDict (LiteralTypeable a) (LiteralType a) where
       Dict <- pure $ evidence valTy
       pure Dict
 
+pprLitTy :: (SDoc -> SDoc) -> LiteralType a -> SDoc
+pprLitTy par = \case
+  BoolType -> "Bool"
+  IntegerType -> "Integer"
+  BitVecType @n -> par $ "BitVec" <+> ppr (natVal @n Proxy)
+  ArrayType k v -> par $ "Array" <+> pprLitTy parens k <+> pprLitTy parens v
+
 eqLiteralType :: LiteralType a -> LiteralType b -> Maybe (a :~: b)
 eqLiteralType = \cases
   BoolType BoolType -> pure Refl
@@ -169,6 +182,9 @@ eqLiteralType = \cases
 
 data SomeLiteralType where
   SomeLiteralType :: !(LiteralType a) -> SomeLiteralType
+
+instance Outputable SomeLiteralType where
+  ppr (SomeLiteralType ty) = "SomeLiteralType:" <+> pprLitTy parens ty
 
 instance Eq SomeLiteralType where
   SomeLiteralType lhs == SomeLiteralType rhs = isJust $ eqLiteralType lhs rhs
@@ -274,6 +290,13 @@ viewArray = \case
 
 -- TODO: Perhaps we should probably move this one outside of literal, as it
 -- contains TyCon also not for literals.
+-- TODO: I feel like this should be an effect and not a data structure,
+-- especially since these lookups would in fact all be funnelled by the
+-- template Haskell lookup stuff anyway (which has a cache, so is fast!).
+-- TODO: One other thing we should do is report a bug with the BuiltInTyCon
+-- name. Somehow, the compiler crashes if you use this name in particular as
+-- DataCon without importing the DataCon itself (I.e. only the TyCon is in
+-- scope). I think this is a GHC issue.
 -- | Built-in type constructors.
 data BuiltInTyCon where
   BuiltInTyCon ::

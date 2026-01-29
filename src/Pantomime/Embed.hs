@@ -1,5 +1,4 @@
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE EmptyCase #-}
 
 module Pantomime.Embed
   ( Ty (..)
@@ -27,7 +26,7 @@ module Pantomime.Embed
 
 import Data.Char (ord, chr)
 import Data.Data (Proxy (..))
-import Data.Void (Void)
+import Data.Void (Void, absurd)
 
 import Effectful
 import Effectful.Error.Static (Error, HasCallStack, throwError)
@@ -132,6 +131,8 @@ data Ty where
   BoxedRep :: Ty -> Ty
   LevityTy :: Ty
   Lifted :: Ty
+  -- TODO: We probably want UnsafeEqualityTy here as well! Alternatively we
+  -- could expose our own version, but I don't see the point!
 
 type TypeKind = TYPE (BoxedRep Lifted)
 
@@ -301,12 +302,14 @@ embed' subst sty repr = case sty of
     SomeBitVec bv <- repr
     let lit = mkLit $ mkBitVec bv
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    mkCast lit $ mkSubCo co
+    let co' = mkSymCo $ mkSubCo co
+    mkCast lit co'
   SArrayTy _ _ -> do
     SomeArray arr <- repr
     let lit = mkLit $ mkArray arr
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    mkCast lit $ mkSubCo co
+    let co' = mkSymCo $ mkSubCo co
+    mkCast lit co'
   SPrimitiveTy _ -> throwE ()
   SLambda aty rty -> do
     -- Gather the type for the lambda.
@@ -330,19 +333,20 @@ embed' subst sty repr = case sty of
       -- Construct the final expression.
       embed' subst' rty $ fun arg'
   STyVar _kind -> do
-    Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
     expr <- repr
-    mkCast expr $ mkSubCo co
-  SNaturalTy -> repr >>= \case
-  SNatural -> repr >>= \case
-  SAddTy _ _ -> repr >>= \case
+    Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
+    let co' = mkSymCo $ mkSubCo co
+    mkCast expr co'
+  SNaturalTy -> repr >>= absurd
+  SNatural -> repr >>= absurd
+  SAddTy _ _ -> repr >>= absurd
   SLEqTy _ _ -> throwE ()
   SKnownNatTy _n -> throwE ()
-  STYPE _ -> repr >>= \case
-  SRuntimeRepTy -> repr >>= \case
-  SBoxedRep _ -> repr >>= \case
-  SLevityTy -> repr >>= \case
-  SLifted -> repr >>= \case
+  STYPE _ -> repr >>= absurd
+  SRuntimeRepTy -> repr >>= absurd
+  SBoxedRep _ -> repr >>= absurd
+  SLevityTy -> repr >>= absurd
+  SLifted -> repr >>= absurd
 
 project'
   :: HasCallStack
@@ -362,17 +366,15 @@ project' subst sty expr = case sty of
     _ -> throwE ()
   SBitVecTy _n -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    let co' = mkSymCo $ mkSubCo co
     inner <- expr
-    expr' <- mkCast inner co'
+    expr' <- mkCast inner $ mkSubCo co
     case expr' of
       Lit (BitVec bv) -> pure $ SomeBitVec bv
       _ -> throwE ()
   SArrayTy _ _ -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    let co' = mkSymCo $ mkSubCo co
     inner <- expr
-    expr' <- mkCast inner co'
+    expr' <- mkCast inner $ mkSubCo co
     case expr' of
       Lit (Array bv) -> pure $ SomeArray bv
       _ -> throwE ()
@@ -397,9 +399,8 @@ project' subst sty expr = case sty of
     project' subst' rty $ mkApp fun arg'
   STyVar _kind -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    let co' = mkSymCo $ mkSubCo co
     repr <- expr
-    mkCast repr co'
+    mkCast repr $ mkSubCo co
   SNaturalTy -> throwE ()
   SNatural -> throwE ()
   SAddTy _ _ -> throwE ()
