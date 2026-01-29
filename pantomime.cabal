@@ -28,8 +28,6 @@ library
       Control.Error
       Effectful.Break
       Effectful.Context
-      Effectful.Context.Dynamic
-      Effectful.Context.Static.Local
       Effectful.GHC.Annotations
       Effectful.GHC.CoreE
       Effectful.GHC.Display
@@ -52,7 +50,6 @@ library
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.SomeBV
       Pantomime.Grisette.UnionT
-      Pantomime.Orphan.Effectful
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes

@@ -1,30 +1,30 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExtendedLiterals #-}
 -- {-# LANGUAGE Strict #-}
 -- {-# LANGUAGE UnliftedDatatypes #-}
 -- {-# LANGUAGE UnliftedNewtypes #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 -- {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE MagicHash #-}
-{-# LANGUAGE ExtendedLiterals #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE RoleAnnotations #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UnboxedTuples #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE BangPatterns #-}
 
-module Main
-  ( main
-  , adder
-  , leak
-  , obs
-  , sim
-  , proj
-  , theory
-  , test
+module Main (
+  main,
+  adder,
+  leak,
+  obs,
+  sim,
+  proj,
+  theory,
+  test,
   -- , test2
-  ) where
+) where
 
 -- import ProcessorControl (test)
 -- import GHC.Num.Integer
@@ -40,79 +40,80 @@ module Main
 -- -- import GHC.Base (Int64#, uncheckedIShiftRA64#)
 -- import GHC.Base (Int#, (+#), Word (..), word2Int#, int2Word#, (-#), Int (..))
 -- import GHC.Base (Int#, (+#), Int (..))
-import GHC.Base
-  ( Coercible
-  , TYPE
-  , RuntimeRep (..)
-  , Type
-  , Int (..)
-  , Int#
-  , Int8#
-  , Word#
-  , raiseOverflow#
-  , raise#
-  , plusInt8#
-  , coerce
-  , tagToEnum#
-  , word2Int#
-  , negateInt#
-  , word2Int#
-  , int2Word#
-  )
-import GHC.Int (Int8 (..))
-import Data.Typeable
-import GHC.TypeNats (Nat, KnownNat, type (+))
+
 import Data.Bits (Bits (..), FiniteBits (..))
-import GHC.Num.Integer
-  ( integerToInt#
-  , integerToWord#
-  , Integer (..)
-  )
+import Data.Typeable
+import GHC.Base (
+  Coercible,
+  Int (..),
+  Int#,
+  Int8#,
+  RuntimeRep (..),
+  TYPE,
+  Type,
+  Word#,
+  coerce,
+  int2Word#,
+  negateInt#,
+  plusInt8#,
+  raise#,
+  raiseOverflow#,
+  tagToEnum#,
+  word2Int#,
+ )
+import GHC.Int (Int8 (..))
 import GHC.Num.BigNat (bigNatToWord#)
+import GHC.Num.Integer (
+  Integer (..),
+  integerToInt#,
+  integerToWord#,
+ )
+import GHC.TypeNats (KnownNat, Nat, type (+))
 
 import GHC.Exts (IsList (..))
 
-import Prelude
 import Pantomime
-import Pantomime.Primitive.BitVector qualified as Pantomime
-import Pantomime.Clash qualified as Clash (axioms)
-import Pantomime.Base qualified as Base (axioms)
 import Pantomime.Axiom (PluginAxioms (..))
+import Pantomime.Base qualified as Base (axioms)
+import Pantomime.Clash qualified as Clash (axioms)
+import Pantomime.Primitive.BitVector qualified as Pantomime
+import Prelude
+
 -- import Pantomime.Primitive.BitVector (BitVector)
 -- import Pantomime.Primitive.BitVector qualified as BitVector
 import Control.Monad.State
 
+import Clash.Prelude (Resize (..), bitCoerce, d2, d3, msb, slice, (++#))
 import Clash.Sized.Internal.BitVector (BitVector)
+import Clash.Sized.Internal.Signed (
+  Signed,
+  abs#,
+  and#,
+  complement#,
+  eq#,
+  fromInteger#,
+  ge#,
+  gt#,
+  le#,
+  lt#,
+  negate#,
+  neq#,
+  or#,
+  pack#,
+  shiftL#,
+  shiftR#,
+  size#,
+  unpack#,
+  xor#,
+  (*#),
+  (+#),
+  (-#),
+ )
 import Clash.Sized.Internal.Unsigned (Unsigned)
-import Clash.Sized.Internal.Signed
-  ( Signed
-  , (+#)
-  , (-#)
-  , (*#)
-  , negate#
-  , complement#
-  , and#
-  , or#
-  , xor#
-  , abs#
-  , eq#
-  , neq#
-  , lt#
-  , le#
-  , gt#
-  , ge#
-  , shiftL#
-  , shiftR#
-  , fromInteger#
-  , unpack#
-  , pack#
-  , size#
-  )
-import Grisette (BitCast(..))
-import Clash.Prelude (bitCoerce, Resize (..), (++#), slice, d2, d3, msb)
+import Grisette (BitCast (..))
 
-import Core2 qualified
 import Control.Monad (void)
+import Core2 qualified
 import Data.Maybe (isJust)
 
 -- import Numeric (showHex)
@@ -185,13 +186,16 @@ import Data.Maybe (isJust)
 --     }) #-}
 -- {-# ANN theory (Theory $ Base.axioms <> Clash.axioms) #-}
 theory :: Maybe Int -> Maybe (Int, Int) -> Bool
-theory = pantomime Pantomime
-  { observation = obs'
-  , implementation = adder
-  , leakage = leak
-  , simulator = sim
-  , projection = proj
-  }
+theory =
+  pantomime
+    Pantomime
+      { observation = obs'
+      , implementation = adder
+      , leakage = leak
+      , simulator = sim
+      , projection = proj
+      }
+
 -- test :: Maybe Int -> Maybe (Int, Int) -> Bool
 -- test s i = adder s i == adder s i
 
@@ -199,7 +203,7 @@ theory = pantomime Pantomime
 adder :: Maybe Int -> Maybe (Int, Int) -> (Maybe Int, Maybe Int)
 adder s i = swap $ runState (adder' i) s
 
-adder' :: Num a => Maybe (a, a) -> State (Maybe a) (Maybe a)
+adder' :: (Num a) => Maybe (a, a) -> State (Maybe a) (Maybe a)
 adder' i = do
   s <- get
   put case i of
@@ -210,17 +214,17 @@ adder' i = do
 swap :: (a, b) -> (b, a)
 swap (x, y) = (y, x)
 
-obs :: Num a => Eq a => Circuit () (Maybe a) (Maybe Bool)
+obs :: (Num a) => (Eq a) => Circuit () (Maybe a) (Maybe Bool)
 obs = stateless obs'
 
-obs' :: Num a => Eq a => Maybe a -> Maybe Bool
+obs' :: (Num a) => (Eq a) => Maybe a -> Maybe Bool
 obs' (Just x) = Just $ x == 0
 obs' _ = Nothing
 
-leak :: Num a => Eq a => Circuit () (Maybe (a, a)) (Maybe Bool)
+leak :: (Num a) => (Eq a) => Circuit () (Maybe (a, a)) (Maybe Bool)
 leak = stateless leak'
 
-leak' :: Num a => Eq a => Maybe (a, a) -> Maybe Bool
+leak' :: (Num a) => (Eq a) => Maybe (a, a) -> Maybe Bool
 -- leak' (Just (a, b)) = Just $ a + b == 0
 leak' (Just (a, b)) = Just $ a + b == 1
 leak' _ = Nothing
@@ -231,7 +235,7 @@ sim s i = (i, s)
 -- proj :: Num a => Eq a => (Maybe a, ()) -> ((), Maybe Bool)
 -- proj (s, _) = ((), obs' s)
 
-proj :: Num a => Eq a => Maybe a -> ((), Maybe Bool)
+proj :: (Num a) => (Eq a) => Maybe a -> ((), Maybe Bool)
 proj s = ((), obs' s)
 
 stateless :: (a -> b) -> Circuit () a b
@@ -249,7 +253,7 @@ stateless f _ i = ((), f i)
 -- instance Wow () where
 --   wow _ = True
 
--- newtype 
+-- newtype
 
 -- {-# ANN test (SymCompare 'test) #-}
 -- test :: Bool -> Bool
@@ -272,11 +276,9 @@ stateless f _ i = ((), f i)
 -- data T where
 --   MkT :: forall a (b :: TYPE (TupleRep '[])). ((a, Bool) ~ (Bool, Bool)) => T
 
-
 -- {-# ANN test (SymCompare 'test) #-}
 -- test :: T
 -- test = MkT
-
 
 -- data Foo a where
 --   MkFoo :: forall a b. (a ~ b) => Foo a
@@ -317,14 +319,15 @@ newtype Test n where
 -- test :: Pantomime.BitVector 29 -> Bool
 -- test x = x == complement (complement x)
 
-add :: Maybe Int -> ( Maybe Int , Maybe Int ) -> ( Maybe Int , Maybe Int )
-add _ ( Just 0 , Just b) = ( Nothing , Just b)
-add _ ( Just a , Just b) = ( Just (a+b) , Nothing )
-add s _ = ( Nothing , s)
+add :: Maybe Int -> (Maybe Int, Maybe Int) -> (Maybe Int, Maybe Int)
+add _ (Just 0, Just b) = (Nothing, Just b)
+add _ (Just a, Just b) = (Just (a + b), Nothing)
+add s _ = (Nothing, s)
 
 -- {-# ANN test (Theory Base.axioms) #-}
 test :: Pantomime.BitVector 23 -> Bool
 test x = x == Pantomime.stupidMinBound
+
 -- test :: Maybe Int -> (Maybe Int, Maybe Int) -> (Maybe Int, Bool)
 -- test s i = let (s', o) = add s i in (s', isJust o)
 
@@ -343,16 +346,17 @@ length' [] = 0
 length' (_ : xs) = 1 + length' xs
 
 take' :: Int -> [a] -> [a]
-take' n xs = if
-  | 0 < n -> unsafeTake n xs
-  | otherwise -> []
-  where
-    unsafeTake = \cases
-      !_ [] -> []
-      1 (y:_) -> [y]
-      m (y:ys) -> y : unsafeTake (m - 1) ys
+take' n xs =
+  if
+    | 0 < n -> unsafeTake n xs
+    | otherwise -> []
+ where
+  unsafeTake = \cases
+    !_ [] -> []
+    1 (y : _) -> [y]
+    m (y : ys) -> y : unsafeTake (m - 1) ys
 
--- or' :: [Bool] -> Bool 
+-- or' :: [Bool] -> Bool
 -- or' = \case
 --   [] -> False
 --   x : xs -> x || False
@@ -395,7 +399,6 @@ type instance BitSz (Pantomime.BitVector n) = n
 --     go :: forall a. Eq (TestFam a) => (TestFam a, Int) -> Bool
 --     go v = v == v
 
-
 -- test :: Int -> Bool
 -- test _ = raise# ()
 -- test :: BitVector 5 -> BitVector 2 -> Bool
@@ -403,16 +406,16 @@ type instance BitSz (Pantomime.BitVector n) = n
 --   -- let x' = bitCoerce x
 --   -- let x' = resize @_ @_ @3 x ++# resize @_ @_ @2 x
 --   msb x == msb x
-  -- resize x == y
-  -- slice d3 d2 x == y
+-- resize x == y
+-- slice d3 d2 x == y
 
 -- test :: Signed 5 -> Bool
 -- test x = do
 --   let y = unsafeCoerce $ x + 1
 --   unsafeCoerce y == x
-  -- let x' = bitCoerce x
-  -- resize x == x
-  -- x == bitCoerce y
+-- let x' = bitCoerce x
+-- resize x == x
+-- x == bitCoerce y
 
 -- {-# ANN test (Theory mempty) #-}
 -- test :: BitVector (3 + 4) -> BitVector (6 + 9) -> Bool
@@ -423,10 +426,10 @@ type instance BitSz (Pantomime.BitVector n) = n
 -- test :: WordN (3 + 2) -> IntN 5 -> Bool
 -- test x y = do
 --   -- let b = 0 :: IntN 1
---   -- let z = sizedBVConcat (sizedBVSelect @_ @2 @1 x) (sizedBVSelect @_ @1 @1 x) 
+--   -- let z = sizedBVConcat (sizedBVSelect @_ @2 @1 x) (sizedBVSelect @_ @1 @1 x)
 --   let z = shiftL x 1
 --   sizedBVSelect @_ @1 @2 x == sizedBVSelect @_ @2 @2 z
-  -- sizedBVConcat b x == sizedBVConcat b x
+-- sizedBVConcat b x == sizedBVConcat b x
 -- test :: Int -> Bool
 -- test x = x + 1 == 0
 
@@ -503,13 +506,13 @@ type instance BitSz (Pantomime.BitVector n) = n
 
 -- test :: (Bool, Bool) -> (Test, Test)
 -- test = \case
---   (True, False) -> (X, Y ()) 
+--   (True, False) -> (X, Y ())
 --   (False, True) -> (X, Y True)
 --   (_, _) -> (X, Y False)
-  
+
 -- test :: Int8# -> Int8
 -- test _ = 1
-  -- Y _ -> I8# 1#Int8
+-- Y _ -> I8# 1#Int8
 -- test :: Int -> Int
 -- -- test x = (x + 1) * 5
 -- test x = case x > 5 of
@@ -527,7 +530,6 @@ type instance BitSz (Pantomime.BitVector n) = n
 
 -- gaba :: Int
 -- gaba = I# $ raise# ()
-
 
 -- waba :: Int#
 -- waba = raiseOverflow# (# #)
@@ -783,13 +785,13 @@ type instance BitSz (Pantomime.BitVector n) = n
 
 -- {-# ANN test UCSymbolic #-}
 -- test :: Int# -> Int#
--- test x = f (x -# 5#) +# f x 
+-- test x = f (x -# 5#) +# f x
 --   where
 --     f y = x +# y
 
 -- {-# ANN test UCSymbolic #-}
 -- test :: Int# -> Int#
--- test x = h f (x -# 5#) +# h f x 
+-- test x = h f (x -# 5#) +# h f x
 --   where
 --     f y = x +# y
 --     h g y = g x +# y
@@ -802,7 +804,7 @@ type instance BitSz (Pantomime.BitVector n) = n
 
 -- {-# ANN test2 UCSymbolic #-}
 -- test2 :: Int64# -> Int64#
--- test2 x = 
+-- test2 x =
 --   (case x of
 --     20#Int64 -> \z -> plusInt64# 0x6b#Int64 z
 --     _ -> \_ -> 0#Int64)
@@ -1048,7 +1050,6 @@ type instance BitSz (Pantomime.BitVector n) = n
 -- test :: Maybe Int -> Bool
 -- test s = s /= s
 
-
 -- {-# ANN adder UC
 --   { observation = 'obs
 --   , leakage = 'leak
@@ -1098,72 +1099,82 @@ main = do
   --       let (ss', o) = Core2.sim ss l
   --       ((sl', ss'), o)
 
-  let st = Core2.State
-        { reg = 10
-        , fePC = 1
-        , exPC = 0
-        , exInstr = Core2.Bz 8
-        , wbRes = Just 0
-        , wbOut = Nothing
-        }
-  let instr = 0x00ec
+  let st =
+        Core2.State
+          { reg = 10
+          , fePC = 1
+          , exPC = 0
+          , exInstr = Core2.Bz 8
+          , wbRes = Just 0
+          , wbOut = Nothing
+          }
+  let instr = Just 0x00ec
 
-  let leaksim s i = do
-        let (sl, ss) = Core2.proj s
-        let (sl', x) = Core2.leak sl i
-        let (ss', o) = Core2.sim ss x
-        ((sl', ss'), o)
-  let implobs s i = do
-        let (s', o) = Core2.core s i
-        (Core2.proj s', Core2.obs' o)
-
-  print $ leaksim st instr
-  print $ implobs st instr
-
-  print $ Core2.theory st instr
-
-  -- let st0 = Core2.State
-  --       { reg = 0x00000000
-  --       , fePC = 0xc1
-  --       , exPC = 0x3d
-  --       , exInstr = Core2.Bz 0x00
-  --       , wbRes = Just 0x80000000
-  --       , wbOut = Just 0x40000000
-  --       }
-  -- let instr0 = 0x0000
-
-  -- let st1 = Core2.State
-  --       { reg = 0x00000000
-  --       , fePC = 0xc1
-  --       , exPC = 0x3d
-  --       , exInstr = Core2.Clr
-  --       , wbRes = Just 0x00000000
-  --       , wbOut = Just 0x00000000
-  --       }
-  -- let instr1 = 0x0000
-
-  -- print $ Core2.theory1 st0 instr0 st1 instr1
-
-  -- let leakproj s i = Core2.leak (fst $ Core2.proj s) i
-  -- let implobs' s i = do
+  -- let leaksim s i = do
+  --       let (sl, ss) = Core2.proj s
+  --       let (sl', x) = Core2.leak sl i
+  --       let (ss', o) = Core2.sim ss x
+  --       ((sl', ss'), o)
+  -- let implobs s i = do
   --       let (s', o) = Core2.core s i
-  --       (fst $ Core2.proj s', Core2.obs' o)
+  --       (Core2.proj s', Core2.obs' o)
 
-  -- print $ leakproj st0 instr0
-  -- print $ leakproj st1 instr1
+  let (st', (o, pc)) = Core2.core st instr
+  putStrLn $ "st = " ++ show st'
+  putStrLn $ "pc = " ++ show pc
+  putStrLn $ "o = " ++ show o
 
-  -- print "=========="
-  -- print $ leaksim st0 instr0
-  -- print $ leaksim st1 instr1
+  let (st'', o') = Core2.flush st'
+  putStrLn $ "st = " ++ show st''
+  putStrLn $ "o = " ++ show o'
 
-  -- print "=========="
-  -- print $ implobs' st0 instr0
-  -- print $ implobs' st1 instr1
+-- print $ leaksim st instr
+-- print $ implobs st instr
 
-  -- print $ implobs st instr
-  -- print $ leaksim st instr
+-- print $ Core2.theory st instr
 
-  -- print $ Core2.theory st instr
+-- let st0 = Core2.State
+--       { reg = 0x00000000
+--       , fePC = 0xc1
+--       , exPC = 0x3d
+--       , exInstr = Core2.Bz 0x00
+--       , wbRes = Just 0x80000000
+--       , wbOut = Just 0x40000000
+--       }
+-- let instr0 = 0x0000
+
+-- let st1 = Core2.State
+--       { reg = 0x00000000
+--       , fePC = 0xc1
+--       , exPC = 0x3d
+--       , exInstr = Core2.Clr
+--       , wbRes = Just 0x00000000
+--       , wbOut = Just 0x00000000
+--       }
+-- let instr1 = 0x0000
+
+-- print $ Core2.theory1 st0 instr0 st1 instr1
+
+-- let leakproj s i = Core2.leak (fst $ Core2.proj s) i
+-- let implobs' s i = do
+--       let (s', o) = Core2.core s i
+--       (fst $ Core2.proj s', Core2.obs' o)
+
+-- print $ leakproj st0 instr0
+-- print $ leakproj st1 instr1
+
+-- print "=========="
+-- print $ leaksim st0 instr0
+-- print $ leaksim st1 instr1
+
+-- print "=========="
+-- print $ implobs' st0 instr0
+-- print $ implobs' st1 instr1
+
+-- print $ implobs st instr
+-- print $ leaksim st instr
+
+-- print $ Core2.theory st instr
 -- main = runDiff
 
 -- diff :: (State, Word16)
