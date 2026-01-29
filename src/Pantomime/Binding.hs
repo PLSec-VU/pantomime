@@ -82,6 +82,18 @@ bindingsTH =
   , ('Builtin.xor, PrimOps.xor)
   , ('Builtin.iff, PrimOps.iff)
 
+  -- Integer bindings
+  , ('Builtin.ineg, PrimOps.ineg)
+  , ('Builtin.iabs, PrimOps.iabs)
+  , ('Builtin.iadd, PrimOps.iadd)
+  , ('Builtin.imul, PrimOps.imul)
+  , ('Builtin.idiv, PrimOps.idiv)
+  , ('Builtin.imod, PrimOps.imod)
+  , ('Builtin.ieq, PrimOps.ieq)
+  , ('Builtin.ineq, PrimOps.ineq)
+  , ('Builtin.ile, PrimOps.ile)
+  , ('Builtin.ilt, PrimOps.ilt)
+
   -- Bitvector bindings
   , ('Builtin.bvnot, PrimOps.bvnot)
   , ('Builtin.bvneg, PrimOps.bvneg)

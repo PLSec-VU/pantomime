@@ -37,6 +37,7 @@ module Pantomime.BuiltIn
   , toInt32#
   , toInt64#
 
+  -- | System Fc operations.
   , ite
   , tagToEnum
   , dataToTag
@@ -52,18 +53,20 @@ module Pantomime.BuiltIn
   , xor
   , iff
 
+  -- | Integer operations.
   , Integer
-  -- , ineg
-  -- , iabs
+  , ineg
+  , iabs
   , iadd
-  -- , imul
-  -- , idiv
-  -- , imod
-  -- , ieq
-  -- , ineq
-  -- , ile
-  -- , ilt
+  , imul
+  , idiv
+  , imod
+  , ieq
+  , ineq
+  , ile
+  , ilt
 
+  -- | Bit-vector operations.
   , BitVec
   , bvnot
   , bvneg
@@ -88,21 +91,14 @@ module Pantomime.BuiltIn
   , bvconcat
   , bvselect
 
+  -- | Array operations.
   , Array
   , aconst
   , aselect
   , astore
   ) where
 
--- import Data.Composition ((.:))
--- import Data.Bits qualified as Prelude
 import Data.Coerce (coerce)
--- import Pantomime.Util (KnownPos)
--- import Pantomime.Util qualified as Util
--- import GHC.TypeNats (Nat, type (+), type (<=), type (-))
-import GHC.TypeNats (Nat, KnownNat, type (+), type (<=))
-import Prelude qualified
-import Prelude (($))
 import GHC.Base
   ( TYPE
   , RuntimeRep (BoxedRep)
@@ -110,9 +106,14 @@ import GHC.Base
   , Int8#
   , Int16#
   , Int32#
-  , Int64#, Constraint, Type
+  , Int64#
+  , Constraint
+  , Type
   )
 import GHC.TypeLits (TypeError, ErrorMessage (..))
+import GHC.TypeNats (Nat, KnownNat, type (+), type (<=))
+import Prelude qualified
+import Prelude (($))
 
 class Embeddable (a :: TYPE r1) (b :: TYPE r2)
 
@@ -156,7 +157,8 @@ toInt64# = toInt64#
 
 -- TODO: There is no real way to implement 'ite', 'tagToEnum' and 'dataToTag'
 -- non-native. Maybe we could have their Haskell implementation given by a
--- plugin? For now, we can just skip it.
+-- plugin? For now, we can just skip it. Alternatively, we need to expose ite
+-- for every representation separately...
 
 -- | Primitive if-then-else construct.
 {-# OPAQUE ite #-}
@@ -240,20 +242,45 @@ convert value = ite value Prelude.True Prelude.False
 newtype Integer where
   Integer :: Prelude.Integer -> Integer
 
+{-# OPAQUE ineg #-}
+ineg :: Integer -> Integer
+ineg = ineg
+
+{-# OPAQUE iabs #-}
+iabs :: Integer -> Integer
+iabs = iabs
+
 {-# OPAQUE iadd #-}
 iadd :: Integer -> Integer -> Integer
 iadd = coerce $ (Prelude.+) @Prelude.Integer
 
--- , ineg
--- , iabs
--- , iadd
--- , imul
--- , idiv
--- , imod
--- , ieq
--- , ineq
--- , ile
--- , ilt
+{-# OPAQUE imul #-}
+imul :: Integer -> Integer -> Integer
+imul = imul
+
+{-# OPAQUE idiv #-}
+idiv :: Integer -> Integer -> Integer
+idiv = idiv
+
+{-# OPAQUE imod #-}
+imod :: Integer -> Integer -> Integer
+imod = imod
+
+{-# OPAQUE ieq #-}
+ieq :: Integer -> Integer -> Bool
+ieq = ieq
+
+{-# OPAQUE ineq #-}
+ineq :: Integer -> Integer -> Bool
+ineq = ineq
+
+{-# OPAQUE ile #-}
+ile :: Integer -> Integer -> Bool
+ile = ile
+
+{-# OPAQUE ilt #-}
+ilt :: Integer -> Integer -> Bool
+ilt = ilt
 
 -- instance Num Integer where
 --   (+) = plusInteger

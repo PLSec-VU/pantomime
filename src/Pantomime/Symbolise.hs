@@ -148,8 +148,8 @@ symbolise = go
               -- FIXME: Create proper data con size.
               GHC.DataAlt dc -> eqCon spine' $ mkDataCon @64 dc
               GHC.DEFAULT -> pure true
-              -- NOTE: Due to the way primitives are implemented, we never
-              -- scrutinise GHC literals directly.
+              -- TODO: Literal pattern matching depends on the encoding of the
+              -- literal as provided by the user.
               GHC.LitAlt _ -> throwError ()
 
           -- TODO: Perhaps it's a good idea to check that the number of

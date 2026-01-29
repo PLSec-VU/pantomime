@@ -123,6 +123,8 @@ type PrimOpExpr es
   => HasFamInstEnvs :> es
   => EvalExpr es
 
+-- TODO: This one cannot be declared in Haskell... It can with BoxedRep, but
+-- still a definition is not possible.
 -- :: forall r (a :: TYPE r). Bool -> r -> r -> r
 type ITEOp
   =   Forall 0 RuntimeRepTy
@@ -152,7 +154,10 @@ tagToEnum = embed @TagToEnumOp emptySubst $ liftF2 \ty bvE -> do
   -- TODO: I'm not sure how this interacts with the whole type normalisation.
   -- I don't think this is correct. Maybe we should reduce the type first? I
   -- guess we could also opt to do this within the embedding. This one is likely
-  -- just faulty.
+  -- just faulty. My hunch for now would be to normalise the given type. This
+  -- would be in line with the remaining parts that are also normalised.
+  -- BTW, I wonder if we need to handle newtypes here? Maybe this would require
+  -- some Representational reduction?
   mkEnumCon bv ty
 
 -- forall (l :: Levity) (a :: TYPE (Boxed l)). l -> Int#
