@@ -33,7 +33,7 @@ module Core2 (
 import Control.Arrow (Arrow (..))
 import Data.Bits
 import Data.Composition ((.:))
-import Data.Maybe (fromMaybe, maybeToList)
+import Data.Maybe (fromMaybe, isJust, maybeToList)
 import Data.Word
 import GHC.Base (word16ToWord#, word8ToWord#, wordToWord32#, wordToWord8#)
 import GHC.Word (Word16 (..), Word32 (..), Word8 (..))
@@ -559,7 +559,13 @@ flush state =
         then (state, [])
         else second (maybeToList out ++) (flush state')
 
--- {-# ANN correctness (Theory Base.axioms) #-}
+isHazard :: State -> Bool
+isHazard state =
+  let (state', _) = writeback state
+      (_, jump) = execute state'
+   in isJust jump
+
+{-# ANN correctness (Theory Base.axioms) #-}
 correctness :: State -> Maybe RawInstr -> Bool
 correctness =
   pipelineCorrectness
@@ -568,4 +574,5 @@ correctness =
       , specification = spec
       , flushing = flush
       , abstraction = abstract
+      , adjustInput = \s i -> if isHazard s then Nothing else i
       }

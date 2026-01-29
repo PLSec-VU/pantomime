@@ -1099,39 +1099,39 @@ main = do
   --       let (ss', o) = Core2.sim ss l
   --       ((sl', ss'), o)
 
+  -- Implementation Check
   let st =
         Core2.State
-          { reg = 10
-          , fePC = 1
-          , exPC = 0
-          , exInstr = Core2.Bz 8
-          , wbRes = Just 0
+          { reg = 0
+          , fePC = 100
+          , exPC = 99
+          -- Opcode 3 is Jmp. 3 << 8 = 768. 768 | 200 = 968. Jmp 200.
+          , exInstr = Core2.Jmp 200
+          , wbRes = Nothing
           , wbOut = Nothing
           }
-  let instr = Just 0x00ec
+  -- Instruction Add 1. Opcode 0. 0 << 8 | 1 = 1.
+  let instr = Just 1
 
-  -- let leaksim s i = do
-  --       let (sl, ss) = Core2.proj s
-  --       let (sl', x) = Core2.leak sl i
-  --       let (ss', o) = Core2.sim ss x
-  --       ((sl', ss'), o)
-  -- let implobs s i = do
-  --       let (s', o) = Core2.core s i
-  --       (Core2.proj s', Core2.obs' o)
+  -- Expected Path (Spec)
+  putStrLn "--- Spec Path ---"
+  let (st_flushed, _) = Core2.flush st
+  putStrLn $ "st_flushed = " ++ show st_flushed
+  let s_spec = Core2.abstract st_flushed
+  putStrLn $ "s_spec = " ++ show s_spec
+  let (s_spec_expected, _) = Core2.spec s_spec instr
+  putStrLn $ "s_spec_expected = " ++ show s_spec_expected
 
-  let (st', (o, pc)) = Core2.core st instr
-  putStrLn $ "st = " ++ show st'
-  putStrLn $ "pc = " ++ show pc
-  putStrLn $ "o = " ++ show o
+  -- Actual Path (Impl)
+  putStrLn "\n--- Impl Path ---"
+  let (st_impl_next, (_, _)) = Core2.core st instr
+  putStrLn $ "st_impl_next = " ++ show st_impl_next
+  let (st_impl_next_flushed, _) = Core2.flush st_impl_next
+  putStrLn $ "st_impl_next_flushed = " ++ show st_impl_next_flushed
+  let s_spec_actual = Core2.abstract st_impl_next_flushed
+  putStrLn $ "s_spec_actual = " ++ show s_spec_actual
 
-  let (st'', o') = Core2.flush st'
-  putStrLn $ "st = " ++ show st''
-  putStrLn $ "o = " ++ show o'
-
--- print $ leaksim st instr
--- print $ implobs st instr
-
--- print $ Core2.theory st instr
+  putStrLn $ "\nMatch? " ++ show (s_spec_expected == s_spec_actual)
 
 -- let st0 = Core2.State
 --       { reg = 0x00000000

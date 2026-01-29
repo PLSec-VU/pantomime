@@ -122,6 +122,7 @@ data PipelineCorrectness si ss i o fo where
     , specification :: Circuit ss i o
     , flushing :: si -> (si, fo)
     , abstraction :: si -> ss
+    , adjustInput :: si -> i -> i
     } ->
     PipelineCorrectness si ss i o fo
 
@@ -133,11 +134,12 @@ pipelineCorrectness ::
   Bool
 pipelineCorrectness PipelineCorrectness{..} = \s i ->
   let
+    i' = adjustInput s i
     (s_flushed, _) = flushing s
     s_spec = abstraction s_flushed
-    (s_spec_expected, _) = specification s_spec i
+    (s_spec_expected, _) = specification s_spec i'
 
-    (s_impl_next, _) = implementation s i
+    (s_impl_next, _) = implementation s i'
     (s_impl_next_flushed, _) = flushing s_impl_next
     s_spec_actual = abstraction s_impl_next_flushed
    in
