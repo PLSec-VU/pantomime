@@ -54,7 +54,7 @@ import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Symbolise
 import Pantomime.Subst
 import Pantomime.Fresh
-import Pantomime.Primitive.GHC
+-- import Pantomime.Primitive.GHC
 import Pantomime.Util (dbg)
 import Pantomime.Axiom (PluginAxiomsR (..))
 import Pantomime.Grisette.UnionT (UnionT (..))
@@ -68,6 +68,7 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
+import Pantomime.Binding (getBuiltinTyCon, bindingsGHC)
 
 runBuiltInTypes
   :: Error (LookupError TH.Name) :> es
@@ -77,7 +78,7 @@ runBuiltInTypes
   => Eff (Context Reader BuiltInTyCon : es) b
   -> Eff es b
 runBuiltInTypes eff = do
-  tys <- getBuiltInTypes
+  tys <- getBuiltinTyCon
   runContextReader tys eff
 
 checkValid
@@ -102,10 +103,11 @@ checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
   program <- get @CoreProgram
 
   -- bitVector <- reifiedBitVector
-  unsafeRefl <- reifiedUnsafeRefl
-  bool <- reifiedBool
+  -- unsafeRefl <- reifiedUnsafeRefl
+  -- bool <- reifiedBool
+  reified <- bindingsGHC
 
-  let reified = unsafeRefl : bool -- ++ bitVector
+  -- let reified = unsafeRefl : bool -- ++ bitVector
 
   -- TODO: Does it make sense to build this up on every invocation? I feel like
   -- it would be better to do this once per module. In fact, the final symbolise
@@ -145,6 +147,8 @@ checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
           Lit (Bool value) -> pure value
           _ -> throwE ()
 
+  doc <- pprEval id (\par -> pure . par . text . show) result
+  dbg doc
   -- TODO: What to do about raise? Do we really just want to return false? I
   -- guess for now it makes sense.
   union <- coerce result
