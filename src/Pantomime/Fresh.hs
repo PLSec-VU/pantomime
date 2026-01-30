@@ -60,6 +60,7 @@ import Data.Constraint (Dict (..))
 import Data.Functor ((<&>))
 import Data.Text.Encoding (decodeUtf8)
 
+import Pantomime.Axiom (TypeAxiomsR)
 import Pantomime.Expr
 import Pantomime.Literal
   ( BuiltInTyCon
@@ -364,9 +365,7 @@ freshArgs
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => HasFamInstEnvs :> es
-  -- TODO: This TyConEnv argument is unclear on what it is. Maybe we could use
-  -- a type alias as it is an TypeAxiomR.
-  => TyConEnv TyCon
+  => TypeAxiomsR
   -> Type
   -> InScopeSet
   -> ([(Var, Arg es)], InScopeSet)

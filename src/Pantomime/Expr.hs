@@ -847,6 +847,10 @@ unthunk = \case
     Right co -> pure $ mkCoercion co
     Left ty -> pure $ mkType ty
 
+-- TODO: I wonder if it doesn't make more sense to just make this a
+-- 'collectCon'? The part about collecting literals feels like it should not
+-- live here, as it is specific to the bindings with Haskell. The Coercion part
+-- feels also a bit misplaced.
 -- | Collect the arguments of a scrutinee.
 --
 -- This will drop any universal type applications as these are not necessary for

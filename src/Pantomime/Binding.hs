@@ -1,10 +1,14 @@
+{-# LANGUAGE MagicHash #-}
 module Pantomime.Binding
-  ( getBuiltinTyCon
+  ( FromLitIds (..)
+  , getFromLitIds
+  , getBuiltinTyCon
   , bindingsGHC
   ) where
 
 
 import Control.Error (LookupError)
+import Control.Monad ((>=>))
 import Data.Traversable (for)
 import Effectful
 import Effectful.Context
@@ -12,7 +16,7 @@ import Effectful.Error.Static
 import Effectful.GHC.External (HasFamInstEnvs)
 import Effectful.GHC.TyThing (HasThings, lookupTyCon, lookupId)
 import Effectful.GHC.TH (THNameToGHCName, thNameToGhcName)
-import GHC.Plugins (Name, TyCon, Var)
+import GHC.Plugins (Name, Var, Id)
 import GHC.TypeNats qualified as Builtin (KnownNat, type (<=))
 import Language.Haskell.TH qualified as TH
 import Pantomime.BuiltIn qualified as Builtin
@@ -20,28 +24,61 @@ import Pantomime.PrimOps qualified as PrimOps
 import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Expr (EvalExpr)
 
-
 -- TODO: I need a better name for this!
--- data Binds where
---   Binds ::
---     { toIntId :: Id
---     , toInt8Id :: Id
---     , toInt16Id :: Id
---     , toInt32Id :: Id
---     , toInt64Id :: Id
---     } -> Binds
+data FromLitIds where
+  FromLitIds ::
+    { toIntId :: Id
+    , toInt8Id :: Id
+    , toInt16Id :: Id
+    , toInt32Id :: Id
+    , toInt64Id :: Id
+    , toWordId :: Id
+    , toWord8Id :: Id
+    , toWord16Id :: Id
+    , toWord32Id :: Id
+    , toWord64Id :: Id
+    , eqIntId :: Id
+    , eqInt8Id :: Id
+    , eqInt16Id :: Id
+    , eqInt32Id :: Id
+    , eqInt64Id :: Id
+    , eqWordId :: Id
+    , eqWord8Id :: Id
+    , eqWord16Id :: Id
+    , eqWord32Id :: Id
+    , eqWord64Id :: Id
+    } -> FromLitIds
 
-thNameToTyCon
+getFromLitIds
   :: HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => TH.Name
-  -> Eff es TyCon
-thNameToTyCon th = do
-  name <- thNameToGhcName th
-  lookupTyCon name
+  => Eff es FromLitIds
+getFromLitIds = do
+  let thNameToId = thNameToGhcName >=> lookupId
+  toIntId <- thNameToId 'Builtin.toInt#
+  toInt8Id <- thNameToId 'Builtin.toInt8#
+  toInt16Id <- thNameToId 'Builtin.toInt16#
+  toInt32Id <- thNameToId 'Builtin.toInt32#
+  toInt64Id <- thNameToId 'Builtin.toInt64#
+  toWordId <- thNameToId 'Builtin.toWord#
+  toWord8Id <- thNameToId 'Builtin.toWord8#
+  toWord16Id <- thNameToId 'Builtin.toWord16#
+  toWord32Id <- thNameToId 'Builtin.toWord32#
+  toWord64Id <- thNameToId 'Builtin.toWord64#
+  eqIntId <- thNameToId 'Builtin.eqInt#
+  eqInt8Id <- thNameToId 'Builtin.eqInt8#
+  eqInt16Id <- thNameToId 'Builtin.eqInt16#
+  eqInt32Id <- thNameToId 'Builtin.eqInt32#
+  eqInt64Id <- thNameToId 'Builtin.eqInt64#
+  eqWordId <- thNameToId 'Builtin.eqWord#
+  eqWord8Id <- thNameToId 'Builtin.eqWord8#
+  eqWord16Id <- thNameToId 'Builtin.eqWord16#
+  eqWord32Id <- thNameToId 'Builtin.eqWord32#
+  eqWord64Id <- thNameToId 'Builtin.eqWord64#
+  pure FromLitIds { .. }
 
 getBuiltinTyCon
   :: HasCallStack
@@ -51,6 +88,7 @@ getBuiltinTyCon
   => THNameToGHCName :> es
   => Eff es BuiltInTyCon
 getBuiltinTyCon = do
+  let thNameToTyCon = thNameToGhcName >=> lookupTyCon
   tcBool <- thNameToTyCon ''Builtin.Bool
   tcBitVec <- thNameToTyCon ''Builtin.BitVec
   tcInteger <- thNameToTyCon ''Builtin.Integer

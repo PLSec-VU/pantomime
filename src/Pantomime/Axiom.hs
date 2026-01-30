@@ -3,6 +3,8 @@
 module Pantomime.Axiom
   ( PluginAxioms (..)
   , PluginAxiomsR (..)
+  , TypeAxiomsR
+  , TermAxiomsR
   , resolvePluginAxioms
   ) where
 
@@ -153,14 +155,19 @@ instance Monoid PluginAxioms where
     , termAxioms = mempty
     }
 
+type TypeAxiomsR = TyConEnv TyCon
+
+-- TODO: I guess these might be better suited as CoreBind no?
+type TermAxiomsR = [(Id, CoreExpr)]
+
 -- TODO: I think it would be good to have type synonyms for both of these fields
 -- as we use them independently as well.
 -- | Fully resolved plugin axioms. These may be used as-is by the solver.
 data PluginAxiomsR where
   PluginAxiomsR ::
-    { typeAxiomsR :: TyConEnv TyCon
+    { typeAxiomsR :: TypeAxiomsR
     -- ^ Type-level axioms, mainly used to construct symbolic values.
-    , termAxiomsR :: [(Id, CoreExpr)]
+    , termAxiomsR :: TermAxiomsR
     -- ^ Term-level axioms, these already have their 'Coercible' instances
     -- resolved by the type-axioms, where applicable.
     --
@@ -209,13 +216,13 @@ resolvePluginAxioms
   => THNameToGHCName :> es
   => HasThings :> es
   => Context Reader CoreProgram :> es
+  => Context Reader [TyCon] :> es
   => PluginAxioms
   -> Eff es PluginAxiomsR
 resolvePluginAxioms PluginAxioms { .. } = do
   -- Resolve the type-level axioms. This is simply a lookup for the TyCon.
   typeAxiomsRList <- for (toList typeAxioms) \(orig, interp) -> do
-    -- TODO: Add lookup for local TyCon declarations.
-    let resolve = thNameToGhcName >=> lookupTyCon
+    let resolve = thNameToGhcName >=> lookupTyConAll
     -- TODO: Should we ensure that the original TyCon is a data-type or newtype?
     -- Otherwise, the conversion might be very fragile!
     orig' <- resolve orig
@@ -228,9 +235,18 @@ resolvePluginAxioms PluginAxioms { .. } = do
         let kind = tyConKind tcL
 
         -- Ensure the kind and roles match up.
-        let eqKinds = eqType kind $ tyConKind tcR
+        -- TODO: To have coercions between 'Int8#' and 'BitVec 8', we need the
+        -- kinds not to match up (they have different reps). Perhaps we should
+        -- still check whether the number of arguments match? Idk if it's
+        -- actually important... Maybe we can ditch the check?
+        -- I guess we are switching away from 'Coercible' due to it forcing
+        -- kinds to match soon.
+        -- One thing to look into: since the coercion is over possibly different
+        -- kinded types, do we need to adjust the coercion somehow? One place to
+        -- look is 'HetReduction' and 'homogeniseHetRedn'.
+        -- let eqKinds = eqType kind $ tyConKind tcR
         let eqRoles = all (uncurry (==)) $ on zip tyConRoles tcL tcR
-        unless (eqKinds && eqRoles) do
+        unless eqRoles do
           throwError_ ()
 
         -- Gather the remaining information to construct the coercion.

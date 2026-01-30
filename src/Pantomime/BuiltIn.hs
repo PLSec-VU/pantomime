@@ -36,6 +36,21 @@ module Pantomime.BuiltIn
   , toInt16#
   , toInt32#
   , toInt64#
+  , toWord#
+  , toWord8#
+  , toWord16#
+  , toWord32#
+  , toWord64#
+  , eqInt#
+  , eqInt8#
+  , eqInt16#
+  , eqInt32#
+  , eqInt64#
+  , eqWord#
+  , eqWord8#
+  , eqWord16#
+  , eqWord32#
+  , eqWord64#
 
   -- | System Fc operations.
   , ite
@@ -107,6 +122,11 @@ import GHC.Base
   , Int16#
   , Int32#
   , Int64#
+  , Word#
+  , Word8#
+  , Word16#
+  , Word32#
+  , Word64#
   , Constraint
   , Type
   )
@@ -154,6 +174,66 @@ toInt32# = toInt32#
 {-# OPAQUE toInt64# #-}
 toInt64# :: BitVec 64 -> Int64#
 toInt64# = toInt64#
+
+{-# OPAQUE toWord# #-}
+toWord# :: BitVec 64 -> Word#
+toWord# = toWord#
+
+{-# OPAQUE toWord8# #-}
+toWord8# :: BitVec 8 -> Word8#
+toWord8# = toWord8#
+
+{-# OPAQUE toWord16# #-}
+toWord16# :: BitVec 16 -> Word16#
+toWord16# = toWord16#
+
+{-# OPAQUE toWord32# #-}
+toWord32# :: BitVec 32 -> Word32#
+toWord32# = toWord32#
+
+{-# OPAQUE toWord64# #-}
+toWord64# :: BitVec 64 -> Word64#
+toWord64# = toWord64#
+
+{-# OPAQUE eqInt# #-}
+eqInt# :: Int# -> Int# -> Bool
+eqInt# = eqInt#
+
+{-# OPAQUE eqInt8# #-}
+eqInt8# :: Int8# -> Int8# -> Bool
+eqInt8# = eqInt8#
+
+{-# OPAQUE eqInt16# #-}
+eqInt16# :: Int16# -> Int16# -> Bool
+eqInt16# = eqInt16#
+
+{-# OPAQUE eqInt32# #-}
+eqInt32# :: Int32# -> Int32# -> Bool
+eqInt32# = eqInt32#
+
+{-# OPAQUE eqInt64# #-}
+eqInt64# :: Int64# -> Int64# -> Bool
+eqInt64# = eqInt64#
+
+{-# OPAQUE eqWord# #-}
+eqWord# :: Word# -> Word# -> Bool
+eqWord# = eqWord#
+
+{-# OPAQUE eqWord8# #-}
+eqWord8# :: Word8# -> Word8# -> Bool
+eqWord8# = eqWord8#
+
+{-# OPAQUE eqWord16# #-}
+eqWord16# :: Word16# -> Word16# -> Bool
+eqWord16# = eqWord16#
+
+{-# OPAQUE eqWord32# #-}
+eqWord32# :: Word32# -> Word32# -> Bool
+eqWord32# = eqWord32#
+
+{-# OPAQUE eqWord64# #-}
+eqWord64# :: Word64# -> Word64# -> Bool
+eqWord64# = eqWord64#
 
 -- TODO: There is no real way to implement 'ite', 'tagToEnum' and 'dataToTag'
 -- non-native. Maybe we could have their Haskell implementation given by a

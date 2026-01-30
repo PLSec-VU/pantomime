@@ -7,16 +7,29 @@ module Pantomime.Symbolise
   ) where
 
 import GHC.Plugins qualified as GHC
+import GHC.Builtin.Types.Prim
+  ( intPrimTyCon
+  , int8PrimTyCon
+  , int16PrimTyCon
+  , int32PrimTyCon
+  , int64PrimTyCon
+  , wordPrimTyCon
+  , word8PrimTyCon
+  , word16PrimTyCon
+  , word32PrimTyCon
+  , word64PrimTyCon
+  )
 
 import Pantomime.Literal (BuiltInTyCon)
 import Pantomime.Expr
 import Pantomime.Subst
 import Pantomime.Util (foldlBy)
+import Pantomime.Binding (FromLitIds (..))
 
-import Grisette (LogicalOp (..), mrgIf)
+import Grisette (LogicalOp (..), SymBool, mrgIte)
 
 import Control.Arrow (Arrow (..))
-import Control.Monad (foldM, unless)
+import Control.Monad (foldM, unless, join)
 
 import Effectful
 import Effectful.Error.Static
@@ -28,26 +41,10 @@ symbolise
   => Error () :> es
   => HasFamInstEnvs :> es
   => Context Reader BuiltInTyCon :> es
+  => Context Reader FromLitIds :> es
   => Subst es
   -> GHC.CoreExpr
   -> EvalExpr es
--- TODO: I'm now threading in the family instance environment for the primitive
--- reify functions. There's two annoying things here:
--- 1. I'm not using the inst environment in any of those calls actually
--- 2. Even if it would be required, we still only use it there. Threading
---    through seems not so clean...
---
--- For 1, I'll have to look at Reify of BitVector to see if I cannot get rid of
--- it in some smart way.
---
--- For 2, I could add the PrimOps to the substitution map instead of this
--- lookup. I feel like this one has merits in it's own right. Maybe we should do
--- this anyway, even if we end up fixing issue 1.
---
--- NOTE: Since I extended Eval to allow this effect, it is not so bad. Still,
--- I think it would be good to implement 2. For 1, we would first need to allow
--- the typeclass instance to have different effects. This also has some
--- downsides, so it might not be worth the hassle.
 symbolise = go
   where
     -- TODO: I think we should add notes where we add helper functions like this
@@ -100,7 +97,7 @@ symbolise = go
       -- Maybe it could be part of a user axiom? The annoying bit is that I
       -- would rather not have to require these axioms if you don't actually use
       -- the Haskell primitive types.
-      GHC.Lit _lit -> undefined
+      GHC.Lit lit -> symboliseLit subst lit
 
       GHC.App fun arg -> do
         fun' <- go subst fun
@@ -120,37 +117,37 @@ symbolise = go
       GHC.Case scrut bndr _ty alts -> do
         -- Gather the spine and arguments of the scrutinee.
         scrut' <- go subst scrut
-        (spine, args) <- collectScrut scrut'
 
         -- Altough perhaps overly cautious, we check whether the types line up.
-        -- This is one of the places where values are forced, and thus one of
-        -- the few places where we can perform a sanity check without messing
+        -- This is one of the few places where values are forced and thus one
+        -- of the few places where we can perform a sanity check without messing
         -- with the evaluation semantic.
         let expectedTy = substTy subst $ GHC.varType bndr
         scrutTy <- liftEff $ exprType scrut'
         unless (eqType scrutTy expectedTy) do
           throwE ()
 
+        -- TODO: This is a bit ugly now. I guess it handles all the cases, but
+        -- it could deserve some cleanup. It somehow feels weird to gather the
+        -- scrutinee based on the type like this. Not sure if there is a better
+        -- way to do so though. Also, the way we wrap the spine into multiple
+        -- 'Either's feels kind of dirty.
+        (spine, args) <- if
+          | isPrimType expectedTy -> pure (Left scrut', [])
+          | otherwise -> first Right <$> collectScrut scrut'
+
         -- Extend the substitution with the case binder.
         subst' <- liftEff $ extendSubst subst bndr (pure scrut')
 
         -- Create if-statement for every alternative.
         foldlBy mkUB alts \acc (GHC.Alt con bndrs rhs) -> do
-          -- Gather the equality constraint for this branch.
-          eq <- case spine of
-            -- A coercion spine is only allowed to match default.
-            Left _co
-              | GHC.DEFAULT <- con -> pure true
-              | otherwise -> throwE ()
-
-            -- A literal spine should match the pattern.
-            Right spine' -> liftEff $ case con of
-              -- FIXME: Create proper data con size.
-              GHC.DataAlt dc -> eqCon spine' $ mkDataCon @64 dc
-              GHC.DEFAULT -> pure true
-              -- TODO: Literal pattern matching depends on the encoding of the
-              -- literal as provided by the user.
-              GHC.LitAlt _ -> throwError ()
+          eq <- case con of
+            GHC.DataAlt dc | Right (Right spine') <- spine -> liftEff do
+              eqCon spine' $ mkDataCon @64 dc
+            GHC.LitAlt lit | Left spine' <- spine -> do
+              symboliseEqLit subst spine' lit
+            GHC.DEFAULT -> pure true
+            _ -> throwE ()
 
           -- TODO: Perhaps it's a good idea to check that the number of
           -- arguments match the binders (unless it is a DEFAULT, in which case
@@ -164,7 +161,7 @@ symbolise = go
 
           -- We want to lazily evaluate branches. As such, we keep them unforced
           -- inside of the monad.
-          mrgIf eq branch acc
+          mrgIte eq branch acc
 
       GHC.Cast body co -> do
         body' <- go subst body
@@ -190,6 +187,7 @@ symboliseBind
   => Error () :> fs
   => HasFamInstEnvs :> fs
   => Context Reader BuiltInTyCon :> fs
+  => Context Reader FromLitIds :> fs
   => Subst fs
   -> GHC.CoreBind
   -> Eff es (Subst fs)
@@ -213,46 +211,106 @@ symboliseBindMany
   => Foldable f
   => HasFamInstEnvs :> fs
   => Context Reader BuiltInTyCon :> fs
+  => Context Reader FromLitIds :> fs
   => Subst fs
   -> f GHC.CoreBind
   -> Eff es (Subst fs)
 symboliseBindMany = foldM symboliseBind
 
--- symboliseLit
---   :: Error () :> es
---   => GHC.Literal
---   -> Eff es Literal
--- symboliseLit = \case
---   GHC.LitNumber ty num -> do
---     let num' :: Num s => s
---         num' = fromInteger num
---     case ty of
---       -- FIXME: Give proper platform size.
---       GHC.LitNumInt -> pure $ Int @64 num' intPrimTy
---       GHC.LitNumInt8 -> pure $ Int @8 num' int8PrimTy
---       GHC.LitNumInt16 -> pure $ Int @16 num' int16PrimTy
---       GHC.LitNumInt32 -> pure $ Int @32 num' int32PrimTy
---       GHC.LitNumInt64 -> pure $ Int @64 num' int64PrimTy
---       -- FIXME: Give proper platform size.
---       GHC.LitNumWord -> pure $ Word @64 num' wordPrimTy
---       GHC.LitNumWord8 -> pure $ Word @8 num' word8PrimTy
---       GHC.LitNumWord16 -> pure $ Word @16 num' word16PrimTy
---       GHC.LitNumWord32 -> pure $ Word @32 num' word32PrimTy
---       GHC.LitNumWord64 -> pure $ Word @64 num' word64PrimTy
---       -- TODO: The BigNat primitive is a literal for BigNat# (which is a
---       -- ByteArray#). Once we have byte array literals, we could encode this
---       -- as such. For now, it is fine to just encode it as an Integer literal
---       -- with type ByteArray#. As we constant fold literally everything anyway,
---       -- it shouldn't be slow if we convert such a ByteArray# constant to a
---       -- symbolic integer later.
---       GHC.LitNumBigNat -> pure $ Integer num' byteArrayPrimTy
+isPrimType :: Type -> Bool
+isPrimType ty = case GHC.splitTyConApp_maybe ty of
+  Just (tc, [])
+    -> tc == intPrimTyCon
+    || tc == int8PrimTyCon
+    || tc == int16PrimTyCon
+    || tc == int32PrimTyCon
+    || tc == int64PrimTyCon
+    || tc == wordPrimTyCon
+    || tc == word8PrimTyCon
+    || tc == word16PrimTyCon
+    || tc == word32PrimTyCon
+    || tc == word64PrimTyCon
+  _ -> False
 
---   -- GHC.LitFloat num -> do
---   --   let num' = pure $ fromRational num
---   --   pure $ Float num'
+-- | Create a symbolic value from a literal.
+--
+-- This will user-defined functions for conversions from symbolic literals to
+-- Haskell literals. We do so as the representation of literals is decided by
+-- the user. Hence, there is no other way to do the conversion than having a
+-- user describe it as well.
+symboliseLit
+  :: HasCallStack
+  => Error () :> es
+  => Context Reader BuiltInTyCon :> es
+  => Context Reader FromLitIds :> es
+  => Subst es
+  -> GHC.Literal
+  -> EvalExpr es
+symboliseLit subst lit = do
+  -- Gather the identifier for equality.
+  FromLitIds { .. } <- liftEff $ get @FromLitIds
+  (convertId, lit') <- case lit of
+    GHC.LitNumber ty num -> do
+      let num' :: Num s => s
+          num' = fromInteger num
+      case ty of
+        -- TODO: The bitvector size should be related to the platform size. As
+        -- I'm not sure how to do this on the API end, I'll leave it like this
+        -- for now...
+        GHC.LitNumInt -> pure (toIntId, BitVec @64 num')
+        GHC.LitNumInt8 -> pure (toInt8Id, BitVec @8 num')
+        GHC.LitNumInt16 -> pure (toInt16Id, BitVec @16 num')
+        GHC.LitNumInt32 -> pure (toInt32Id, BitVec @32 num')
+        GHC.LitNumInt64 -> pure (toInt64Id, BitVec @64 num')
+        GHC.LitNumWord -> pure (toWordId, BitVec @64 num')
+        GHC.LitNumWord8 -> pure (toWord8Id, BitVec @8 num')
+        GHC.LitNumWord16 -> pure (toWord16Id, BitVec @16 num')
+        GHC.LitNumWord32 -> pure (toWord32Id, BitVec @32 num')
+        GHC.LitNumWord64 -> pure (toWord64Id, BitVec @64 num')
+        GHC.LitNumBigNat -> throwE ()
+    _ -> throwE ()
 
---   -- GHC.LitDouble num -> do
---   --   let num' = pure $ fromRational num
---   --   pure $ Double num'
+  -- Lookup the equality function.
+  convert <- join . failWithE () $ lookupIdSubst subst convertId
 
---   _ -> throwError ()
+  mkApps convert [pure $ mkLit lit']
+
+-- | Create a symbolic equaltiy check between a scrutinee and a literal.
+--
+-- Like 'symboliseLit', this will use user-defined functions for the equality
+-- check, as the representation of literals is also user-defined.
+symboliseEqLit
+  :: HasCallStack
+  => Error () :> es
+  => Context Reader FromLitIds :> es
+  => Context Reader BuiltInTyCon :> es
+  => Subst es
+  -> Expr es
+  -> GHC.Literal
+  -> Eval es SymBool
+symboliseEqLit subst lhs rhs = do
+  -- Gather the identifier for equality.
+  FromLitIds { .. } <- liftEff $ get @FromLitIds
+  eqId <- case rhs of
+    GHC.LitNumber ty _ -> case ty of
+      GHC.LitNumInt -> pure eqIntId
+      GHC.LitNumInt8 -> pure eqInt8Id
+      GHC.LitNumInt16 -> pure eqInt16Id
+      GHC.LitNumInt32 -> pure eqInt32Id
+      GHC.LitNumInt64 -> pure eqInt64Id
+      GHC.LitNumWord -> pure eqWordId
+      GHC.LitNumWord8 -> pure eqWord8Id
+      GHC.LitNumWord16 -> pure eqWord16Id
+      GHC.LitNumWord32 -> pure eqWord32Id
+      GHC.LitNumWord64 -> pure eqWord64Id
+      GHC.LitNumBigNat -> throwE ()
+    _ -> throwE ()
+
+  -- Lookup the equality function.
+  eq <- join . failWithE () $ lookupIdSubst subst eqId
+
+  -- Call the equality function and uwrap the boolean result.
+  result <- mkApps eq [pure lhs, symboliseLit subst rhs]
+  case result of
+    Lit (Bool result') -> pure result'
+    _ -> throwE ()

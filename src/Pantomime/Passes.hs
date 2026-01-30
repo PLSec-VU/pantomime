@@ -14,7 +14,7 @@ import Grisette
   , z3
   )
 
-import Data.Data
+import Data.Data (Data)
 import Data.Traversable (for)
 
 import Control.Error
@@ -106,6 +106,7 @@ runSymbolic
     , THNameToGHCName
     , HasThings
     , Context Reader CoreProgram
+    , Context Reader [TyCon]
     , HasInstEnvs
     , HasFamInstEnvs
     , HasExternalPackageState
@@ -124,6 +125,7 @@ runSymbolic guts
   . runHasExternalPackageState
   . runHasFamInstEnv guts
   . runHasInstEnvs guts
+  . runContextReader (mg_tcs guts)
   . runContextReader (mg_binds guts)
   . runHasThings
   . runThNameToGhcName
@@ -198,6 +200,7 @@ checkValidity
   => Error (LookupError TH.Name) :> es
   => Error SolverError :> es
   => Context Reader CoreProgram :> es
+  => Context Reader [TyCon] :> es
   => Provider_ Solver () :> es
   => HasFamInstEnvs :> es
   => HasThings :> es
