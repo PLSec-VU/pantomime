@@ -120,27 +120,36 @@ data PipelineCorrectness si ss i o fo where
   PipelineCorrectness ::
     { implementation :: Circuit si i o
     , specification :: Circuit ss i o
-    , flushing :: si -> (si, fo)
+    , stallInput :: i
     , abstraction :: si -> ss
-    , adjustInput :: si -> i -> i
     } ->
     PipelineCorrectness si ss i o fo
 
+-- Based on https://www.cs.cmu.edu/~bryant/pubdir/CMU-CS-05-195.pdf, section 4.1
+-- If SP = S1: The pipeline successfully retired one instruction, matching the
+-- sequential specification.
+-- If SP = S0: The pipeline cycle did not complete an instruction (due to a
+-- stall or a canceled mispredicted branch), but it remained "safe" because it
+-- didn't change the architectural state incorrectly.
+-- TODO: what do we do with outputs?
 pipelineCorrectness ::
-  (Eq ss) =>
+  (Eq ss, Eq si) =>
   PipelineCorrectness si ss i o fo ->
   si ->
   i ->
   Bool
 pipelineCorrectness PipelineCorrectness{..} = \s i ->
   let
-    i' = adjustInput s i
-    (s_flushed, _) = flushing s
-    s_spec = abstraction s_flushed
-    (s_spec_expected, _) = specification s_spec i'
-
-    (s_impl_next, _) = implementation s i'
-    (s_impl_next_flushed, _) = flushing s_impl_next
-    s_spec_actual = abstraction s_impl_next_flushed
+    (s0, o0) = project s
+    (s1, os) = second (: o0) (specification s0 i)
+    (s', o') = implementation s i
+    (sp, oi) = second (o' :) (project s')
    in
-    s_spec_expected == s_spec_actual
+    sp == s1 || sp == s0
+ where
+  flush state =
+    let (state', out) = implementation state stallInput
+     in if state == state'
+          then (state, out : [])
+          else second (out :) (flush state')
+  project = first abstraction . flush

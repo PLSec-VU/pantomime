@@ -1105,8 +1105,8 @@ main = do
           { reg = 0
           , fePC = 100
           , exPC = 99
-          -- Opcode 3 is Jmp. 3 << 8 = 768. 768 | 200 = 968. Jmp 200.
-          , exInstr = Core2.Jmp 200
+          , -- Opcode 3 is Jmp. 3 << 8 = 768. 768 | 200 = 968. Jmp 200.
+            exInstr = Core2.Jmp 200
           , wbRes = Nothing
           , wbOut = Nothing
           }
@@ -1114,24 +1114,25 @@ main = do
   let instr = Just 1
 
   -- Expected Path (Spec)
-  putStrLn "--- Spec Path ---"
-  let (st_flushed, _) = Core2.flush st
-  putStrLn $ "st_flushed = " ++ show st_flushed
-  let s_spec = Core2.abstract st_flushed
-  putStrLn $ "s_spec = " ++ show s_spec
-  let (s_spec_expected, _) = Core2.spec s_spec instr
-  putStrLn $ "s_spec_expected = " ++ show s_spec_expected
+  -- putStrLn "--- Spec Path ---"
+  -- let (st_flushed, _) = Core2.flush st
+  -- putStrLn $ "st_flushed = " ++ show st_flushed
+  -- let s_spec = Core2.abstract st_flushed
+  -- putStrLn $ "s_spec = " ++ show s_spec
+  -- let (s_spec_expected, _) = Core2.spec s_spec instr
+  -- putStrLn $ "s_spec_expected = " ++ show s_spec_expected
 
   -- Actual Path (Impl)
   putStrLn "\n--- Impl Path ---"
   let (st_impl_next, (_, _)) = Core2.core st instr
   putStrLn $ "st_impl_next = " ++ show st_impl_next
-  let (st_impl_next_flushed, _) = Core2.flush st_impl_next
-  putStrLn $ "st_impl_next_flushed = " ++ show st_impl_next_flushed
-  let s_spec_actual = Core2.abstract st_impl_next_flushed
-  putStrLn $ "s_spec_actual = " ++ show s_spec_actual
 
-  putStrLn $ "\nMatch? " ++ show (s_spec_expected == s_spec_actual)
+-- let (st_impl_next_flushed, _) = Core2.flush st_impl_next
+-- putStrLn $ "st_impl_next_flushed = " ++ show st_impl_next_flushed
+-- let s_spec_actual = Core2.abstract st_impl_next_flushed
+-- putStrLn $ "s_spec_actual = " ++ show s_spec_actual
+
+-- putStrLn $ "\nMatch? " ++ show (s_spec_expected == s_spec_actual)
 
 -- let st0 = Core2.State
 --       { reg = 0x00000000

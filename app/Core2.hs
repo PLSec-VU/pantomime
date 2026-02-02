@@ -22,7 +22,6 @@ module Core2 (
   spec,
   SpecState (..),
   abstract,
-  flush,
   correctness,
   -- , theory0
   -- , theory1
@@ -552,19 +551,6 @@ spec state (Just rawInstr) =
           }
    in (state', (out, pc'))
 
-flush :: State -> (State, [Word32])
-flush state =
-  let (state', (out, _)) = core state Nothing
-   in if state == state'
-        then (state, [])
-        else second (maybeToList out ++) (flush state')
-
-isHazard :: State -> Bool
-isHazard state =
-  let (state', _) = writeback state
-      (_, jump) = execute state'
-   in isJust jump
-
 {-# ANN correctness (Theory Base.axioms) #-}
 correctness :: State -> Maybe RawInstr -> Bool
 correctness =
@@ -572,7 +558,6 @@ correctness =
     PipelineCorrectness
       { implementation = core
       , specification = spec
-      , flushing = flush
+      , stallInput = Nothing
       , abstraction = abstract
-      , adjustInput = \s i -> if isHazard s then Nothing else i
       }
