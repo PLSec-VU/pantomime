@@ -125,13 +125,6 @@ data PipelineCorrectness si ss i o fo where
     } ->
     PipelineCorrectness si ss i o fo
 
--- Based on https://www.cs.cmu.edu/~bryant/pubdir/CMU-CS-05-195.pdf, section 4.1
--- If SP = S1: The pipeline successfully retired one instruction, matching the
--- sequential specification.
--- If SP = S0: The pipeline cycle did not complete an instruction (due to a
--- stall or a canceled mispredicted branch), but it remained "safe" because it
--- didn't change the architectural state incorrectly.
--- TODO: what do we do with outputs?
 pipelineCorrectness ::
   (Eq ss, Eq si) =>
   PipelineCorrectness si ss i o fo ->
@@ -139,13 +132,7 @@ pipelineCorrectness ::
   i ->
   Bool
 pipelineCorrectness PipelineCorrectness{..} = \s i ->
-  let
-    (s0, o0) = project s
-    (s1, os) = second (: o0) (specification s0 i)
-    (s', o') = implementation s i
-    (sp, oi) = second (o' :) (project s')
-   in
-    sp == s1 || sp == s0
+  stallIsNop s && burchDillSquare s i
  where
   flush state =
     let (state', out) = implementation state stallInput
@@ -153,3 +140,27 @@ pipelineCorrectness PipelineCorrectness{..} = \s i ->
           then (state, out : [])
           else second (out :) (flush state')
   project = first abstraction . flush
+
+  -- Stalling input is nop for specification
+  stallIsNop s =
+    let
+      (ss, _) = project s
+      (ss', _) = specification ss stallInput
+     in
+      ss' == ss
+
+  -- Based on https://www.cs.cmu.edu/~bryant/pubdir/CMU-CS-05-195.pdf, section 4.1
+  -- If SP = S1: The pipeline successfully retired one instruction, matching the
+  -- sequential specification.
+  -- If SP = S0: The pipeline cycle did not complete an instruction (due to a
+  -- stall or a canceled mispredicted branch), but it remained "safe" because it
+  -- didn't change the architectural state incorrectly.
+  -- TODO: what do we do with outputs?
+  burchDillSquare s i =
+    let
+      (s0, o0) = project s
+      (s1, os) = second (: o0) (specification s0 i)
+      (s', o') = implementation s i
+      (sp, oi) = second (o' :) (project s')
+     in
+      sp == s1 || sp == s0
