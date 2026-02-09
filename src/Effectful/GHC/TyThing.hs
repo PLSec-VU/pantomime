@@ -12,6 +12,7 @@ module Effectful.GHC.TyThing
   , LookupError (..)
   , MonadThings (..)
   , TyThing (..)
+  , lookupClass
   , lookupIdLocal
   , lookupIdAll
   , lookupTyConLocal
@@ -21,6 +22,7 @@ module Effectful.GHC.TyThing
 import Prelude hiding (break)
 
 import Effectful
+import Effectful.Context
 import Effectful.Dispatch.Dynamic (send)
 import Effectful.Error.Static (HasCallStack, Error, throwError_, runError)
 import Effectful.Break
@@ -33,16 +35,17 @@ import GHC.Plugins
   , varName
   , dataConWrapId
   , tyConName
+  , tyConClass_maybe
   )
+import GHC.Core.Class (Class)
 import GHC.Core.ConLike (ConLike(..))
 import GHC.Types.TyThing (TyThing (..), MonadThings (..))
 import GHC.Types.Name (Name)
 
+import Control.Error
+
 import Data.Foldable (find, asum)
 import Data.Functor ((<&>))
-
-import Control.Error
-import Effectful.Context
 
 -- | Effect drop-in for 'MonadThings'.
 data HasThings :: Effect where
@@ -81,6 +84,17 @@ instance (Error (LookupError Name) :> es, HasThings :> es) => MonadThings (Eff e
     case thing of
       ATyCon tyCon -> pure tyCon
       _ -> throwError_ $ LookupError name
+
+lookupClass
+  :: HasCallStack
+  => Error (LookupError Name) :> es
+  => HasThings :> es
+  => Name
+  -> Eff es Class
+lookupClass name = do
+  tc <- lookupTyCon name
+  let err = throwError_ $ LookupError name
+  maybe err pure $ tyConClass_maybe tc
 
 -- | Lookup a local identifier.
 lookupIdLocal

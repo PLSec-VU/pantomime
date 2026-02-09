@@ -102,6 +102,8 @@ import GHC.Plugins
   , mkInScopeSet
   , splitTyConApp_maybe
   , dataConExTyCoVars
+  , dataConWorkId
+  , dataConRepArgTys
   , splitAtList
   , dropList
   , dataConUnivTyVars
@@ -109,8 +111,7 @@ import GHC.Plugins
   , tyConArity
   , tyConRolesRepresentational
   , liftCoSubstWithEx
-  , dataConRepArgTys
-  , mkTyConTy
+  , varType
   )
 
 import GHC.Generics (Generic)
@@ -463,10 +464,24 @@ mkEnumCon tag ty = do
   let targs' = pure . mkType <$> targs
   mkApps dc targs'
 
+-- | Get the 'TyCon' of a constructor.
 constructorTyCon :: Constructor -> TyCon
 constructorTyCon = \case
   DataCon dc -> dataConTyCon dc
   EnumCon _tag tc -> tc
+
+-- | Get the 'Type' of a constructor.
+constructorType
+  :: Error () :> es
+  => Constructor
+  -> Eff es Type
+constructorType con = do
+  dc <- case con of
+    DataCon dc -> pure dc
+    EnumCon _tag tc
+      | dc : _ <- tyConDataCons tc -> pure dc
+      | otherwise -> throwError ()
+  pure $ varType (dataConWorkId dc)
 
 pprExpr
   :: (SDoc -> SDoc)
@@ -797,7 +812,7 @@ exprType
   -> Eff es Type
 exprType = \case
   Lit lit -> embedLitTyOf lit
-  Con con -> pure $ mkTyConTy (constructorTyCon con)
+  Con con -> constructorType con
   Type _ -> throwError ()
   Coercion co -> pure $ coercionType co
   Lam ty _ -> pure ty

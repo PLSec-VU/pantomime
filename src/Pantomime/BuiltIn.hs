@@ -4,6 +4,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
 
 -- TODO: Perhaps 'Base' would be better than 'BuiltIn', because not everything
 -- here is necessarily built-in.
@@ -20,10 +21,9 @@
 -- you're doing!
 module Pantomime.BuiltIn
   -- | Embeddable constraint for user interpretations.
-  ( Embeddable
-  , embed
+  ( Embeddable (..)
 
-  -- | Typeclass to differntiate primitive types.
+  -- | Typeclass to differentiate primitive types.
   , Primitive
 
   -- | Built-in literal conversion functions.
@@ -135,14 +135,20 @@ import GHC.TypeNats (Nat, KnownNat, type (+), type (<=))
 import Prelude qualified
 import Prelude (($))
 
-class Embeddable (a :: TYPE r1) (b :: TYPE r2)
+class Private a b
 
-embed
-  :: forall {r1} {r2} (a :: TYPE r1) (b :: TYPE r2) 
-   . Embeddable a b
-  => a
-  -> b
-embed = embed
+-- TODO: At some point I want this typeclass to have behaviour like 'Coercible'.
+-- For now, I'll leave it like this as it eases the implementation quite a bit.
+class Private a b => Embeddable (a :: TYPE r1) (b :: TYPE r2) where
+  embed :: a -> b
+  project :: b -> a
+
+-- embed
+--   :: forall {r1} {r2} (a :: TYPE r1) (b :: TYPE r2)
+--    . Embeddable a b
+--   => a
+--   -> b
+-- embed = embed
 
 type family Primitive a :: Constraint where
   Primitive Bool = ()

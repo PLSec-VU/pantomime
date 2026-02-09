@@ -1,7 +1,7 @@
 {-# LANGUAGE MagicHash #-}
 module Pantomime.Binding
-  ( FromLitIds (..)
-  , getFromLitIds
+  ( InterfaceThings (..)
+  , getInterfaceThings
   , getBuiltinTyCon
   , bindingsGHC
   ) where
@@ -25,8 +25,10 @@ import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Expr (EvalExpr)
 
 -- TODO: I need a better name for this!
-data FromLitIds where
-  FromLitIds ::
+-- I guess these could also be 'BuiltInOps', 'BuiltInIds' or at least something
+-- to signify what these are used for?
+data InterfaceThings where
+  InterfaceThings ::
     { toIntId :: Id
     , toInt8Id :: Id
     , toInt16Id :: Id
@@ -47,16 +49,16 @@ data FromLitIds where
     , eqWord16Id :: Id
     , eqWord32Id :: Id
     , eqWord64Id :: Id
-    } -> FromLitIds
+    } -> InterfaceThings
 
-getFromLitIds
+getInterfaceThings
   :: HasCallStack
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Eff es FromLitIds
-getFromLitIds = do
+  => Eff es InterfaceThings
+getInterfaceThings = do
   let thNameToId = thNameToGhcName >=> lookupId
   toIntId <- thNameToId 'Builtin.toInt#
   toInt8Id <- thNameToId 'Builtin.toInt8#
@@ -78,7 +80,7 @@ getFromLitIds = do
   eqWord16Id <- thNameToId 'Builtin.eqWord16#
   eqWord32Id <- thNameToId 'Builtin.eqWord32#
   eqWord64Id <- thNameToId 'Builtin.eqWord64#
-  pure FromLitIds { .. }
+  pure InterfaceThings { .. }
 
 getBuiltinTyCon
   :: HasCallStack

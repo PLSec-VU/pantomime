@@ -48,16 +48,22 @@ import Pantomime.Expr
   , Literal (..)
   , mkApps
   , pprArg
-  , throwE, pprEval
+  , throwE
+  , pprEval
   )
 import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Symbolise
 import Pantomime.Subst
 import Pantomime.Fresh
--- import Pantomime.Primitive.GHC
 import Pantomime.Util (dbg)
 import Pantomime.Axiom (PluginAxiomsR (..))
 import Pantomime.Grisette.UnionT (UnionT (..))
+import Pantomime.Binding
+  ( InterfaceThings
+  , getInterfaceThings
+  , getBuiltinTyCon
+  , bindingsGHC
+  )
 
 import Effectful
 import Effectful.Context
@@ -68,18 +74,20 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
-import Pantomime.Binding (getBuiltinTyCon, bindingsGHC)
 
+-- TODO: Definitely not the cleanest place to add these effects. I should look
+-- into where to do this.
 runBuiltInTypes
   :: Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Eff (Context Reader BuiltInTyCon : es) b
+  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : es) b
   -> Eff es b
 runBuiltInTypes eff = do
   tys <- getBuiltinTyCon
-  runContextReader tys eff
+  ids <- getInterfaceThings
+  runContextReader ids . runContextReader tys $ eff
 
 checkValid
   :: forall es
@@ -96,8 +104,6 @@ checkValid
   => PluginAxiomsR
   -> CoreExpr
   -> Eff es ()
--- TODO: I should remove this early error catch. Also, these errors are very
--- non-proper. We should throw errors that actually inform us about something!
 checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
   -- TODO: Somehow this code doesn't read very nice. I think I should review it.
   program <- get @CoreProgram

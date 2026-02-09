@@ -24,7 +24,7 @@ import Pantomime.Literal (BuiltInTyCon)
 import Pantomime.Expr
 import Pantomime.Subst
 import Pantomime.Util (foldlBy)
-import Pantomime.Binding (FromLitIds (..))
+import Pantomime.Binding (InterfaceThings (..))
 
 import Grisette (LogicalOp (..), SymBool, mrgIte)
 
@@ -41,7 +41,7 @@ symbolise
   => Error () :> es
   => HasFamInstEnvs :> es
   => Context Reader BuiltInTyCon :> es
-  => Context Reader FromLitIds :> es
+  => Context Reader InterfaceThings :> es
   => Subst es
   -> GHC.CoreExpr
   -> EvalExpr es
@@ -187,7 +187,7 @@ symboliseBind
   => Error () :> fs
   => HasFamInstEnvs :> fs
   => Context Reader BuiltInTyCon :> fs
-  => Context Reader FromLitIds :> fs
+  => Context Reader InterfaceThings :> fs
   => Subst fs
   -> GHC.CoreBind
   -> Eff es (Subst fs)
@@ -211,7 +211,7 @@ symboliseBindMany
   => Foldable f
   => HasFamInstEnvs :> fs
   => Context Reader BuiltInTyCon :> fs
-  => Context Reader FromLitIds :> fs
+  => Context Reader InterfaceThings :> fs
   => Subst fs
   -> f GHC.CoreBind
   -> Eff es (Subst fs)
@@ -242,13 +242,13 @@ symboliseLit
   :: HasCallStack
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => Context Reader FromLitIds :> es
+  => Context Reader InterfaceThings :> es
   => Subst es
   -> GHC.Literal
   -> EvalExpr es
 symboliseLit subst lit = do
   -- Gather the identifier for equality.
-  FromLitIds { .. } <- liftEff $ get @FromLitIds
+  InterfaceThings { .. } <- liftEff $ get @InterfaceThings
   (convertId, lit') <- case lit of
     GHC.LitNumber ty num -> do
       let num' :: Num s => s
@@ -282,7 +282,7 @@ symboliseLit subst lit = do
 symboliseEqLit
   :: HasCallStack
   => Error () :> es
-  => Context Reader FromLitIds :> es
+  => Context Reader InterfaceThings :> es
   => Context Reader BuiltInTyCon :> es
   => Subst es
   -> Expr es
@@ -290,7 +290,7 @@ symboliseEqLit
   -> Eval es SymBool
 symboliseEqLit subst lhs rhs = do
   -- Gather the identifier for equality.
-  FromLitIds { .. } <- liftEff $ get @FromLitIds
+  InterfaceThings { .. } <- liftEff $ get @InterfaceThings
   eqId <- case rhs of
     GHC.LitNumber ty _ -> case ty of
       GHC.LitNumInt -> pure eqIntId

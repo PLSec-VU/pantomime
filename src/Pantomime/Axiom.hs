@@ -10,7 +10,6 @@ module Pantomime.Axiom
 
 import Language.Haskell.TH qualified as TH
 
-import GHC.Utils.Outputable (Outputable (..), IsDoc (..), hang)
 import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
 import GHC.Core.TyCon.Env (TyConEnv, mkTyConEnv)
 import GHC.Core.TyCo.Compare (eqType)
@@ -27,23 +26,32 @@ import GHC.Plugins
   , Expr (..)
   , Var (..)
   , InlinePragma (..)
-  , mkTyConApp
+  , TypeOrConstraint (..)
+  , mkTyConTy
   , mkUnivCo
   , dataConWorkId
-  , coercibleDataCon
   , mkApps
+  , mkCast
+  , mkSymCo
   , exprType
   , hasCoreUnfolding
   , realIdUnfolding
   , idInlinePragma
+  , classDataCon
+  , typeKind
+  , unitExpr
+  , unrestricted
+  , emptyInScopeSet
+  , sORTKind_maybe
   )
+import GHC.Utils.Outputable (Outputable (..), IsDoc (..), hang)
 
 import GHC.Exts (IsList(..))
 
 import Control.Monad ((>=>), unless)
+import Control.Applicative (Alternative (..))
 
 import Data.Data (Data)
-import Data.Function (on)
 import Data.Map (Map)
 import Data.Typeable (Typeable)
 import Data.Traversable (for)
@@ -54,66 +62,71 @@ import Effectful.GHC.TH
 import Effectful.GHC.TyThing
 import Effectful.Context
 
+import Pantomime.BuiltIn (Embeddable)
 import Pantomime.Unification (resolveInstancesWith)
-import Pantomime.Util (foldM')
+import Pantomime.Util (foldM', freshId, failWith)
 
+-- TODO: We're switching away from using 'Coercible' as it requires same runtime
+-- kinded types: something we don't care about within the evaluator. Instead,
+-- we provide a custom typeclass. The comments should mirror this!
 -- | User axioms only visible to the plugin.
 --
 -- The kinds and types of the mapped terms should match up exactly. The
 -- exception is that type-level axioms will be used to instantiate requirements
--- of 'Coercible' on any term-level axiom.
+-- of 'Embeddable' on any term-level axiom.
 --
 -- # Example
 --
--- Suppose the user has some bitvector type called 'Signed'.
+-- Suppose the user has some bitvector type called 'IntN'.
 --
--- > type Signed (n :: Nat) = ...
+-- > type IntN (n :: Nat) = ...
 --
 -- The user supplies the following mapping:
 --
--- > Signed |-> IntN
+-- > IntN |-> BitVec
 --
 -- This roughly says that the user wants to use the underlying bitvector
--- representation IntN. IntN is treated as a primitive within the plugin and is
--- implemented using the respective SMT theory. A mapping between non-primitive
--- types is also allowed (or any mixing of these, use type aliases for this).
+-- representation 'BitVec'. 'BitVec' is treated as a primitive within the plugin
+-- and is implemented using the respective SMT theory. A mapping between
+-- non-primitive types is also allowed (or any mixing of these, use type aliases
+-- for this).
 --
--- Now, a user has some functions that operate on 'Signed'. These of course
--- require a mapping to the their respective operation on 'IntN'. Before
--- anything, a user needs to ensure that **ALL** operations on 'Signed' are
+-- Now, a user has some functions that operate on 'IntN'. These of course
+-- require a mapping to the their respective operation on 'BitVec'. Before
+-- anything, a user needs to ensure that **ALL** operations on 'IntN' are
 -- through functions marked as 'OPAQUE' and that it's constructor is not
 -- exported. This is to ensure correctness within the evaluator, as otherwise
 -- representational equivalence is broken.
 --
 -- With this in mind, the following will illustrate how to write an
--- interpretation. Suppose we have an addition function for 'Signed' values.
+-- interpretation. Suppose we have an addition function for 'IntN' values.
 --
--- > {-# OPAQUE plusSigned #-}
--- > plusSigned :: KnownNat n => Signed n -> Signed n -> Signed n
+-- > {-# OPAQUE plusIntN #-}
+-- > plusIntN :: KnownNat n => IntN n -> IntN n -> IntN n
 --
 -- We can write an interpretation for this using the addition as provided by
--- 'IntN'. The importance lies in using a coercion 'Coercible Signed IntN'.
+-- 'BitVec'. The importance lies in using a coercion 'Coercible IntN BitVec'.
 --
 -- > plusInterp
--- >   :: Coercible Signed IntN
+-- >   :: Coercible IntN BitVec
 -- >   => KnownNat n
--- >   => Signed n
--- >   -> Signed n
--- >   -> Signed n
+-- >   => IntN n
+-- >   -> IntN n
+-- >   -> IntN n
 -- > plusInterp = go
 -- >   where
--- >     go :: bv ~ IntN => bv n -> bv n -> bv n
+-- >     go :: bv ~ BitVec => bv n -> bv n -> bv n
 -- >     go = coerce plusIntN
 --
 -- Note, the where clause is only to trick Haskell into allowing the coercion
 -- to appear at the top level. With this defintion in place, we supply the
 -- appropriate mapping:
 --
--- > plusSigned |-> plusInterp
+-- > plusIntN |-> plusInterp
 --
--- Of course, the types for 'plusSigned' and 'plusInterp' do not match up
+-- Of course, the types for 'plusIntN' and 'plusInterp' do not match up
 -- one-to-one. That is, to complete the interpretation, we supply 'plusInterp'
--- with the user-supplied coercion that 'Coercible Signed IntN'. Afterwards, the
+-- with the user-supplied coercion that 'Coercible IntN BitVec'. Afterwards, the
 -- types match up and the function is a valid interpretation.
 data PluginAxioms where
   PluginAxioms ::
@@ -220,6 +233,9 @@ resolvePluginAxioms
   => PluginAxioms
   -> Eff es PluginAxiomsR
 resolvePluginAxioms PluginAxioms { .. } = do
+  -- Get the typeclass we want to instantiate.
+  embedCls <- thNameToGhcName >=> lookupClass $ ''Embeddable
+
   -- Resolve the type-level axioms. This is simply a lookup for the TyCon.
   typeAxiomsRList <- for (toList typeAxioms) \(orig, interp) -> do
     let resolve = thNameToGhcName >=> lookupTyConAll
@@ -229,46 +245,49 @@ resolvePluginAxioms PluginAxioms { .. } = do
     interp' <- resolve interp
     pure (orig', interp')
 
-  -- Creates a boxed coercion between the given TyCon.
-  let mkPluginTcCo tcL tcR = do
-        -- Get the kind of the coercible TyCon.
-        let kind = tyConKind tcL
-
-        -- Ensure the kind and roles match up.
-        -- TODO: To have coercions between 'Int8#' and 'BitVec 8', we need the
-        -- kinds not to match up (they have different reps). Perhaps we should
-        -- still check whether the number of arguments match? Idk if it's
-        -- actually important... Maybe we can ditch the check?
-        -- I guess we are switching away from 'Coercible' due to it forcing
-        -- kinds to match soon.
-        -- One thing to look into: since the coercion is over possibly different
-        -- kinded types, do we need to adjust the coercion somehow? One place to
-        -- look is 'HetReduction' and 'homogeniseHetRedn'.
-        -- let eqKinds = eqType kind $ tyConKind tcR
-        let eqRoles = all (uncurry (==)) $ on zip tyConRoles tcL tcR
-        unless eqRoles do
-          throwError_ ()
-
-        -- Gather the remaining information to construct the coercion.
-        let prov = PluginProv "pantomime user-defined"
-        let tyL = mkTyConApp tcL []
-        let tyR = mkTyConApp tcR []
-        let co = mkUnivCo prov Representational tyL tyR
-
-        -- Box the coercion.
-        let eqVar = Var $ dataConWorkId coercibleDataCon
-        pure $ mkApps eqVar [Type kind, Type tyL, Type tyR, Coercion co]
-
-  -- Inserts a coercion between two TyCon into the given dictionary.
-  let insertCo tcL tcR dicts = do
-        dict <- mkPluginTcCo tcL tcR
-        let ty = exprType dict
-        pure $ insertTM ty dict dicts
-
   -- Gather the dictionary map for instance resolution.
-  dicts <- foldM' emptyTM typeAxiomsRList \dicts (orig, interp) -> do
-    -- Add both directions of the coercion to the dictionary map.
-    insertCo orig interp >=> insertCo interp orig $ dicts
+  dicts <- foldM' emptyTM typeAxiomsRList \dicts (tcR, tcL) -> do
+    -- Gather the information to construct the coercion.
+    let prov = PluginProv "pantomime user-defined"
+    let tyL = mkTyConTy tcL
+    let tyR = mkTyConTy tcR
+    let co = mkUnivCo prov Representational tyL tyR
+
+    let typeRepr ty = failWith () do
+          (sort, rty) <- sORTKind_maybe $ typeKind ty
+          case sort of
+            TypeLike -> pure rty
+            ConstraintLike -> empty
+
+    -- Gather the information to construct the final dictionary.
+    repL <- typeRepr tyL
+    repR <- typeRepr tyR
+    let con = Var . dataConWorkId . classDataCon $ embedCls
+    -- TODO: For now, we're not really constructing the private typeclass
+    -- correctly. I don't think it's important for our use case, but it is not
+    -- very nice to do it like this.
+    let private = unitExpr
+
+    -- Construct the embed function.
+    let (idE, _) = freshId "arg" (unrestricted tyL) emptyInScopeSet
+    let embed = Lam idE $ mkCast (Var idE) co
+
+    -- Construct the project function.
+    let (idP, _) = freshId "arg" (unrestricted tyR) emptyInScopeSet
+    let project = Lam idP $ mkCast (Var idP) (mkSymCo co)
+
+    -- Construct the typeclass dictionary.
+    let dict = mkApps con
+          [ Type repL
+          , Type repR
+          , Type tyL
+          , Type tyR
+          , private
+          , embed
+          , project
+          ]
+    let ty = exprType dict
+    pure $ insertTM ty dict dicts
 
   -- TODO: We should first ensure that termAxioms do not contain duplicate
   -- definitions.

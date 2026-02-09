@@ -99,7 +99,12 @@ import Pantomime.Expr
   , throwE
   )
 import Pantomime.Util (SomeBitVec (..), SymBitVec)
-import Pantomime.Literal (BuiltInTyCon (..), LiteralTypeable, SomeLiteralType, projectLitTy)
+import Pantomime.Literal
+  ( BuiltInTyCon (..)
+  , LiteralTypeable
+  , SomeLiteralType
+  , projectLitTy
+  )
 
 -- TODO: We could think about making this slightly more structured? Maybe
 -- introduce a language similar to a GHC Type? Really, the only reason we are
