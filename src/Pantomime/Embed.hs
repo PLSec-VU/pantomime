@@ -59,6 +59,8 @@ import GHC.Plugins
   , mkNumLitTy
   , mkSubCo
   , mkSymCo
+  , splitTyConApp_maybe
+  , tyConDataCons_maybe
   , noSrcSpan
   , extendTvSubst
   , naturalTy
@@ -86,17 +88,24 @@ import Pantomime.Expr
   , Eval
   , EvalExpr
   , mkLit
+  , mkCon
+  , mkDataCon
   , mkBool
   , mkInteger
   , mkBitVec
   , mkArray
   , mkLam
   , mkApp
+  , mkApps
   , mkType
+  , mkCoercion
   , mkCast
+  , collectArgs
   , forceTy
+  , forceCo
   , liftEff
   , throwE
+  , failWithE
   )
 import Pantomime.Util (SomeBitVec (..), SymBitVec)
 import Pantomime.Literal
@@ -136,6 +145,7 @@ data Ty where
   BoxedRep :: Ty -> Ty
   LevityTy :: Ty
   Lifted :: Ty
+  UnsafeEqualityTy :: Ty -> Ty -> Ty -> Ty
   -- TODO: We probably want UnsafeEqualityTy here as well! Alternatively we
   -- could expose our own version, but I don't see the point!
 
@@ -214,6 +224,9 @@ instance Reflect LevityTy where
 instance Reflect Lifted where
   reflect = SLifted
 
+instance (Reflect k, Reflect a, Reflect b) => Reflect (UnsafeEqualityTy k a b) where
+  reflect = SUnsafeEqualityTy reflect reflect reflect
+
 type family Repr a es where
   Repr BoolTy _ = SymBool
   Repr IntegerTy _ = SymInteger
@@ -237,6 +250,7 @@ type family Repr a es where
   Repr (BoxedRep _) _ = Void
   Repr LevityTy _ = Void
   Repr Lifted _ = Void
+  Repr (UnsafeEqualityTy _ _ _) _ = CoercionN
 
 -- TODO: I guess having the whole type thing is a bit overkill. Really, we could
 -- just remove it and place the 'Repr' typeclass inside of the rhs of 'STy'
@@ -260,6 +274,7 @@ data STy a where
   SBoxedRep :: STy l -> STy ('BoxedRep l)
   SLevityTy :: STy 'LevityTy
   SLifted :: STy 'Lifted
+  SUnsafeEqualityTy :: STy k -> STy a -> STy b -> STy ('UnsafeEqualityTy k a b)
 
 embed
   :: forall a es
@@ -352,6 +367,29 @@ embed' subst sty repr = case sty of
   SBoxedRep _ -> repr >>= absurd
   SLevityTy -> repr >>= absurd
   SLifted -> repr >>= absurd
+  SUnsafeEqualityTy _ _ _ -> do
+    -- Get the type of the expression.
+    ty <- liftEff $ embedSTy subst sty
+    (tc, args) <- failWithE () $ splitTyConApp_maybe ty
+
+    -- Fetch the 'UnsafeRefl' DataCon.
+    dc <- case tyConDataCons_maybe tc of
+      Just [dc] -> pure dc
+      _ -> throwE ()
+
+    -- Construct the spine.
+    let spine = mkCon $ mkDataCon @64 dc
+
+    -- Fetch the type arguments directly.
+    (kind, tyL, tyR) <- case args of
+      [kind, tyL, tyR] -> pure (kind, tyL, tyR)
+      _ -> throwE ()
+
+    -- Force the coercion.
+    co <- repr
+
+    -- Construct the final expressionexpression
+    mkApps spine $ pure <$> [mkType kind, mkType tyL, mkType tyR, mkCoercion co]
 
 project'
   :: HasCallStack
@@ -432,6 +470,12 @@ project' subst sty expr = case sty of
   SBoxedRep _ -> throwE ()
   SLevityTy -> throwE ()
   SLifted -> throwE ()
+  SUnsafeEqualityTy _ _ _ -> do
+    expr' <- expr
+    let (_spine, args) = collectArgs expr'
+    case args of
+      [_kind, _ty, co] -> liftEff $ forceCo co
+      _ -> throwE ()
 
 embedSTy
   :: HasCallStack
@@ -497,6 +541,11 @@ embedSTy' ty = do
       pure $ mkTyConApp boxedRepDataConTyCon [levity']
     SLevityTy -> pure levityTy
     SLifted -> pure liftedDataConTy
+    SUnsafeEqualityTy k a b -> do
+      k' <- embedSTy' k
+      a' <- embedSTy' a
+      b' <- embedSTy' b
+      pure $ mkTyConApp tcUnsafeEquality [k', a', b']
 
 mkTemplateTyVar'
   :: forall n a es

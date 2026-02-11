@@ -3,6 +3,8 @@ module Pantomime.PrimOps
   ( ite
   , tagToEnum
   , dataToTag
+  , raise
+  , unsafeEqualityProof
 
   -- | Boolean operations.
   , true
@@ -48,6 +50,8 @@ module Pantomime.PrimOps
   , bvult
   , bvslt
   , bvconcat
+  , bvzext
+  , bvsext
   , bvselect
 
   -- | Array primitive operations.
@@ -60,12 +64,13 @@ import Data.Bits (Bits((.&.), (.|.), complement))
 import Data.Bits qualified as Bits (xor)
 import Data.Typeable (type (:~:) (..), eqT, Proxy (..))
 
-import Effectful
-import Effectful.Context
-import Effectful.Error.Static
+import Effectful (type (:>))
+import Effectful.Context (Context, ContextMode(..))
+import Effectful.Error.Static (HasCallStack, Error)
 import Effectful.GHC.External (HasFamInstEnvs)
 
-import GHC.Plugins (emptySubst, dataConTagZ)
+import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
+import GHC.Plugins (Role (..), emptySubst, dataConTagZ, mkUnivCo)
 import GHC.TypeLits (type (<=), SomeNat (..))
 
 import Grisette
@@ -84,7 +89,17 @@ import Grisette qualified (LogicalOp (true, false))
 import Grisette.Internal.SymPrim.SymArray qualified as Array
 
 import Pantomime.Embed
-import Pantomime.Expr (EvalExpr, failWithE, Expr (..), throwE, mkLit, mkEnumCon, Constructor (..), collectArgs)
+import Pantomime.Expr
+  ( EvalExpr
+  , Expr (..)
+  , Constructor (..)
+  , collectArgs
+  , mkLit
+  , mkEnumCon
+  , mkRaise
+  , failWithE
+  , throwE
+  )
 import Pantomime.Literal
   ( BuiltInTyCon
   , SomeLiteralType (..)
@@ -127,15 +142,14 @@ type PrimOpExpr es
 -- still a definition is not possible.
 -- :: forall r (a :: TYPE r). Bool -> r -> r -> r
 type ITEOp
-  =   Forall 0 RuntimeRepTy
-  :.  Forall 1 (TyVar 0 RuntimeRepTy)
+  =   Forall 1 TypeKind
   :.  BoolTy
   :-> TyVar 1 (TyVar 0 RuntimeRepTy)
   :-> TyVar 1 (TyVar 0 RuntimeRepTy)
   :-> TyVar 1 (TyVar 0 RuntimeRepTy)
 
 ite :: PrimOpExpr es
-ite = embed @ITEOp emptySubst $ liftF5 \_ _ scrut tr fl -> do
+ite = embed @ITEOp emptySubst $ liftF4 \_ scrut tr fl -> do
   scrut' <- scrut
   mrgIte scrut' tr fl
 
@@ -176,6 +190,32 @@ dataToTag = embed @DataToTagOp emptySubst $ liftF3 \_ _ valueE -> do
     Con (DataCon dc) -> pure $ SomeBitVec @64 (fromIntegral $ dataConTagZ dc)
     Con (EnumCon @n tag _) | Just Refl <- eqT @n @64 -> pure $ SomeBitVec tag
     _ -> throwE ()
+
+type RaiseOp
+  =   Forall 0 LevityTy
+  :.  Forall 1 RuntimeRepTy
+  :.  Forall 2 (TYPE (BoxedRep (TyVar 0 LevityTy)))
+  :.  Forall 3 (TYPE (TyVar 1 RuntimeRepTy))
+  :.  TyVar 2 (TYPE (BoxedRep (TyVar 0 LevityTy)))
+  :-> TyVar 3 (TYPE (TyVar 1 RuntimeRepTy))
+
+raise :: PrimOpExpr es
+raise = embed @RaiseOp emptySubst $ liftF5 \_ _ _ _ err -> do
+  mkRaise err
+
+type UnsafeEqualityProofOp
+  =   Forall 0 TypeKind
+  :.  Forall 1 (TyVar 0 TypeKind)
+  :.  Forall 2 (TyVar 0 TypeKind)
+  :.  UnsafeEqualityTy
+        (TyVar 0 TypeKind)
+        (TyVar 1 (TyVar 0 TypeKind))
+        (TyVar 2 (TyVar 0 TypeKind))
+
+unsafeEqualityProof :: PrimOpExpr es
+unsafeEqualityProof = embed @UnsafeEqualityProofOp emptySubst $ liftF3 \_ tyL tyR -> do
+  let prov = PluginProv "pantomime reified 'unsafeEqualityProof'"
+  pure $ mkUnivCo prov Nominal tyR tyL
 
 true :: PrimOpExpr es
 true = embed @BoolTy emptySubst $ pure Grisette.true
@@ -441,6 +481,38 @@ bvconcat = embed @ConcatBitVecOp emptySubst $ liftF4 \_ _ lhs rhs -> do
   Dict <- pure $ unsafeDict @(1 <= n)
   pure $ SomeBitVec (sizedBVConcat lhs' rhs')
 
+-- forall ext n. KnownNat ext => BitVec n -> BitVec (ext + n)
+type ExtendBitVecOp
+  =   Forall 0 NaturalTy
+  :.  Forall 1 NaturalTy
+  :.  KnownNatTy (TyVar 0 NaturalTy)
+  :-> BitVecTy (TyVar 1 NaturalTy)
+  :-> BitVecTy (TyVar 0 NaturalTy :+ TyVar 1 NaturalTy)
+
+bvextend
+  :: ( forall l r
+     . KnownPos l
+    => KnownPos r
+    => l <= r
+    => Proxy r
+    -> SymBitVec l
+    -> SymBitVec r
+     )
+  -> PrimOpExpr es
+bvextend f = embed @ExtendBitVecOp emptySubst $ liftF4 \_ _ ext bv -> do
+  SomeNat @ext _ <- ext
+  SomeBitVec @n bv' <- bv
+  SomeNat' @sum <- pure $ typeAdd @ext @n
+  Dict <- failWithE () $ leqNat @n @sum
+  Dict <- failWithE () $ posNat @sum
+  pure $ SomeBitVec (f (Proxy @sum) bv')
+
+bvzext :: PrimOpExpr es
+bvzext = bvextend sizedBVZext
+
+bvsext :: PrimOpExpr es
+bvsext = bvextend sizedBVSext
+
 -- :: forall idx width n
 --  . KnownNat idx
 -- => KnownNat width
@@ -464,7 +536,6 @@ bvselect = embed @SelectBitVecOp emptySubst $ liftF8 \_ _ _ idx width _ _  bv ->
   SomeNat @idx _ <- idx
   SomeNat @width _ <- width
   SomeBitVec @n bv' <- bv
-  Dict <- failWithE () $ posNat @idx
   Dict <- failWithE () $ posNat @width
   SomeNat' @sum <- pure $ typeAdd @idx @width
   Dict <- failWithE () $ leqNat @sum @n
