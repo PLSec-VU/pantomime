@@ -307,6 +307,7 @@ data BuiltInTyCon where
     , tcPrimitive :: TyCon
     , tcKnownNat :: TyCon
     , tcLEqNat :: TyCon
+    , tcUnsafeEquality :: TyCon
     } -> BuiltInTyCon
 
 -- | Convert a 'LiteralType' into a Haskell 'Type'.
