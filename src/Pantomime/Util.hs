@@ -13,7 +13,6 @@ module Pantomime.Util
   , foldrM'
   , foldlBy
 
-  , whyFail
   , failWith
   , withCallStack
   , dbg
@@ -29,6 +28,7 @@ module Pantomime.Util
 
 import GHC.Plugins hiding (empty)
 import GHC.Core.Multiplicity (Scaled(..))
+import GHC.Stack (withFrozenCallStack)
 import GHC.TypeLits (KnownNat, SomeNat (..), type (<=))
 
 import Grisette
@@ -40,7 +40,10 @@ import Grisette
   , wrapStrategy
   )
 
+import Data.Data (Proxy(..))
+import Data.Constraint (Dict(..))
 import Data.Foldable (foldrM)
+import Data.Typeable (type (:~:)(..), eqT)
 
 import Control.Monad (foldM, foldM_)
 import Control.Monad.State (state, runState)
@@ -50,10 +53,8 @@ import Lens.Micro (Lens)
 import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, CallStack, throwError_)
 import Effectful.Dispatch.Static (unsafeEff_)
-import Data.Data (Proxy(..))
-import Data.Constraint (Dict(..))
+
 import Pantomime.Dict (unsafeDict)
-import Data.Typeable (type (:~:)(..), eqT)
 import Pantomime.Grisette.Mergeable (impossible)
 
 -- | Type alias for known naturals that are positive.
@@ -126,14 +127,9 @@ foldrM' acc xs f = foldrM f acc xs
 foldlBy :: Foldable t => b -> t a -> (b -> a -> b) -> b
 foldlBy acc xs f = foldl' f acc xs
 
--- TODO: Remove whyFail in favor of failWith.
--- | Annotate why there was no result.
-whyFail :: HasCallStack => Error e :> es => e -> Maybe a -> Eff es a
-whyFail err = maybe (throwError_ err) pure
-
 -- | Annotate why there was no result.
 failWith :: HasCallStack => Error e :> es => e -> Maybe a -> Eff es a
-failWith err = maybe (throwError_ err) pure
+failWith err = maybe (withFrozenCallStack throwError_ err) pure
 
 -- | Fill a 'HasCallStack' constraint with a local call stack.
 withCallStack :: CallStack -> (HasCallStack => a) -> a
