@@ -866,6 +866,11 @@ unthunk = \case
 -- 'collectCon'? The part about collecting literals feels like it should not
 -- live here, as it is specific to the bindings with Haskell. The Coercion part
 -- feels also a bit misplaced.
+--
+-- Actually, we changed it now because as it turns out, you can also scrutinise
+-- other stuff. For example, a function can be scrutinised. Not that you can
+-- actually pattern match it, but it is valid to match 'DEFAULT' on it and just
+-- use it to force the value!
 -- | Collect the arguments of a scrutinee.
 --
 -- This will drop any universal type applications as these are not necessary for
@@ -876,7 +881,7 @@ collectScrut
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Expr es
-  -> Eval es (Either Coercion Constructor, [Arg es])
+  -> Eval es (Either (Expr es) Constructor, [Arg es])
 collectScrut = \case
   -- On a cast, we may attempt to push a TyConAppCo into the arguments of
   -- a DataCon literal.
@@ -912,8 +917,7 @@ collectScrut = \case
     -- universal arguments.
     (spine', nUniv) <- case spine of
       Con con -> pure (Right con, tyConArity $ constructorTyCon con)
-      Coercion co -> pure (Left co, 0)
-      _ -> throwE ()
+      _ -> pure (Left spine, 0)
 
     -- Drop the universal arguments and return.
     let args' = drop nUniv args
