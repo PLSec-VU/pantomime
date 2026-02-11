@@ -8,16 +8,14 @@ module Pantomime.Axiom
   , resolvePluginAxioms
   ) where
 
+import Prelude hiding (break)
 import Language.Haskell.TH qualified as TH
 
 import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
 import GHC.Core.TyCon.Env (TyConEnv, mkTyConEnv)
-import GHC.Core.TyCo.Compare (eqType)
 import GHC.Data.TrieMap (TrieMap (..), insertTM)
 import GHC.Plugins
-  ( Unfolding (..)
-  , InlineSpec (..)
-  , TyCon (..)
+  ( TyCon (..)
   , Name
   , Id
   , CoreExpr
@@ -25,7 +23,6 @@ import GHC.Plugins
   , Role (..)
   , Expr (..)
   , Var (..)
-  , InlinePragma (..)
   , TypeOrConstraint (..)
   , mkTyConTy
   , mkUnivCo
@@ -34,24 +31,24 @@ import GHC.Plugins
   , mkCast
   , mkSymCo
   , exprType
-  , hasCoreUnfolding
-  , realIdUnfolding
-  , idInlinePragma
   , classDataCon
   , typeKind
   , unitExpr
   , unrestricted
   , emptyInScopeSet
   , sORTKind_maybe
+  , coercibleDataCon
   )
+import GHC.Tc.Utils.TcType (eqType)
 import GHC.Utils.Outputable (Outputable (..), IsDoc (..), hang)
 
 import GHC.Exts (IsList(..))
 
-import Control.Monad ((>=>), unless)
+import Control.Monad ((>=>), guard, when)
 import Control.Applicative (Alternative (..))
 
 import Data.Data (Data)
+import Data.Function (on)
 import Data.Map (Map)
 import Data.Typeable (Typeable)
 import Data.Traversable (for)
@@ -63,8 +60,8 @@ import Effectful.GHC.TyThing
 import Effectful.Context
 
 import Pantomime.BuiltIn (Embeddable)
-import Pantomime.Unification (resolveInstancesWith)
-import Pantomime.Util (foldM', freshId, failWith)
+import Pantomime.Unification (subsumeExpr)
+import Pantomime.Util (foldM', freshId, foldlBy)
 
 -- TODO: We're switching away from using 'Coercible' as it requires same runtime
 -- kinded types: something we don't care about within the evaluator. Instead,
@@ -240,7 +237,8 @@ resolvePluginAxioms PluginAxioms { .. } = do
   typeAxiomsRList <- for (toList typeAxioms) \(orig, interp) -> do
     let resolve = thNameToGhcName >=> lookupTyConAll
     -- TODO: Should we ensure that the original TyCon is a data-type or newtype?
-    -- Otherwise, the conversion might be very fragile!
+    -- Otherwise, the conversion might be very fragile! Not sure if I'm missing
+    -- any here.
     orig' <- resolve orig
     interp' <- resolve interp
     pure (orig', interp')
@@ -253,41 +251,94 @@ resolvePluginAxioms PluginAxioms { .. } = do
     let tyR = mkTyConTy tcR
     let co = mkUnivCo prov Representational tyL tyR
 
-    let typeRepr ty = failWith () do
-          (sort, rty) <- sORTKind_maybe $ typeKind ty
-          case sort of
-            TypeLike -> pure rty
-            ConstraintLike -> empty
+    -- Gather the dictionaries for 'Coercible'.
+    let dictCo = do
+          -- Get the kind of the coercible TyCon.
+          let kind = tyConKind tcL
 
+          -- Ensure the kind and roles match up.
+          let eqKind = eqType kind $ tyConKind tcR
+          let eqRoles = all (uncurry (==)) $ on zip tyConRoles tcL tcR
+          guard $ eqKind && eqRoles
+
+          -- Box the coercion.
+          let eqVar = Var $ dataConWorkId coercibleDataCon
+          let dictL = mkApps eqVar
+                [ Type kind
+                , Type tyL
+                , Type tyR
+                , Coercion co
+                ]
+          let dictR = mkApps eqVar
+                [ Type kind
+                , Type tyR
+                , Type tyL
+                , Coercion $ mkSymCo co
+                ]
+          pure (dictL, dictR)
+
+    -- TODO: At some point I want to have 'Embeddable' to act like 'Coercible',
+    -- with the adjustment that we can also generate dictionaries here where
+    -- the final kind can differ. So to be precise, the kinds need to match up
+    -- precisely except the result kind. This one always has to be of kind
+    -- 'TYPE r' but the runtime representations do not have to match.
     -- Gather the information to construct the final dictionary.
-    repL <- typeRepr tyL
-    repR <- typeRepr tyR
-    let con = Var . dataConWorkId . classDataCon $ embedCls
-    -- TODO: For now, we're not really constructing the private typeclass
-    -- correctly. I don't think it's important for our use case, but it is not
-    -- very nice to do it like this.
-    let private = unitExpr
+    --
+    -- Note that for all normal intents and purposes, 'Embeddable' should only
+    -- have instances when the kinds match up exactly. Only axioms may have
+    -- their representation differ, as these will never reach the runtime.
+    --
+    -- At that point, we can also just evict the 'Coercible' instance that we
+    -- build up here.
+    -- Gather the dictionaries for 'Embeddable'.
+    let dictEm = do
+          -- Gather the RuntimeRep of the given types.
+          let runtimeRep ty = do
+                (sort, rty) <- sORTKind_maybe $ typeKind ty
+                case sort of
+                  TypeLike -> pure rty
+                  ConstraintLike -> empty
 
-    -- Construct the embed function.
-    let (idE, _) = freshId "arg" (unrestricted tyL) emptyInScopeSet
-    let embed = Lam idE $ mkCast (Var idE) co
+          repL <- runtimeRep tyL
+          repR <- runtimeRep tyR
+          let con = Var . dataConWorkId . classDataCon $ embedCls
+          -- TODO: For now, we're not really constructing the private typeclass
+          -- correctly. I don't think it's important for our use case, but it is
+          -- not very nice to do it like this.
+          let private = unitExpr
 
-    -- Construct the project function.
-    let (idP, _) = freshId "arg" (unrestricted tyR) emptyInScopeSet
-    let project = Lam idP $ mkCast (Var idP) (mkSymCo co)
+          -- Construct the embed function.
+          let (idE, _) = freshId "arg" (unrestricted tyL) emptyInScopeSet
+          let embed = Lam idE $ mkCast (Var idE) co
 
-    -- Construct the typeclass dictionary.
-    let dict = mkApps con
-          [ Type repL
-          , Type repR
-          , Type tyL
-          , Type tyR
-          , private
-          , embed
-          , project
-          ]
-    let ty = exprType dict
-    pure $ insertTM ty dict dicts
+          -- Construct the project function.
+          let (idP, _) = freshId "arg" (unrestricted tyR) emptyInScopeSet
+          let project = Lam idP $ mkCast (Var idP) (mkSymCo co)
+
+          -- Construct the typeclass dictionary.
+          pure $ mkApps con
+            [ Type repL
+            , Type repR
+            , Type tyL
+            , Type tyR
+            , private
+            , embed
+            , project
+            ]
+
+    -- Actually collect all dictionaries.
+    let dictCo' = maybe [] (\(l, r) -> [l, r]) dictCo
+    let dictEm' = maybe [] (: []) dictEm
+    let dictsNew = dictCo' <> dictEm'
+
+    -- Throw an error if we could not create any.
+    when (null dictsNew) do
+      throwError ()
+
+    -- Insert all dictionaries.
+    pure $ foldlBy dicts dictsNew \acc dict -> do
+      let ty = exprType dict
+      insertTM ty dict acc
 
   -- TODO: We should first ensure that termAxioms do not contain duplicate
   -- definitions.
@@ -300,44 +351,40 @@ resolvePluginAxioms PluginAxioms { .. } = do
     orig' <- resolve orig
     interp' <- resolve interp
 
-    -- Gather the expression of the interpretation.
-    -- TODO: Should we also attempt to get it from the local bindings?
-    expr <- case realIdUnfolding interp' of
-      CoreUnfolding { uf_tmpl } -> pure uf_tmpl
-      _ -> throwError_ ()
+    -- TODO: I'm not sure what to do with this. Should we just always resolve
+    -- using the embeddings?
+    -- -- Gather the expression of the interpretation.
+    -- -- TODO: Should we also attempt to get it from the local bindings?
+    -- expr <- case realIdUnfolding interp' of
+    --   CoreUnfolding { uf_tmpl } -> pure uf_tmpl
+    --   _ -> throwError_ ()
 
-    -- Check whether the original target can be interpreted.
-    expr' <- case inl_inline $ idInlinePragma orig' of
-      -- Opaque values can be fully interpreted. Hence, we resolve any coercions
-      -- that were provided by the user.
-      Opaque _ -> pure $ resolveInstancesWith dicts expr
+    -- -- Check whether the original target can be interpreted.
+    -- dicts' <- case inl_inline $ idInlinePragma orig' of
+    --   -- Opaque values can be fully interpreted. Hence, we resolve any coercions
+    --   -- that were provided by the user.
+    --   Opaque _ -> pure dicts
 
-      -- We only want to interpret no-inline if the unfolding was not available.
-      NoInline _ | not . hasCoreUnfolding $ realIdUnfolding orig' -> pure expr
+    --   -- We only want to interpret no-inline if the unfolding was not available.
+    --   NoInline _ | not . hasCoreUnfolding $ realIdUnfolding orig' -> do
+    --     pure emptyTM
 
-      -- It is fragile to interpret inlineable instances, as they may already
-      -- have been optimised away.
-      -- FIXME: It seems that the 'noinline' function has a NOINLINE pragma
-      -- but when testing it here, it doesn't. I feel like this test is the
-      -- correct one but it doesn't work in this case. I'll leave it like this
-      -- for now.
-      --
-      -- Actually, I ran into an issue where the function I wanted to call had
-      -- a NOINLINE on an inner value (that was not exported). Perhaps it still
-      -- makes sense to overwrite definitions, even if they can be inlined? I
-      -- guess it is still pretty fragile...
-      -- _ -> throwError_ ()
-      _ -> pure expr
+    --   -- It is fragile to interpret inlineable instances, as they may already
+    --   -- have been optimised away.
+    --   -- FIXME: It seems that the 'noinline' function has a NOINLINE pragma
+    --   -- but when testing it here, it doesn't. I feel like this test is the
+    --   -- correct one but it doesn't work in this case. I'll leave it like this
+    --   -- for now.
+    --   --
+    --   -- Actually, I ran into an issue where the function I wanted to call had
+    --   -- a NOINLINE on an inner value (that was not exported). Perhaps it still
+    --   -- makes sense to overwrite definitions, even if they can be inlined? I
+    --   -- guess it is still pretty fragile...
+    --   -- _ -> throwError_ ()
+    --   _ -> pure emptyTM
 
     -- Check whether the interpretation matches.
-    -- TODO: We should allow types that require less dictionaries. The CoreExpr
-    -- should be adjusted to have them as arguments, but leave them unused.
-    -- Very likely, we can use the unification code we already have. We just
-    -- want to see after unifying and applying all dictionaries from both of
-    -- them, that the type is actually the same as the original. This also
-    -- immediately shapes the expression into the correct form!
-    unless (varType orig' `eqType` exprType expr') do
-      throwError_ ()
+    expr' <- subsumeExpr dicts (Var interp') $ varType orig'
 
     -- Return the mapping.
     pure (orig', expr')
