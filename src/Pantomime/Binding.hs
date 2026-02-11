@@ -23,6 +23,7 @@ import Pantomime.BuiltIn qualified as Builtin
 import Pantomime.PrimOps qualified as PrimOps
 import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Expr (EvalExpr)
+import Unsafe.Coerce qualified as Builtin (UnsafeEquality, unsafeEqualityProof)
 
 -- TODO: I need a better name for this!
 -- I guess these could also be 'BuiltInOps', 'BuiltInIds' or at least something
@@ -98,6 +99,7 @@ getBuiltinTyCon = do
   tcPrimitive <- thNameToTyCon ''Builtin.Primitive
   tcKnownNat <- thNameToTyCon ''Builtin.KnownNat
   tcLEqNat <- thNameToTyCon ''(Builtin.<=)
+  tcUnsafeEquality <- thNameToTyCon ''Builtin.UnsafeEquality
   pure BuiltInTyCon { .. }
 
 bindingsTH
@@ -111,6 +113,8 @@ bindingsTH =
   [ ('Builtin.ite, PrimOps.ite)
   , ('Builtin.tagToEnum, PrimOps.tagToEnum)
   , ('Builtin.dataToTag, PrimOps.dataToTag)
+  , ('Builtin.raise, PrimOps.raise)
+  , ('Builtin.unsafeEqualityProof, PrimOps.unsafeEqualityProof)
 
   -- Boolean bindings
   , ('Builtin.true, PrimOps.true)
@@ -156,6 +160,8 @@ bindingsTH =
   , ('Builtin.bvult, PrimOps.bvult)
   , ('Builtin.bvslt, PrimOps.bvslt)
   , ('Builtin.bvconcat, PrimOps.bvconcat)
+  , ('Builtin.bvzext, PrimOps.bvzext)
+  , ('Builtin.bvsext, PrimOps.bvsext)
   , ('Builtin.bvselect, PrimOps.bvselect)
 
   , ('Builtin.aconst, PrimOps.aconst)

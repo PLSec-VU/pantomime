@@ -82,8 +82,8 @@ runBuiltInTypes
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : es) b
-  -> Eff es b
+  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : es) a
+  -> Eff es a
 runBuiltInTypes eff = do
   tys <- getBuiltinTyCon
   ids <- getInterfaceThings

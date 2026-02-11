@@ -5,6 +5,8 @@
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE UndecidableSuperClasses #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE UnliftedDatatypes #-}
 
 -- TODO: Perhaps 'Base' would be better than 'BuiltIn', because not everything
 -- here is necessarily built-in.
@@ -31,6 +33,7 @@ module Pantomime.BuiltIn
   -- WARNING: These functions should not be called directly. Their purpose is
   -- to receive an interpretation such that the symbolic engine knows how to
   -- construct these literals from GHC Core.
+  , PlatformWordSize
   , toInt#
   , toInt8#
   , toInt16#
@@ -54,8 +57,19 @@ module Pantomime.BuiltIn
 
   -- | System Fc operations.
   , ite
+  , iteIP
+  , iteI8
+  , iteI16
+  , iteI32
+  , iteI64
+  , iteWP
+  , iteW8
+  , iteW16
+  , iteW32
+  , iteW64
   , tagToEnum
   , dataToTag
+  , raise
 
   -- | Boolean operations.
   , Bool (True, False)
@@ -104,6 +118,8 @@ module Pantomime.BuiltIn
   , bvult
   , bvslt
   , bvconcat
+  , bvzext
+  , bvsext
   , bvselect
 
   -- | Array operations.
@@ -116,7 +132,7 @@ module Pantomime.BuiltIn
 import Data.Coerce (coerce)
 import GHC.Base
   ( TYPE
-  , RuntimeRep (BoxedRep)
+  , RuntimeRep (..)
   , Int#
   , Int8#
   , Int16#
@@ -143,6 +159,8 @@ class Private a b => Embeddable (a :: TYPE r1) (b :: TYPE r2) where
   embed :: a -> b
   project :: b -> a
 
+-- class Private a b => Embeddable (a :: k1) (b :: k2)
+
 -- embed
 --   :: forall {r1} {r2} (a :: TYPE r1) (b :: TYPE r2)
 --    . Embeddable a b
@@ -157,12 +175,14 @@ type family Primitive a :: Constraint where
   Primitive (Array k v) = (Primitive k, Primitive v)
   Primitive x = TypeError ('Text "'" :<>: ShowType x :<>: 'Text "' is not a primitive type")
 
--- TODO: For now, we'll just have the platform sized int as 64-bit. Not sure how
+-- TODO: For now, we'll just have the platform sized as 64-bit. Not sure how
 -- we would handle this correctly? Maybe with a pragma?
+type PlatformWordSize = 64
+
 -- | Literal construction function for built-in Haskell 'Int#' literal. Note
 -- that
 {-# OPAQUE toInt# #-}
-toInt# :: BitVec 64 -> Int#
+toInt# :: BitVec PlatformWordSize -> Int#
 toInt# = toInt#
 
 {-# OPAQUE toInt8# #-}
@@ -182,7 +202,7 @@ toInt64# :: BitVec 64 -> Int64#
 toInt64# = toInt64#
 
 {-# OPAQUE toWord# #-}
-toWord# :: BitVec 64 -> Word#
+toWord# :: BitVec PlatformWordSize -> Word#
 toWord# = toWord#
 
 {-# OPAQUE toWord8# #-}
@@ -248,8 +268,70 @@ eqWord64# = eqWord64#
 
 -- | Primitive if-then-else construct.
 {-# OPAQUE ite #-}
-ite :: forall l (a :: TYPE (BoxedRep l)). Bool -> a -> a -> a
-ite = ite
+ite :: Bool -> a -> a -> a
+ite (Bool scrut) tr fl = case scrut of
+  Prelude.True -> tr
+  Prelude.False -> fl
+
+data IP (a :: TYPE IntRep) where
+  IP :: a -> IP a
+
+iteIP :: forall (a :: TYPE IntRep). Bool -> a -> a -> a
+iteIP scrut tr fl = let !(IP value) = ite scrut (IP tr) (IP fl) in value
+
+data I8 (a :: TYPE Int8Rep) where
+  I8 :: a -> I8 a
+
+iteI8 :: forall (a :: TYPE Int8Rep). Bool -> a -> a -> a
+iteI8 scrut tr fl = let !(I8 value) = ite scrut (I8 tr) (I8 fl) in value
+
+data I16 (a :: TYPE Int16Rep) where
+  I16 :: a -> I16 a
+
+iteI16 :: forall (a :: TYPE Int16Rep). Bool -> a -> a -> a
+iteI16 scrut tr fl = let !(I16 value) = ite scrut (I16 tr) (I16 fl) in value
+
+data I32 (a :: TYPE Int32Rep) where
+  I32 :: a -> I32 a
+
+iteI32 :: forall (a :: TYPE Int32Rep). Bool -> a -> a -> a
+iteI32 scrut tr fl = let !(I32 value) = ite scrut (I32 tr) (I32 fl) in value
+
+data I64 (a :: TYPE Int64Rep) where
+  I64 :: a -> I64 a
+
+iteI64 :: forall (a :: TYPE Int64Rep). Bool -> a -> a -> a
+iteI64 scrut tr fl = let !(I64 value) = ite scrut (I64 tr) (I64 fl) in value
+
+data WP (a :: TYPE WordRep) where
+  WP :: a -> WP a
+
+iteWP :: forall (a :: TYPE WordRep). Bool -> a -> a -> a
+iteWP scrut tr fl = let !(WP value) = ite scrut (WP tr) (WP fl) in value
+
+data W8 (a :: TYPE Word8Rep) where
+  W8 :: a -> W8 a
+
+iteW8 :: forall (a :: TYPE Word8Rep). Bool -> a -> a -> a
+iteW8 scrut tr fl = let !(W8 value) = ite scrut (W8 tr) (W8 fl) in value
+
+data W16 (a :: TYPE Word16Rep) where
+  W16 :: a -> W16 a
+
+iteW16 :: forall (a :: TYPE Word16Rep). Bool -> a -> a -> a
+iteW16 scrut tr fl = let !(W16 value) = ite scrut (W16 tr) (W16 fl) in value
+
+data W32 (a :: TYPE Word32Rep) where
+  W32 :: a -> W32 a
+
+iteW32 :: forall (a :: TYPE Word32Rep). Bool -> a -> a -> a
+iteW32 scrut tr fl = let !(W32 value) = ite scrut (W32 tr) (W32 fl) in value
+
+data W64 (a :: TYPE Word64Rep) where
+  W64 :: a -> W64 a
+
+iteW64 :: forall (a :: TYPE Word64Rep). Bool -> a -> a -> a
+iteW64 scrut tr fl = let !(W64 value) = ite scrut (W64 tr) (W64 fl) in value
 
 -- | Tag to enumeration conversion with the intent to match 'tagToEnum#'.
 --
@@ -257,14 +339,19 @@ ite = ite
 -- enumeration, unlike the real 'tagToEnum#'. Hence, this function is incredibly
 -- unsafe.
 {-# OPAQUE tagToEnum #-}
-tagToEnum :: forall a. BitVec 64 -> a
+tagToEnum :: forall a. BitVec PlatformWordSize -> a
 tagToEnum = tagToEnum
 
 -- | Returns the index (starting at zero) of the constructor used to produce
 -- the given argument.
 {-# OPAQUE dataToTag #-}
-dataToTag :: forall l (a :: TYPE (BoxedRep l)). a -> BitVec 64
+dataToTag :: forall l (a :: TYPE (BoxedRep l)). a -> BitVec PlatformWordSize
 dataToTag = dataToTag
+
+-- | Raise a error in the Haskell runtime.
+{-# OPAQUE raise #-}
+raise :: forall {l} {r} (a :: TYPE (BoxedRep l)) (b :: TYPE r). a -> b
+raise = raise
 
 -- TODO: We should provide implementations for many of the common typeclasses.
 -- For now, this suffices.
@@ -465,6 +552,14 @@ bvslt = bvslt
 {-# OPAQUE bvconcat #-}
 bvconcat :: forall l r. BitVec l -> BitVec r -> BitVec (l + r)
 bvconcat = bvconcat
+
+{-# OPAQUE bvzext #-}
+bvzext :: forall ext n. BitVec n -> BitVec (ext + n)
+bvzext = bvzext
+
+{-# OPAQUE bvsext #-}
+bvsext :: forall ext n. BitVec n -> BitVec (ext + n)
+bvsext = bvzext
 
 {-# OPAQUE bvselect #-}
 bvselect
