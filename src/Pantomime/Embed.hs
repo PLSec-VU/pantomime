@@ -29,7 +29,7 @@ import Data.Data (Proxy (..))
 import Data.Void (Void, absurd)
 
 import Effectful
-import Effectful.Error.Static (Error, HasCallStack, throwError)
+import Effectful.Error.Static (Error, HasCallStack)
 import Effectful.Context
 import Effectful.GHC.External (HasFamInstEnvs, getFamInstEnvs)
 
@@ -38,7 +38,7 @@ import GHC.Builtin.Uniques (mkAlphaTyVarUnique)
 import GHC.Core.Type (substTy)
 import GHC.Core.FamInstEnv (normaliseType)
 import GHC.Core.Reduction (Reduction (..))
-import GHC.Core.TyCo.Rep (Type (..), TyLit (..))
+import GHC.Core.TyCo.Rep (Type (..))
 import GHC.Plugins
   ( Subst
   , FunTyFlag (..)
@@ -69,6 +69,7 @@ import GHC.Plugins
   , boxedRepDataConTyCon
   , liftedDataConTy
   , levityTy
+  , isNumLitTy
   , pattern ManyTy
   )
 import GHC.TypeLits
@@ -107,7 +108,7 @@ import Pantomime.Expr
   , throwE
   , failWithE
   )
-import Pantomime.Util (SomeBitVec (..), SymBitVec)
+import Pantomime.Util (SomeBitVec (..), SymBitVec, failWith)
 import Pantomime.Literal
   ( BuiltInTyCon (..)
   , LiteralTypeable
@@ -462,9 +463,7 @@ project' subst sty expr = case sty of
     -- error. If we do have one, but we could just not reduce it to a concrete
     -- value, the error should be something closed to an 'unknown' SMT solver
     -- result. Nothing in fact is invalid, it is just not solvable.
-    case ty of
-      LitTy (NumTyLit i) | Just val <- someNatVal i -> pure val
-      _ -> throwError ()
+    failWith () $ isNumLitTy ty >>= someNatVal
   STYPE _ -> throwE ()
   SRuntimeRepTy -> throwE ()
   SBoxedRep _ -> throwE ()

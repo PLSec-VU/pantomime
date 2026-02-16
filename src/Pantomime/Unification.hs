@@ -17,11 +17,10 @@ import Prelude hiding (break)
 
 import GHC.Plugins hiding ((<>))
 import GHC.Core.Class (Class)
-import GHC.Core.Unify (tcUnifyTys, alwaysBindFun, tcMatchTys)
+import GHC.Core.Unify (tcUnifyTys, alwaysBindFun, tcMatchTy)
 import GHC.Core.Map.Type (TypeMap)
-import GHC.Core.Predicate (isDictId)
+import GHC.Core.Predicate (isEvVar)
 import GHC.Core.InstEnv (instanceDFunId)
-import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep (Type (..), Scaled (..), scaledThing)
 import GHC.Data.TrieMap (TrieMap (..), insertTM)
 import GHC.Data.Maybe (rightToMaybe, whenIsJust)
@@ -31,7 +30,7 @@ import Data.List (intersperse)
 import Data.Traversable (for)
 
 import Control.Applicative (Alternative ((<|>)))
-import Control.Monad (when, unless)
+import Control.Monad (when)
 import Control.Error (LookupError (..))
 
 import Lens.Micro
@@ -231,7 +230,7 @@ freeDictIds
 freeDictIds = do
   unif <- get @Unification
   let select = \case
-        Var var | isDictId var && isLocalId var -> (var :)
+        Var var | isEvVar var && isLocalId var -> (var :)
         _ -> id
   pure $ foldTM select (unif ^. dictionaries) []
 
@@ -272,25 +271,6 @@ unifyTypes tys = do
   let err = UnificationError tys
   let (lhs, rhs) = unzip tys
   subst <- failWith err $ tcUnifyTys alwaysBindFun lhs rhs
-  pure $ Unification subst emptyTM emptyDVarSet
-
-matchType
-  :: HasCallStack
-  => Error () :> es
-  => Type
-  -> Type
-  -> Eff es Unification
-matchType lhs rhs = matchTypes [(lhs, rhs)]
-
-matchTypes
-  :: HasCallStack
-  => Error () :> es
-  => [(Type, Type)]
-  -> Eff es Unification
-matchTypes tys = do
-  let err = () -- TODO: This should be a better error.
-  let (lhs, rhs) = unzip tys
-  subst <- failWith err $ tcMatchTys lhs rhs
   pure $ Unification subst emptyTM emptyDVarSet
 
 -- | Applies the unification map to the expression.
@@ -415,26 +395,28 @@ subsumeExpr
   -> Eff es CoreExpr
 subsumeExpr dicts expr ty = do
   -- Get the unifiable part of the type.
-  let curTy = expr ^. to splitExprTy . _3
-  let reqTy = ty ^. to tcSplitSigmaTy . _3
+  let (curTv, curEv, curTy) = splitExprTy expr
+  let (reqTv, reqEv, reqTy) = tcSplitSigmaTy ty
 
   -- Match the types and add all dictionaries we care about.
-  unif <- matchType curTy reqTy
-  let unif' = unif & dictionaries .~ dicts
+  let err = () -- TODO: This should be a better error.
+  subst <- failWith err $ tcMatchTy curTy reqTy
 
-  -- Actually perform the subsumption.
-  expr' <- evalContextLocal unif' do
-    expr' <- applyUnification expr
-    closeExpr expr'
+  -- Make evidence variables.
+  let names = zip (repeat "dict") $ fmap unrestricted reqEv
+  let (lamEv, _) = freshIds names $ mkInScopeSetList reqTv
 
-  -- FIXME: I guess we should actually not attempt to fill in the dictionaries
-  -- that are in the required type. For now, this is fine I guess, but it is
-  -- indeed broken...
-  -- Check we actually resolve all required dictionaries.
-  unless (eqType ty $ exprType expr') do
-    throwError ()
+  -- Construct the arguments to supply to the expression to unify.
+  let argsTv = substTy subst . mkTyVarTy <$> curTv
+  let dicts' = foldlBy dicts lamEv \acc ev -> do
+        insertTM (varType ev) (Var ev) acc
+  let curEv' = substTy subst <$> curEv
+  argsEv <- for curEv' \ev -> do
+    failWith () $ lookupTM ev dicts'
 
-  pure expr'
+  -- Construct the new expression.
+  let open = mkApps expr $ fmap Type argsTv <> argsEv
+  pure $ mkLams (reqTv <> lamEv) open
 
 -- | Lookup a class instance in the instantiation environment.
 --

@@ -17,6 +17,7 @@ module Pantomime.PrimOps
   , xor
 
   -- | Integer operations.
+  , i2bv
   , ineg
   , iabs
   , iadd
@@ -29,6 +30,8 @@ module Pantomime.PrimOps
   , ilt
 
   -- | Bitvector primitive operations.
+  , bv2i
+  , bvsize
   , bvnot
   , bvneg
   , bvand
@@ -71,7 +74,7 @@ import Effectful.GHC.External (HasFamInstEnvs)
 
 import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
 import GHC.Plugins (Role (..), emptySubst, dataConTagZ, mkUnivCo)
-import GHC.TypeLits (type (<=), SomeNat (..))
+import GHC.TypeLits (type (<=), SomeNat (..), natVal)
 
 import Grisette
   ( SymIntN
@@ -82,6 +85,7 @@ import Grisette
   , SignConversion (..)
   , SymEq (..)
   , SymOrd (..)
+  , SymFromIntegral (..)
   , LogicalOp (symNot, symImplies, (.&&), (.||))
   , SimpleMergeable (..)
   )
@@ -214,7 +218,7 @@ type UnsafeEqualityProofOp
 
 unsafeEqualityProof :: PrimOpExpr es
 unsafeEqualityProof = embed @UnsafeEqualityProofOp emptySubst $ liftF3 \_ tyL tyR -> do
-  let prov = PluginProv "pantomime reified 'unsafeEqualityProof'"
+  let prov = PluginProv "pantomime embedded 'unsafeEqualityProof'"
   pure $ mkUnivCo prov Nominal tyR tyL
 
 true :: PrimOpExpr es
@@ -253,6 +257,20 @@ iff = boolbinary (.==)
 
 xor :: PrimOpExpr es
 xor = boolbinary (./=)
+
+type IntegerBitVecOp
+  =    Forall 0 NaturalTy
+  :.   KnownNatTy (TyVar 0 NaturalTy)
+  :->  (Natural 1 :<= TyVar 0 NaturalTy)
+  :->  IntegerTy
+  :->  BitVecTy (TyVar 0 NaturalTy)
+
+i2bv :: PrimOpExpr es
+i2bv = embed @IntegerBitVecOp emptySubst $ liftF4 \_ n _ i -> do
+  SomeNat @n _ <- n
+  Dict <- failWithE () $ posNat @n
+  i' <- i
+  pure $ SomeBitVec @n (symFromIntegral i')
 
 ineg :: PrimOpExpr es
 ineg = embed @(IntegerTy :-> IntegerTy) emptySubst $ liftF1 \value -> do
@@ -310,6 +328,21 @@ ile = icompare (.<=)
 ilt :: PrimOpExpr es
 ilt = icompare (.<)
 
+type BitVecIntegerOp
+  =   Forall 0 NaturalTy
+  :.  BitVecTy (TyVar 0 NaturalTy)
+  :-> IntegerTy
+
+bv2i :: PrimOpExpr es
+bv2i = embed @BitVecIntegerOp emptySubst $ liftF2 \_n bv -> do
+  SomeBitVec bv' <- bv
+  pure $ symFromIntegral bv'
+
+bvsize :: PrimOpExpr es
+bvsize = embed @BitVecIntegerOp emptySubst $ liftF2 \_n bv -> do
+  SomeBitVec @n _ <- bv
+  pure $ fromInteger (natVal @n Proxy)
+
 type UnBitVecOp
   =   Forall 0 NaturalTy
   :.  BitVecTy (TyVar 0 NaturalTy)
@@ -354,9 +387,9 @@ bvbinary f = embed @BinBitVecOp emptySubst $ liftF3 \_n lhs rhs -> do
   pure $ SomeBitVec (f lhs' rhs')
 
 asSignedBin
-  :: (forall n. KnownPos n => SymIntN n -> SymIntN n -> SymIntN n)
-  -> (forall n. KnownPos n => SymBitVec n -> SymBitVec n -> SymBitVec n)
-asSignedBin f = \lhs rhs -> do
+  :: (KnownPos n => SymIntN n -> SymIntN n -> SymIntN n)
+  -> (KnownPos n => SymBitVec n -> SymBitVec n -> SymBitVec n)
+asSignedBin f lhs rhs = do
   let lhs' = toSigned lhs
   let rhs' = toSigned rhs
   toUnsigned $ f lhs' rhs'
@@ -439,9 +472,9 @@ bvcompare f = embed @CompareBitVecOp emptySubst $ liftF3 \_ lhs rhs -> do
   pure $ f lhs' rhs'
 
 asSignedCmp
-  :: (forall n. KnownPos n => SymIntN n -> SymIntN n -> SymBool)
-  -> (forall n. KnownPos n => SymBitVec n -> SymBitVec n -> SymBool)
-asSignedCmp f = \lhs rhs -> do
+  :: (KnownPos n => SymIntN n -> SymIntN n -> SymBool)
+  -> (KnownPos n => SymBitVec n -> SymBitVec n -> SymBool)
+asSignedCmp f lhs rhs = do
   let lhs' = toSigned lhs
   let rhs' = toSigned rhs
   f lhs' rhs'
@@ -481,13 +514,14 @@ bvconcat = embed @ConcatBitVecOp emptySubst $ liftF4 \_ _ lhs rhs -> do
   Dict <- pure $ unsafeDict @(1 <= n)
   pure $ SomeBitVec (sizedBVConcat lhs' rhs')
 
--- forall ext n. KnownNat ext => BitVec n -> BitVec (ext + n)
+-- forall l r. KnownNat r => l <= r => BitVec l -> BitVec r
 type ExtendBitVecOp
   =   Forall 0 NaturalTy
   :.  Forall 1 NaturalTy
-  :.  KnownNatTy (TyVar 0 NaturalTy)
+  :.  KnownNatTy (TyVar 1 NaturalTy)
+  :-> (TyVar 0 NaturalTy :<= TyVar 1 NaturalTy)
+  :-> BitVecTy (TyVar 0 NaturalTy)
   :-> BitVecTy (TyVar 1 NaturalTy)
-  :-> BitVecTy (TyVar 0 NaturalTy :+ TyVar 1 NaturalTy)
 
 bvextend
   :: ( forall l r
@@ -499,13 +533,12 @@ bvextend
     -> SymBitVec r
      )
   -> PrimOpExpr es
-bvextend f = embed @ExtendBitVecOp emptySubst $ liftF4 \_ _ ext bv -> do
-  SomeNat @ext _ <- ext
-  SomeBitVec @n bv' <- bv
-  SomeNat' @sum <- pure $ typeAdd @ext @n
-  Dict <- failWithE () $ leqNat @n @sum
-  Dict <- failWithE () $ posNat @sum
-  pure $ SomeBitVec (f (Proxy @sum) bv')
+bvextend f = embed @ExtendBitVecOp emptySubst $ liftF5 \_ _ r _ bv -> do
+  SomeBitVec @l bv' <- bv
+  SomeNat @r _ <- r
+  Dict <- failWithE () $ leqNat @l @r
+  Dict <- failWithE () $ posNat @r
+  pure $ SomeBitVec (f (Proxy @r) bv')
 
 bvzext :: PrimOpExpr es
 bvzext = bvextend sizedBVZext

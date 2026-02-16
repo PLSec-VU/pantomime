@@ -322,6 +322,7 @@ resolvePluginAxioms PluginAxioms { .. } = do
             , Type tyL
             , Type tyR
             , private
+            , private
             , embed
             , project
             ]
