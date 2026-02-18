@@ -74,6 +74,8 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
+import GHC.Types.Id.Make (nospecId)
+import GHC.Core qualified as GHC
 
 -- TODO: Definitely not the cleanest place to add these effects. I should look
 -- into where to do this.
@@ -111,7 +113,7 @@ checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
   -- bitVector <- reifiedBitVector
   -- unsafeRefl <- reifiedUnsafeRefl
   -- bool <- reifiedBool
-  reified <- bindingsGHC
+  primOps <- bindingsGHC
 
   -- let reified = unsafeRefl : bool -- ++ bitVector
 
@@ -122,7 +124,7 @@ checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
   -- on the setup if the module does not have any (active) annotations. Not sure
   -- if the setup is actually a lot of work, but it seems odd to do it like
   -- this...
-  subst0 <- extendIdSubstMany mkEmptySubst reified
+  subst0 <- extendIdSubstMany mkEmptySubst primOps
   -- TODO: I think there is an ordering problem here between user
   -- mappings and program definitions. I guess user mappings should
   -- go first? The problem is that we don't want local definitions to
@@ -131,7 +133,11 @@ checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
   -- their defining module. Not the worst thing though, as the functions
   -- should truly be opaque outside of the defining module and they cannot
   -- be guaranteed to not be misused within the module.
-  let axioms' = uncurry NonRec <$> termAxiomsR
+  -- TODO: Is there perhaps a better place to add this? Ideally we just do it
+  -- as a normal axiom, but I cannot find where 'nospec' is defined...
+  idId <- thNameToGhcName 'id >>= lookupIdAll
+  let axioms' = uncurry NonRec <$> (nospecId, GHC.Var idId) : termAxiomsR
+
   subst1 <- symboliseBindMany subst0 axioms'
   subst <- symboliseBindMany subst1 program
 

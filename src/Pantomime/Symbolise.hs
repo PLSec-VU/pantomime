@@ -90,13 +90,6 @@ symbolise = go
             ]
           throwE ()
 
-      -- GHC.Lit lit -> liftEff $ mkLit <$> symboliseLit lit
-      -- FIXME: I'm not sure how to handle literals here, as this always assumes
-      -- something about their format.
-      --
-      -- Maybe it could be part of a user axiom? The annoying bit is that I
-      -- would rather not have to require these axioms if you don't actually use
-      -- the Haskell primitive types.
       GHC.Lit lit -> symboliseLit subst lit
 
       GHC.App fun arg -> do

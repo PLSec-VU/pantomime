@@ -109,14 +109,16 @@ bindingsTH
   => HasFamInstEnvs :> es
   => [(TH.Name, EvalExpr es)]
 bindingsTH =
-  -- System Fc bindings
+  -- System FC bindings.
+  ----------------------
   [ ('Builtin.ite, PrimOps.ite)
   , ('Builtin.tagToEnum, PrimOps.tagToEnum)
   , ('Builtin.dataToTag, PrimOps.dataToTag)
   , ('Builtin.raise, PrimOps.raise)
   , ('Builtin.unsafeEqualityProof, PrimOps.unsafeEqualityProof)
 
-  -- Boolean bindings
+  -- Boolean bindings.
+  --------------------
   , ('Builtin.true, PrimOps.true)
   , ('Builtin.false, PrimOps.false)
   , ('Builtin.not, PrimOps.not)
@@ -126,7 +128,8 @@ bindingsTH =
   , ('Builtin.xor, PrimOps.xor)
   , ('Builtin.iff, PrimOps.iff)
 
-  -- Integer bindings
+  -- Integer bindings.
+  --------------------
   , ('Builtin.i2bv, PrimOps.i2bv)
   , ('Builtin.ineg, PrimOps.ineg)
   , ('Builtin.iabs, PrimOps.iabs)
@@ -139,7 +142,8 @@ bindingsTH =
   , ('Builtin.ile, PrimOps.ile)
   , ('Builtin.ilt, PrimOps.ilt)
 
-  -- Bitvector bindings
+  -- Bitvector bindings.
+  ----------------------
   , ('Builtin.bv2i, PrimOps.bv2i)
   , ('Builtin.bvsize, PrimOps.bvsize)
   , ('Builtin.bvnot, PrimOps.bvnot)
@@ -167,6 +171,8 @@ bindingsTH =
   , ('Builtin.bvsext, PrimOps.bvsext)
   , ('Builtin.bvselect, PrimOps.bvselect)
 
+  -- Array bindings.
+  ------------------
   , ('Builtin.aconst, PrimOps.aconst)
   , ('Builtin.aselect, PrimOps.aselect)
   , ('Builtin.astore, PrimOps.astore)

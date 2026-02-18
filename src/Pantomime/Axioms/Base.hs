@@ -1,6 +1,7 @@
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE UnboxedTuples #-}
 
 module Pantomime.Axioms.Base
   ( axioms
@@ -31,12 +32,26 @@ import GHC.Num qualified as GHC
   , integerFromWord#
   , integerToInt#
   , integerToWord#
+  , naturalAdd
+  , naturalSubThrow
+  , naturalFromBigNat#
   )
-import GHC.Num.BigNat qualified as GHC (bigNatFromWord#, bigNatToWord#)
-import GHC.TypeLits (KnownNat, type (<=))
+import GHC.Num.BigNat qualified as GHC
+  ( bigNatFromWord#
+  , bigNatToWord#
+  , bigNatAddWord#
+  , bigNatAdd
+  , bigNatFromWord2#
+  , bigNatSubWordUnsafe#
+  , bigNatSub
+  )
+import GHC.TypeLits (KnownNat, SNat, type (<=), type (+))
+import GHC.TypeNats qualified as GHC (withSomeSNat)
 import Pantomime (PluginAxioms (..))
 import Pantomime.BuiltIn qualified as Pantomime
 import Unsafe.Coerce (unsafeCoerce)
+import Data.Constraint.Unsafe (unsafeSNat)
+import GHC.Prim.Exception qualified as GHC
 
 axioms :: PluginAxioms
 axioms = PluginAxioms
@@ -95,8 +110,8 @@ axioms = PluginAxioms
     , ('(GHC.+#), '(+#))
     , ('(GHC.-#), '(-#))
     , ('(GHC.*#), '(*#))
-    -- , ('GHC.addIntC#, 'addIntC#)
-    -- , ('GHC.subIntC#, 'subIntC#)
+    , ('GHC.addIntC#, 'addIntC#)
+    , ('GHC.subIntC#, 'subIntC#)
     -- , ('GHC.timesInt2#, 'timesInt2#)
     -- , ('GHC.mulIntMayOflo#, 'mulIntMayOflo#)
     -- , (('GHC.quotInt#, 'quotInt#))
@@ -212,8 +227,8 @@ axioms = PluginAxioms
     , ('GHC.plusWord#, 'plusWord#)
     , ('GHC.minusWord#, 'minusWord#)
     , ('GHC.timesWord#, 'timesWord#)
-    -- , ('GHC.addWordC#, 'addWordC#)
-    -- , ('GHC.subWordC#, 'subWordC#)
+    , ('GHC.addWordC#, 'addWordC#)
+    , ('GHC.subWordC#, 'subWordC#)
     -- , ('GHC.plusWord2#, 'plusWord2#)
     -- , ('GHC.timesWord2#, 'timesWord2#)
     -- , (('GHC.quotWord#, 'quotWord#))
@@ -333,8 +348,11 @@ axioms = PluginAxioms
     , ('GHC.integerToWord#, 'integerToWord#)
     , ('GHC.integerFromNatural, 'integerFromNatural)
     , ('GHC.integerToInt#, 'integerToInt#)
+    , ('GHC.naturalAdd, 'naturalAdd)
+    , ('GHC.naturalSubThrow, 'naturalSubThrow)
     , ('GHC.noinline, 'noinline)
     , ('GHC.patError, 'patError')
+    , ('GHC.withSomeSNat, 'withSomeSNat)
 
     -- Integer to pantomime primitive conversions.
     ----------------------------------------------
@@ -495,6 +513,39 @@ binaryInt# f lhs rhs = do
 
 (*#) :: Pantomime.Embeddable BitVecPW Int# => Int# -> Int# -> Int#
 (*#) = binaryInt# (*)
+
+binaryIntC#
+  :: Pantomime.Embeddable BitVecPW Int#
+  => (forall n. KnownNat n => Pantomime.BitVec n -> Pantomime.BitVec n -> Pantomime.BitVec n)
+  -> Int#
+  -> Int#
+  -> (# Int#, Int# #)
+binaryIntC# f lhs rhs = do
+  let project' x
+        = Pantomime.bvzext @_ @(Pantomime.PlatformWordSize + 1)
+        $ Pantomime.project @_ @_ @BitVecPW @Int# x
+  let lhs' = project' lhs
+  let rhs' = project' rhs
+
+  let result = f lhs' rhs'
+  let add = Pantomime.bvselect @0 @Pantomime.PlatformWordSize result
+  let carry = Pantomime.bvselect @Pantomime.PlatformWordSize @1 result
+  let carry' = Pantomime.bvzext @_ @Pantomime.PlatformWordSize carry
+  (# Pantomime.embed add, Pantomime.embed carry' #)
+
+addIntC#
+  :: Pantomime.Embeddable BitVecPW Int#
+  => Int#
+  -> Int#
+  -> (# Int#, Int# #)
+addIntC# = binaryIntC# Pantomime.bvadd
+
+subIntC#
+  :: Pantomime.Embeddable BitVecPW Int#
+  => Int#
+  -> Int#
+  -> (# Int#, Int# #)
+subIntC# = binaryIntC# \lhs rhs -> Pantomime.bvadd lhs (Pantomime.bvneg rhs)
 
 andI# :: Pantomime.Embeddable BitVecPW Int# => Int# -> Int# -> Int#
 andI# = binaryInt# Pantomime.bvand
@@ -920,6 +971,42 @@ minusWord# = binaryWord# (-)
 timesWord# :: Pantomime.Embeddable BitVecPW Word# => Word# -> Word# -> Word#
 timesWord# = binaryWord# (*)
 
+binaryWordC#
+  :: Pantomime.Embeddable BitVecPW Word#
+  => Pantomime.Embeddable BitVecPW Int#
+  => (forall n. KnownNat n => Pantomime.BitVec n -> Pantomime.BitVec n -> Pantomime.BitVec n)
+  -> Word#
+  -> Word#
+  -> (# Word#, Int# #)
+binaryWordC# f lhs rhs = do
+  let project' x
+        = Pantomime.bvzext @_ @(Pantomime.PlatformWordSize + 1)
+        $ Pantomime.project @_ @_ @BitVecPW @Word# x
+  let lhs' = project' lhs
+  let rhs' = project' rhs
+
+  let result = f lhs' rhs'
+  let add = Pantomime.bvselect @0 @Pantomime.PlatformWordSize result
+  let carry = Pantomime.bvselect @Pantomime.PlatformWordSize @1 result
+  let carry' = Pantomime.bvzext @_ @Pantomime.PlatformWordSize carry
+  (# Pantomime.embed add, Pantomime.embed carry' #)
+
+addWordC#
+  :: Pantomime.Embeddable BitVecPW Word#
+  => Pantomime.Embeddable BitVecPW Int#
+  => Word#
+  -> Word#
+  -> (# Word#, Int# #)
+addWordC# = binaryWordC# Pantomime.bvadd
+
+subWordC#
+  :: Pantomime.Embeddable BitVecPW Word#
+  => Pantomime.Embeddable BitVecPW Int#
+  => Word#
+  -> Word#
+  -> (# Word#, Int# #)
+subWordC# = binaryWordC# \lhs rhs -> Pantomime.bvadd lhs (Pantomime.bvneg rhs)
+
 and# :: Pantomime.Embeddable BitVecPW Word# => Word# -> Word# -> Word#
 and# = binaryWord# Pantomime.bvand
 
@@ -1319,10 +1406,6 @@ hsi2i = \case
 -- TODO: The below definitions exists solely because the unfolding doesn't
 -- exist. There should be a way around this...
 
--- FIXME: This is not actually the implementation for 'patError'.
-patError' :: forall q (a :: TYPE q). Addr# -> a
-patError' _ = GHC.raise# ()
-
 integerFromNatural :: Natural -> Integer
 integerFromNatural (NS x) = GHC.integerFromWord# x
 integerFromNatural (NB x) = IP x
@@ -1345,5 +1428,35 @@ integerToWord# = \case
   IP bn -> GHC.bigNatToWord# bn
   IN bn -> GHC.int2Word# $ GHC.negateInt# $ GHC.word2Int# $ GHC.bigNatToWord# bn
 
+naturalAdd :: Natural -> Natural -> Natural
+naturalAdd = \cases
+  (NS x) (NB y) -> NB $ GHC.bigNatAddWord# y x
+  (NB x) (NS y) -> NB $ GHC.bigNatAddWord# x y
+  (NB x) (NB y) -> NB $ GHC.bigNatAdd x y
+  (NS x) (NS y) -> case GHC.addWordC# x y of
+    (# l, 0# #) -> NS l
+    (# l, c  #) -> NB $ GHC.bigNatFromWord2# (GHC.int2Word# c) l
+
+naturalSubThrow :: Natural -> Natural -> Natural
+naturalSubThrow (NS _) (NB _) = GHC.raiseUnderflow
+naturalSubThrow (NB x) (NS y) = GHC.naturalFromBigNat# $ GHC.bigNatSubWordUnsafe# x y
+naturalSubThrow (NS x) (NS y) = case GHC.subWordC# x y of
+  (# l,0# #) -> NS l
+  (# _,_  #) -> GHC.raiseUnderflow
+naturalSubThrow (NB x) (NB y) = case GHC.bigNatSub x y of
+  (# (# #) |   #) -> GHC.raiseUnderflow
+  (#       | z #) -> GHC.naturalFromBigNat# z
+
 noinline :: a -> a
 noinline = id
+
+-- FIXME: This is not actually the implementation for 'patError'.
+patError' :: forall q (a :: TYPE q). Addr# -> a
+patError' _ = GHC.raise# ()
+
+withSomeSNat
+  :: forall rep (r :: TYPE rep)
+   . Natural
+  -> (forall n. SNat n -> r)
+  -> r
+withSomeSNat n f = f $ unsafeSNat n

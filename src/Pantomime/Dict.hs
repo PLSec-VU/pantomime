@@ -1,9 +1,11 @@
+{-# LANGUAGE PolyKinds #-}
 -- TODO: We redefine Dict here, but there is the 'constraints' package which has
 -- utils for manipulating it. I guess it's better to just import that!
 
 module Pantomime.Dict
   ( Dict (..)
   , unsafeDict
+  , unsafeEq
   , eqNat
   , leqNat
   , posNat
@@ -28,6 +30,9 @@ import Unsafe.Coerce (unsafeCoerce)
 
 unsafeDict :: Dict c
 unsafeDict = unsafeCoerce $ Dict @()
+
+unsafeEq :: forall {k} (a :: k) (b :: k). Dict (a ~ b)
+unsafeEq = unsafeCoerce $ Dict @(() ~ ())
 
 eqNat
   :: forall l r
@@ -78,7 +83,7 @@ typeSub = runIdentity do
   let lhs' = natVal $ Proxy @lhs
   let rhs' = natVal $ Proxy @rhs
   SomeNat @n _ <- pure . someNatVal $ lhs' - rhs'
-  Dict <- pure $ unsafeDict @(lhs - rhs ~ n)
+  Dict <- pure $ unsafeEq @(lhs - rhs) @n
   pure $ SomeNat' @n @(lhs - rhs)
 
 -- | Type-level subtraction.
@@ -87,13 +92,13 @@ typeAdd = runIdentity do
   let lhs' = natVal $ Proxy @lhs
   let rhs' = natVal $ Proxy @rhs
   SomeNat @n _ <- pure . someNatVal $ lhs' + rhs'
-  Dict <- pure $ unsafeDict @(lhs + rhs ~ n)
+  Dict <- pure $ unsafeEq @(lhs + rhs) @n
   pure $ SomeNat' @n @(lhs + rhs)
 
 -- TODO: Move this thing to Pantomime.Grisette.BitVector
 withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
 withSize con sym = case natVal $ Proxy @n of
-  0 -> case unsafeDict @(n ~ 0) of
+  0 -> case unsafeEq @n @0 of
     Dict -> con
   _ -> case unsafeDict @(1 <= n) of
     Dict -> sym
