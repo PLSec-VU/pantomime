@@ -42,29 +42,21 @@ library
       Pantomime
       Pantomime.Annotation
       Pantomime.Axiom
-      Pantomime.Base
+      Pantomime.Axioms.Base
+      Pantomime.Axioms.Clash
+      Pantomime.Binding
       Pantomime.BuiltIn
-      Pantomime.Clash
       Pantomime.Dict
       Pantomime.Embed
       Pantomime.Expr
       Pantomime.Fresh
-      Pantomime.Grisette.BitVector
       Pantomime.Grisette.Mergeable
-      Pantomime.Grisette.SizedBV
-      Pantomime.Grisette.SomeBV
       Pantomime.Grisette.UnionT
       Pantomime.Literal
       Pantomime.Orphan.Effectful
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes
-      Pantomime.Primitive.Array
-      Pantomime.Primitive.BitVector
-      Pantomime.Primitive.Bool
-      Pantomime.Primitive.GHC
-      Pantomime.Primitive.Operation
-      Pantomime.Primitive.Reify
       Pantomime.PrimOps
       Pantomime.Solve
       Pantomime.Subst
@@ -113,6 +105,7 @@ library
     , ghc >=9.6.4
     , ghc-prim
     , grisette >=0.13.0.0
+    , hashable
     , microlens
     , mtl
     , template-haskell
@@ -180,6 +173,7 @@ executable pantomime-exe
     , ghc >=9.6.4
     , ghc-prim
     , grisette >=0.13.0.0
+    , hashable
     , microlens
     , mtl
     , pantomime
@@ -237,6 +231,7 @@ test-suite pantomime-test
     , ghc-paths
     , ghc-prim
     , grisette >=0.13.0.0
+    , hashable
     , hspec
     , microlens
     , mtl
