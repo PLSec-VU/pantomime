@@ -43,7 +43,6 @@ library
       Pantomime.Annotation
       Pantomime.Axiom
       Pantomime.Axioms.Base
-      Pantomime.Axioms.Clash
       Pantomime.Binding
       Pantomime.BuiltIn
       Pantomime.Dict
@@ -97,7 +96,6 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module
   build-depends:
       base >=4.7 && <5
-    , clash-prelude
     , composition
     , constraints >=0.14.2
     , containers
@@ -165,7 +163,6 @@ executable pantomime-exe
   build-depends:
       QuickCheck
     , base >=4.7 && <5
-    , clash-prelude
     , composition
     , constraints >=0.14.2
     , containers
@@ -221,7 +218,6 @@ test-suite pantomime-test
   build-depends:
       HUnit
     , base >=4.7 && <5
-    , clash-prelude
     , composition
     , constraints >=0.14.2
     , containers

@@ -58,8 +58,6 @@ dependencies:
 - mtl
 - microlens
 - grisette >= 0.13.0.0
-# TODO: Remove clash dependency once we can externalise its interpretation.
-- clash-prelude
 - effectful-core >= 2.5.1.0
 - text
 - hashable

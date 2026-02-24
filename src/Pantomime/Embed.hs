@@ -107,7 +107,7 @@ import Pantomime.Expr
   , forceCo
   , liftEff
   , throwE
-  , failWithE, pprArg, dbgE
+  , failWithE
   )
 import Pantomime.Util (SomeBitVec (..), SymBitVec)
 import Pantomime.Literal
