@@ -62,6 +62,7 @@ dependencies:
 - clash-prelude
 - effectful-core >= 2.5.1.0
 - text
+- hashable
 
 ghc-options:
 - -Wall
