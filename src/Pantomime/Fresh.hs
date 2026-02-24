@@ -5,6 +5,7 @@ module Pantomime.Fresh
   , freshArgs
   ) where
 
+import GHC.Builtin.Types.Prim (eqPrimTyCon, eqReprPrimTyCon)
 import GHC.Core.Reduction (Reduction (..), mkReduction, homogeniseHetRedn)
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
 import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe)
@@ -57,7 +58,6 @@ import Grisette
   )
 
 import Data.Constraint (Dict (..))
-import Data.Functor ((<&>))
 import Data.Text.Encoding (decodeUtf8)
 
 import Pantomime.Axiom (TypeAxiomsR)
@@ -74,6 +74,8 @@ import Effectful
 import Effectful.Error.Static
 import Effectful.GHC.External
 import Effectful.Context (Context, ContextMode (..))
+import GHC.Core.Unify (tcUnifyTysFG, alwaysBindFun, UnifyResultM (..))
+import Data.Traversable (for)
 
 data FreshInstEnv where
   FreshInstEnv ::
@@ -192,6 +194,19 @@ freshExpr axioms root = do
         -- reifyLitType adjecent to its call once we do this!
         result <- liftEff . runErrorNoCallStack @() $ projectLitTy ty
 
+        let isEqPred' ty' = do
+              (tc, args) <- splitTyConApp_maybe ty'
+              role <- if
+                | tc == eqPrimTyCon -> Just Nominal
+                | tc == eqReprPrimTyCon -> Just Representational
+                | otherwise -> Nothing
+
+              (tyL, tyR) <- case args of
+                [_, _, tyL, tyR] -> Just (tyL, tyR)
+                _ -> Nothing
+
+              pure (role, tyL, tyR)
+
         if
           -- Pantomime Primitive:
           -----------------------
@@ -261,10 +276,19 @@ freshExpr axioms root = do
             | (dcN : dcs) <- reverse dataCons -> do
               let goDataCon dc = do
                     let fieldTys = scaledThing <$> dataConInstArgTys dc args
-                    let valArgs = zip [0..] fieldTys <&> \(idx, ty') -> go var
-                          { varType = ty'
-                          , varAccessor = Accessor dc idx : varAccessor var
-                          }
+                    valArgs <- for (zip [0..] fieldTys) \(idx, ty') -> if
+                      -- If the types are surely apart, we can never reach the
+                      -- construction of this value.
+                      -- TODO: As 'Coercion' cannot be 'Unreachabe', we have
+                      -- to push this to the root of the DataCon. Hence, it is
+                      -- clunkily put here for now. Maybe we can improve this...
+                      | Just (Nominal, tyL, tyR) <- isEqPred' ty'
+                      , SurelyApart <- tcUnifyTysFG alwaysBindFun [tyL] [tyR] -> do
+                        mkUnreachable
+                      | otherwise -> pure $ go var
+                        { varType = ty'
+                        , varAccessor = Accessor dc idx : varAccessor var
+                        }
 
                     let dc' = mkCon $ DataCon dc
                     let tyArgs = pure . mkType <$> args
@@ -277,6 +301,16 @@ freshExpr axioms root = do
 
             -- Unreachable otherwise.
             | otherwise -> mkUnreachable
+
+          -- TODO: This is really not great, but it works for my purposes for
+          -- now...
+          -- | Coercion:
+          --------------
+          -- We can always construct a reflexive coercion.
+          | Just (role, tyL, tyR) <- isEqPred' ty
+          , eqType tyL tyR -> do
+            let co = mkReflCo role tyL
+            pure $ mkCoercion co
 
             -- NOTE: I'll leave this todo here for now, because I think the stuff
             -- in here should become a detailed comment at some point in the

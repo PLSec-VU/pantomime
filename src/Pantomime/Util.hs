@@ -54,7 +54,7 @@ import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, CallStack, throwError_)
 import Effectful.Dispatch.Static (unsafeEff_)
 
-import Pantomime.Dict (unsafeDict)
+import Pantomime.Dict (unsafeAxiom)
 import Pantomime.Grisette.Mergeable (impossible)
 
 -- | Type alias for known naturals that are positive.
@@ -75,7 +75,7 @@ instance
   => Mergeable (SomeBitVec bv) where
   rootStrategy = SortedStrategy
     (\(SomeBitVec @n _) -> SomeNat @n Proxy)
-    (\(SomeNat @n _) -> case unsafeDict @(1 <= n) of
+    (\(SomeNat @n _) -> case unsafeAxiom @(1 <= n) of
       Dict -> wrapStrategy @(bv n)
         rootStrategy
         SomeBitVec

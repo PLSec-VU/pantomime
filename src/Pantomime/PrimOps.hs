@@ -511,7 +511,7 @@ bvconcat = embed @ConcatBitVecOp emptySubst $ liftF4 \_ _ lhs rhs -> do
   SomeNat' @n <- pure $ typeAdd @nl @nr
   -- SAFETY: Both bitvectors already have a positive bitwidth, thus their
   -- concatenation also has a positive bitwidth.
-  Dict <- pure $ unsafeDict @(1 <= n)
+  Dict <- pure $ unsafeAxiom @(1 <= n)
   pure $ SomeBitVec (sizedBVConcat lhs' rhs')
 
 -- forall l r. KnownNat r => l <= r => BitVec l -> BitVec r

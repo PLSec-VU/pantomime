@@ -53,6 +53,9 @@ module Pantomime.BuiltIn
   , eqWord16#
   , eqWord32#
   , eqWord64#
+
+  , KnownNat (..)
+  , SNat
   , hsi2bv
   , hsi2i
 
@@ -141,7 +144,6 @@ import Data.Composition ((.:))
 import Data.Bits qualified as Prelude (Bits (..))
 import Data.Data (Proxy(..))
 import Data.Hashable (Hashable (..))
-import Data.Type.Equality (type (~))
 import GHC.Base
   ( TYPE
   , RuntimeRep (..)
@@ -156,16 +158,19 @@ import GHC.Base
   , Word32#
   , Word64#
   , Type
+  , WithDict (..)
   , noinline
   )
-import GHC.TypeLits (natVal)
-import GHC.TypeNats (Nat, KnownNat, type (+), type (<=))
+import GHC.TypeLits qualified as Prelude (natVal)
+import GHC.TypeNats (Nat, type (+), type (<=))
+import GHC.TypeNats qualified as Prelude (KnownNat)
 import Grisette (SymShift(..), SizedBV (..), IntN, SignConversion (..))
 import Grisette.Internal.SymPrim.Array qualified as Grisette
 import Prelude qualified
 import Prelude (Applicative (..), Ordering (..), ($))
 import Pantomime.Util qualified as Util (BitVec)
-import Pantomime.Dict (Dict (..), SomeNat' (..), typeAdd, unsafeDict)
+import Pantomime.Dict (Dict (..), SomeNat' (..), typeAdd, unsafeAxiom, unsafeEq)
+import Data.Constraint.Unsafe qualified as Prelude (unsafeSNat)
 
 class Private a
 
@@ -218,83 +223,83 @@ type PlatformWordSize = 64
 -- that
 {-# OPAQUE toInt# #-}
 toInt# :: BitVec PlatformWordSize -> Int#
-toInt# = toInt#
+toInt# = noinline toInt#
 
 {-# OPAQUE toInt8# #-}
 toInt8# :: BitVec 8 -> Int8#
-toInt8# = toInt8#
+toInt8# = noinline toInt8#
 
 {-# OPAQUE toInt16# #-}
 toInt16# :: BitVec 16 -> Int16#
-toInt16# = toInt16#
+toInt16# = noinline toInt16#
 
 {-# OPAQUE toInt32# #-}
 toInt32# :: BitVec 32 -> Int32#
-toInt32# = toInt32#
+toInt32# = noinline toInt32#
 
 {-# OPAQUE toInt64# #-}
 toInt64# :: BitVec 64 -> Int64#
-toInt64# = toInt64#
+toInt64# = noinline toInt64#
 
 {-# OPAQUE toWord# #-}
 toWord# :: BitVec PlatformWordSize -> Word#
-toWord# = toWord#
+toWord# = noinline toWord#
 
 {-# OPAQUE toWord8# #-}
 toWord8# :: BitVec 8 -> Word8#
-toWord8# = toWord8#
+toWord8# = noinline toWord8#
 
 {-# OPAQUE toWord16# #-}
 toWord16# :: BitVec 16 -> Word16#
-toWord16# = toWord16#
+toWord16# = noinline toWord16#
 
 {-# OPAQUE toWord32# #-}
 toWord32# :: BitVec 32 -> Word32#
-toWord32# = toWord32#
+toWord32# = noinline toWord32#
 
 {-# OPAQUE toWord64# #-}
 toWord64# :: BitVec 64 -> Word64#
-toWord64# = toWord64#
+toWord64# = noinline toWord64#
 
 {-# OPAQUE eqInt# #-}
 eqInt# :: Int# -> Int# -> Bool
-eqInt# = eqInt#
+eqInt# = noinline eqInt#
 
 {-# OPAQUE eqInt8# #-}
 eqInt8# :: Int8# -> Int8# -> Bool
-eqInt8# = eqInt8#
+eqInt8# = noinline eqInt8#
 
 {-# OPAQUE eqInt16# #-}
 eqInt16# :: Int16# -> Int16# -> Bool
-eqInt16# = eqInt16#
+eqInt16# = noinline eqInt16#
 
 {-# OPAQUE eqInt32# #-}
 eqInt32# :: Int32# -> Int32# -> Bool
-eqInt32# = eqInt32#
+eqInt32# = noinline eqInt32#
 
 {-# OPAQUE eqInt64# #-}
 eqInt64# :: Int64# -> Int64# -> Bool
-eqInt64# = eqInt64#
+eqInt64# = noinline eqInt64#
 
 {-# OPAQUE eqWord# #-}
 eqWord# :: Word# -> Word# -> Bool
-eqWord# = eqWord#
+eqWord# = noinline eqWord#
 
 {-# OPAQUE eqWord8# #-}
 eqWord8# :: Word8# -> Word8# -> Bool
-eqWord8# = eqWord8#
+eqWord8# = noinline eqWord8#
 
 {-# OPAQUE eqWord16# #-}
 eqWord16# :: Word16# -> Word16# -> Bool
-eqWord16# = eqWord16#
+eqWord16# = noinline eqWord16#
 
 {-# OPAQUE eqWord32# #-}
 eqWord32# :: Word32# -> Word32# -> Bool
-eqWord32# = eqWord32#
+eqWord32# = noinline eqWord32#
 
 {-# OPAQUE eqWord64# #-}
 eqWord64# :: Word64# -> Word64# -> Bool
-eqWord64# = eqWord64#
+eqWord64# = noinline eqWord64#
 
 -- TODO: Not sure I like this name.
 -- | Convert a Haskell 'Integer' to a pantomime 'BitVec'.
@@ -304,12 +309,43 @@ eqWord64# = eqWord64#
 -- interpretation of 'Integer', we can only ask a user to provide an instance
 -- for this.
 {-# OPAQUE hsi2bv #-}
-hsi2bv :: KnownNat n => 1 <= n => Prelude.Integer -> BitVec n
-hsi2bv x = BitVec $ Prelude.fromInteger x
+hsi2bv :: forall n. KnownNat n => 1 <= n => Prelude.Integer -> BitVec n
+hsi2bv x = withKnownNat @n $ BitVec (Prelude.fromInteger x)
 
 {-# OPAQUE hsi2i #-}
 hsi2i :: Prelude.Integer -> Integer
 hsi2i = Integer
+
+-- | 'KnownNat' constraint using Pantomime primitive 'Integer'.
+class KnownNat (n :: Nat) where
+  natSing :: SNat n
+
+instance Prelude.KnownNat n => KnownNat n where
+  natSing = do
+    let i = Prelude.natVal @n Proxy
+    UnsafeSNat @n $ hsi2i i
+
+-- | Singleton natural number using Pantomime primitive 'Integer'.
+newtype SNat (n :: Nat) where
+  UnsafeSNat :: Integer -> SNat n
+
+-- | Get the 'Integer' corresponding to the 'KnownNat' constraint.
+natVal :: forall n. KnownNat n => Integer
+natVal = let UnsafeSNat i = natSing @n in i
+
+-- | Helper function to get the Haskell 'KnownNat' constraint.
+--
+-- WARNING: Do not export this, it uses the 'Integer' internals and is only
+-- intended to implement internals for other 'OPAQUE' functions.
+withKnownNat
+  :: forall n rep (r :: TYPE rep)
+   . KnownNat n
+  => (Prelude.KnownNat n => r)
+  -> r
+withKnownNat = do
+  let UnsafeSNat (Integer i) = natSing @n
+  let i' = Prelude.unsafeSNat $ Prelude.fromInteger i
+  withDict @(Prelude.KnownNat n) i'
 
 -- | Primitive if-then-else construct.
 {-# OPAQUE ite #-}
@@ -496,7 +532,7 @@ instance Prelude.Num Integer where
 
 {-# OPAQUE i2bv #-}
 i2bv :: forall n. KnownNat n => 1 <= n => Integer -> BitVec n
-i2bv (Integer x) = BitVec $ Prelude.fromInteger x
+i2bv (Integer x) = withKnownNat @n $ BitVec (Prelude.fromInteger x)
 
 {-# OPAQUE ineg #-}
 ineg :: Integer -> Integer
@@ -540,8 +576,7 @@ ilt = coerce $ (Prelude.<) @Prelude.Integer
 
 -- | Pantomime primitive bitvector.
 data BitVec (n :: Nat) where
-  BitVec :: (KnownNat n, 1 <= n) => Util.BitVec n -> BitVec n
-  -- deriving (Prelude.Eq, Hashable)
+  BitVec :: (Prelude.KnownNat n, 1 <= n) => Util.BitVec n -> BitVec n
 
 type role BitVec nominal
 
@@ -562,36 +597,38 @@ instance (KnownNat n, 1 <= n) => Prelude.Num (BitVec n) where
   negate = bvneg
 
 bvunary
-  :: (KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n)
+  :: (Prelude.KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n)
   -> BitVec n
   -> BitVec n
 bvunary f (BitVec x) = BitVec $ f x
 
 bvbinary
-  :: (KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Util.BitVec n)
+  :: (Prelude.KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Util.BitVec n)
   -> BitVec n
   -> BitVec n
   -> BitVec n
 bvbinary f (BitVec x) (BitVec y) = BitVec $ f x y
 
 bvcompare
-  :: (KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Prelude.Bool)
+  :: (Prelude.KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Prelude.Bool)
   -> BitVec n
   -> BitVec n
   -> Bool
 bvcompare f (BitVec x) (BitVec y) = if f x y then True else False
 
 signedBin
-  :: (KnownNat n => 1 <= n => IntN n -> IntN n -> IntN n)
-  -> (KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Util.BitVec n)
+  :: forall n
+   . (Prelude.KnownNat n => 1 <= n => IntN n -> IntN n -> IntN n)
+  -> (Prelude.KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Util.BitVec n)
 signedBin f lhs rhs = do
   let lhs' = toSigned lhs
   let rhs' = toSigned rhs
   toUnsigned $ f lhs' rhs'
 
 signedCmp
-  :: (KnownNat n => 1 <= n => IntN n -> IntN n -> Prelude.Bool)
-  -> (KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Prelude.Bool)
+  :: forall n
+   . (Prelude.KnownNat n => 1 <= n => IntN n -> IntN n -> Prelude.Bool)
+  -> (Prelude.KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Prelude.Bool)
 signedCmp f lhs rhs = do
   let lhs' = toSigned lhs
   let rhs' = toSigned rhs
@@ -603,11 +640,8 @@ bv2i (BitVec x) = Integer $ Prelude.toInteger x
 
 {-# OPAQUE bvsize #-}
 bvsize :: forall n. BitVec n -> Integer
-bvsize BitVec {} = Integer $ natVal @n Proxy
+bvsize BitVec {} = Integer $ Prelude.natVal @n Proxy
 
--- FIXME: The functions in this file need an implementation! Haskell is
--- optimising their call away via an empty case over them  since it thinks
--- they're diverging...
 {-# OPAQUE bvnot #-}
 bvnot :: forall n. BitVec n -> BitVec n
 bvnot = bvunary Prelude.complement
@@ -693,21 +727,21 @@ bvconcat :: forall l r. BitVec l -> BitVec r -> BitVec (l + r)
 bvconcat (BitVec lhs) (BitVec rhs) = runIdentity do
   SomeNat' @sum <- pure $ typeAdd @l @r
   -- SAFETY: Sum of two positives is also positive.
-  Dict <- pure $ unsafeDict @(1 <= sum)
+  Dict <- pure $ unsafeAxiom @(1 <= sum)
   pure $ BitVec (sizedBVConcat lhs rhs)
 
 {-# OPAQUE bvzext #-}
 bvzext :: forall l r. KnownNat r => l <= r => BitVec l -> BitVec r
 -- SAFETY: Follows from transitivity on the constraints as BitVec internally
 -- carries '1 <= l'.
-bvzext (BitVec x) = case unsafeDict @(1 <= r) of
+bvzext (BitVec x) = withKnownNat @r case unsafeAxiom @(1 <= r) of
   Dict -> BitVec $ sizedBVZext Proxy x
 
 {-# OPAQUE bvsext #-}
 bvsext :: forall l r. KnownNat r => l <= r => BitVec l -> BitVec r
 -- SAFETY: Follows from transitivity on the constraints as BitVec internally
 -- carries '1 <= l'.
-bvsext (BitVec x) = case unsafeDict @(1 <= r) of
+bvsext (BitVec x) = withKnownNat @r case unsafeAxiom @(1 <= r) of
   Dict -> BitVec $ sizedBVSext Proxy x
 
 {-# OPAQUE bvselect #-}
@@ -719,7 +753,8 @@ bvselect
   => idx + width <= n
   => BitVec n
   -> BitVec width
-bvselect (BitVec x) = BitVec $ sizedBVSelect (Proxy @idx) (Proxy @width) x
+bvselect (BitVec x) = withKnownNat @idx $ withKnownNat @width do
+  BitVec $ sizedBVSelect (Proxy @idx) (Proxy @width) x
 
 bvresize
   :: forall l r
@@ -730,11 +765,11 @@ bvresize
   -> BitVec r
 bvresize f x = do
   let l = bvsize x
-  let r = hsi2i $ natVal @r Proxy
+  let r = natVal @r
   case Prelude.compare l r of
-    LT | Dict <- unsafeDict @(l <= r) -> f x
-    EQ | Dict <- unsafeDict @(l ~ r) -> x
-    GT | Dict <- unsafeDict @(r <= l) -> bvselect @0 @r x
+    LT | Dict <- unsafeAxiom @(l <= r) -> f x
+    EQ | Dict <- unsafeEq @l @r -> x
+    GT | Dict <- unsafeAxiom @(r <= l) -> bvselect @0 @r x
 
 bvzresize
   :: forall l r

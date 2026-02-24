@@ -4,7 +4,7 @@
 
 module Pantomime.Dict
   ( Dict (..)
-  , unsafeDict
+  , unsafeAxiom
   , unsafeEq
   , eqNat
   , leqNat
@@ -20,6 +20,7 @@ module Pantomime.Dict
 import GHC.TypeNats
 
 import Data.Constraint (Dict (..))
+import Data.Constraint.Unsafe (unsafeAxiom)
 import Data.Data (Proxy(..))
 import Data.Type.Ord
 
@@ -27,9 +28,6 @@ import Control.Applicative (Alternative (..))
 import Control.Monad.Identity (runIdentity)
 
 import Unsafe.Coerce (unsafeCoerce)
-
-unsafeDict :: Dict c
-unsafeDict = unsafeCoerce $ Dict @()
 
 unsafeEq :: forall {k} (a :: k) (b :: k). Dict (a ~ b)
 unsafeEq = unsafeCoerce $ Dict @(() ~ ())
@@ -69,7 +67,7 @@ cmpNat' = cmpNat @l @r Proxy Proxy
 geqToLeq :: forall (n :: Nat) m. n >= m => Dict (m <= n)
 -- We only match on the dictionary such that the constraint 'n >= m' does not
 -- give a warning about being unused.
-geqToLeq = case Dict @(n >= m) of Dict -> unsafeDict
+geqToLeq = case Dict @(n >= m) of Dict -> unsafeAxiom
 
 -- TODO: This one feels a bit obsolote no? Can't we just split any usage of this
 -- into a normal SomeNat and a Dict? Maybe not, but this solution feels very
@@ -84,7 +82,7 @@ typeSub = runIdentity do
   let rhs' = natVal $ Proxy @rhs
   SomeNat @n _ <- pure . someNatVal $ lhs' - rhs'
   Dict <- pure $ unsafeEq @(lhs - rhs) @n
-  pure $ SomeNat' @n @(lhs - rhs)
+  pure $ SomeNat' @(lhs - rhs)
 
 -- | Type-level subtraction.
 typeAdd :: forall lhs rhs. KnownNat lhs => KnownNat rhs => SomeNat' (lhs + rhs)
@@ -93,12 +91,10 @@ typeAdd = runIdentity do
   let rhs' = natVal $ Proxy @rhs
   SomeNat @n _ <- pure . someNatVal $ lhs' + rhs'
   Dict <- pure $ unsafeEq @(lhs + rhs) @n
-  pure $ SomeNat' @n @(lhs + rhs)
+  pure $ SomeNat' @(lhs + rhs)
 
 -- TODO: Move this thing to Pantomime.Grisette.BitVector
 withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
 withSize con sym = case natVal $ Proxy @n of
-  0 -> case unsafeEq @n @0 of
-    Dict -> con
-  _ -> case unsafeDict @(1 <= n) of
-    Dict -> sym
+  0 -> case unsafeEq @n @0 of Dict -> con
+  _ -> case unsafeAxiom @(1 <= n) of Dict -> sym

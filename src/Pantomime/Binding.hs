@@ -1,4 +1,5 @@
 {-# LANGUAGE MagicHash #-}
+
 module Pantomime.Binding
   ( InterfaceThings (..)
   , getInterfaceThings
@@ -17,7 +18,7 @@ import Effectful.GHC.External (HasFamInstEnvs)
 import Effectful.GHC.TyThing (HasThings, lookupTyCon, lookupId)
 import Effectful.GHC.TH (THNameToGHCName, thNameToGhcName)
 import GHC.Plugins (Name, Var, Id)
-import GHC.TypeNats qualified as Builtin (KnownNat, type (<=))
+import GHC.TypeNats qualified as Builtin (type (<=))
 import Language.Haskell.TH qualified as TH
 import Pantomime.BuiltIn qualified as Builtin
 import Pantomime.PrimOps qualified as PrimOps

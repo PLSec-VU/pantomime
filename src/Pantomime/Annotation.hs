@@ -17,6 +17,7 @@ import Data.Composition ((.:))
 import Data.Data (Data, Typeable)
 
 import Pantomime.Axiom (PluginAxioms)
+import Pantomime.BuiltIn qualified as Pantomime
 
 -- TODO: Not sure I like the name. This checks whether an expression whose
 -- result is of type Bool is valid. That is, whether it will always return True.
@@ -44,7 +45,7 @@ pantomime
   => Pantomime si sl ss i i' o o'
   -> si
   -> i
-  -> Bool
+  -> Pantomime.Bool
 pantomime Pantomime { .. } = do
   let c1 = bimap projection observation .: implementation
   let c2 si i = do
@@ -53,7 +54,9 @@ pantomime Pantomime { .. } = do
         let (ss', o) = simulator ss x
         ((sl', ss'), o)
 
-  \si i -> c1 si i == c2 si i
+  \si i -> case c1 si i == c2 si i of
+    True -> Pantomime.True
+    False -> Pantomime.False
 
 -- TODO: There are some duplicate record fields here. Perhaps we should change
 -- this?

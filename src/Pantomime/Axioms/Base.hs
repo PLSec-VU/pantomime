@@ -91,6 +91,11 @@ axioms = PluginAxioms
     , ('Pantomime.eqWord32#, 'eqW32)
     , ('Pantomime.eqWord64#, 'eqW64)
 
+    -- Integer to pantomime primitive conversions.
+    ----------------------------------------------
+    , ('Pantomime.hsi2i, 'hsi2i)
+    , ('Pantomime.hsi2bv, 'hsi2bv)
+
     -- System FC primitive operations.
     ----------------------------------
     , ('GHC.tagToEnum#, 'tagToEnum)
@@ -354,10 +359,6 @@ axioms = PluginAxioms
     , ('GHC.patError, 'patError')
     , ('GHC.withSomeSNat, 'withSomeSNat)
 
-    -- Integer to pantomime primitive conversions.
-    ----------------------------------------------
-    , ('Pantomime.hsi2i, 'hsi2i)
-    , ('Pantomime.hsi2bv, 'hsi2bv)
     ]
   }
 
@@ -1385,7 +1386,7 @@ ltWord64# = compareWord64# Pantomime.bvult
 hsi2bv
   :: forall n
    . Pantomime.Embeddable BitVecPW Int#
-  => KnownNat n
+  => Pantomime.KnownNat n
   => 1 <= n
   => Integer
   -> Pantomime.BitVec n

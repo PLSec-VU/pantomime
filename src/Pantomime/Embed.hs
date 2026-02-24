@@ -59,8 +59,10 @@ import GHC.Plugins
   , mkNumLitTy
   , mkSubCo
   , mkSymCo
+  , mkTransCo
   , splitTyConApp_maybe
   , tyConDataCons_maybe
+  , instNewTyCon_maybe
   , noSrcSpan
   , extendTvSubst
   , naturalTy
@@ -69,7 +71,6 @@ import GHC.Plugins
   , boxedRepDataConTyCon
   , liftedDataConTy
   , levityTy
-  , isNumLitTy
   , pattern ManyTy
   )
 import GHC.TypeLits
@@ -80,7 +81,7 @@ import GHC.TypeLits
   , natVal
   )
 
-import Grisette (SymInteger, SymBool)
+import Grisette (SymInteger, SymBool, ToCon (..))
 import Grisette.Internal.SymPrim.SymArray (SymArray)
 
 import Pantomime.Expr
@@ -106,9 +107,9 @@ import Pantomime.Expr
   , forceCo
   , liftEff
   , throwE
-  , failWithE
+  , failWithE, pprArg, dbgE
   )
-import Pantomime.Util (SomeBitVec (..), SymBitVec, failWith)
+import Pantomime.Util (SomeBitVec (..), SymBitVec)
 import Pantomime.Literal
   ( BuiltInTyCon (..)
   , LiteralTypeable
@@ -454,16 +455,29 @@ project' subst sty expr = case sty of
     -- thing. Same for other type families in here btw (like 'Primitive').
     _ <- expr
     pure ()
-  SKnownNatTy n -> liftEff do
-    n' <- embedSTy subst n
-    fam <- getFamInstEnvs
-    let Reduction _ ty = normaliseType fam Nominal n'
-    -- TODO: It would probably be good to distinguish between two errors here.
-    -- If we just don't have a type with kind 'Nat', then we actually should
-    -- error. If we do have one, but we could just not reduce it to a concrete
-    -- value, the error should be something closed to an 'unknown' SMT solver
-    -- result. Nothing in fact is invalid, it is just not solvable.
-    failWith () $ isNumLitTy ty >>= someNatVal
+  SKnownNatTy _ -> do
+    ty <- liftEff $ embedSTy subst sty
+
+    -- Construct a coercion from the Pantomime 'KnownNat' to 'Integer'. Note
+    -- that we do not want to fully instantiate newtypes as this would lead us
+    -- to the Haskell 'Integer'.
+    co <- failWithE () do
+      (tc, args) <- splitTyConApp_maybe ty
+      (ty', co) <- instNewTyCon_maybe tc args
+      (tc', args') <- splitTyConApp_maybe ty'
+      (_, co') <- instNewTyCon_maybe tc' args'
+      pure $ mkTransCo co co'
+
+    let expr' = expr >>= flip mkCast co
+
+    expr' >>= \case
+      -- TODO: It would probably be good to distinguish between two errors here.
+      -- If we just don't have an integer value, then we actually should
+      -- error. If we do have one, but we could just not reduce it to a concrete
+      -- value, the error should be something closed to an 'unknown' SMT solver
+      -- result. Nothing in fact is invalid, it is just not solvable.
+      Lit (Integer i) | Just n <- toCon i >>= someNatVal -> pure n
+      _ -> throwE ()
   STYPE _ -> throwE ()
   SRuntimeRepTy -> throwE ()
   SBoxedRep _ -> throwE ()

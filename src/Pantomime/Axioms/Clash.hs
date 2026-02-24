@@ -11,18 +11,31 @@ module Pantomime.Axioms.Clash
   , axioms
   ) where
 
+import GHC.Base (minInt, maxInt)
 import GHC.Exts (IsList (..), Coercible, coerce)
-import GHC.TypeNats (KnownNat, type (<=), type (+), type (-), natVal, Natural)
+import GHC.Num (integerToNatural, Integer (..))
+import GHC.TypeNats
+  ( KnownNat
+  , Natural
+  , type (<=)
+  , type (+)
+  , type (-)
+  , natVal
+  , withKnownNat
+  )
 import GHC.TypeLits qualified as TypeLits (natVal)
+import Control.Monad.Identity (Identity(..))
 import Data.Constraint (Dict (..))
+import Data.Constraint.Unsafe (unsafeSNat)
 import Data.Composition ((.:))
 import Data.Data (Proxy (..))
 import Data.Bits (Bits (..))
+import Clash.Prelude (SNat (..))
 import Clash.Sized.Internal.BitVector (Bit)
 import Clash.Sized.Internal.BitVector qualified as Bit
   ( eq##
   , neq##
-  -- , msb#
+  , msb#
   , high
   , low
   )
@@ -34,9 +47,7 @@ import Clash.Sized.Internal.Signed (Signed)
 import Clash.Sized.Internal.Signed qualified as Signed
 import Pantomime (PluginAxioms (..))
 import Pantomime.BuiltIn qualified as Pantomime
-import Clash.Prelude (SNat (..))
-import Control.Monad.Identity (Identity(..))
-import Pantomime.Dict (SomeNat'(..), unsafeDict, unsafeEq, typeAdd, typeSub)
+import Pantomime.Dict (SomeNat'(..), unsafeAxiom, unsafeEq, typeAdd, typeSub)
 
 axioms :: PluginAxioms
 axioms = PluginAxioms
@@ -117,7 +128,7 @@ axioms = PluginAxioms
     , ('BitVector.slice#, 'sliceA)
     , ('(BitVector.++#), 'concatA)
     -- , ('BitVector.minBound#, 'minBoundBitVector)
-    -- , ('Bit.msb#, 'msbBitVector)
+    , ('Bit.msb#, 'msb#)
 
     , ('Bit.eq##, 'eqbit)
     , ('Bit.neq##, 'neqbit)
@@ -133,7 +144,7 @@ data BitVec n where
 withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
 withSize zero pos = case natVal $ Proxy @n of
   0 -> case unsafeEq @n @0 of Dict -> zero
-  _ -> case unsafeDict @(1 <= n) of Dict -> pos
+  _ -> case unsafeAxiom @(1 <= n) of Dict -> pos
 
 -- | Helper function to wrap a 'Pantomime' bit-vector primitive.
 nullary
@@ -377,7 +388,7 @@ concatA
 concatA = coerce @(BitVec l -> BitVec r -> BitVec (l + r)) \cases
   BitVecZ rhs -> rhs
   lhs BitVecZ -> lhs
-  (BitVecP lhs) (BitVecP rhs) -> case unsafeDict @(1 <= l + r) of
+  (BitVecP lhs) (BitVecP rhs) -> case unsafeAxiom @(1 <= l + r) of
     Dict -> BitVecP $ Pantomime.bvconcat lhs rhs
 
 sliceA
@@ -393,14 +404,14 @@ sliceA bv SNat {} SNat {} = coerce go $ bv
     go x = runIdentity do
       -- SAFETY: Since neither 'hi' or 'top' can be negative, the input
       -- bitvector is never zero-sized.
-      Dict <- pure $ unsafeDict @(1 <= hi + 1 + top)
+      Dict <- pure $ unsafeAxiom @(1 <= hi + 1 + top)
       let x' = case x of BitVecP inner -> inner
 
       SomeNat' @hi1 <- pure $ typeAdd @hi @1
       SomeNat' @width <- pure $ typeSub @hi1 @lo
 
       -- TODO: Not sure if this is actually true? I feel like it should be.
-      Dict <- pure $ unsafeDict @(lo + width <= hi + 1 + top)
+      Dict <- pure $ unsafeAxiom @(lo + width <= hi + 1 + top)
 
       pure $ nullary (Pantomime.bvselect @lo @width x')
 
@@ -457,3 +468,36 @@ lowbit = 0
 highbit :: Bit
 highbit = 1
 
+msb#
+  :: forall n bv bit
+   . Coercible BitVec bv
+  => Coercible BitVec1 bit
+  => bv n
+  -> bit
+msb# = coerce @(BitVec n -> BitVec 1) \case
+  -- NOTE: Fetching the most significant bit from an empty bitvector doesn't
+  -- really make sense, but Clash allows it so we need to have behaviour for it.
+  -- TODO: Maybe we should check what the behaviour is of clash in this respect.
+  BitVecZ -> BitVecP 0
+  BitVecP x -> runIdentity do
+    Dict <- pure $ withNat x (Dict @(KnownNat n))
+    SomeNat' @n' <- pure $ typeSub @n @1
+    Dict <- pure $ unsafeAxiom @(n' + 1 <= n)
+    let result = Pantomime.bvselect @n' @1 x
+    pure $ BitVecP result
+
+withNat
+  :: forall n r
+   . Pantomime.BitVec n
+  -> (KnownNat n => r)
+  -> r
+withNat bv f = do
+  let i = i2hsi $ Pantomime.bvsize bv
+  let n = unsafeSNat @n $ integerToNatural i
+  withKnownNat n f
+
+i2hsi :: Pantomime.Integer -> Integer
+i2hsi i = if
+  | i > fromIntegral maxInt -> IP undefined
+  | i < fromIntegral minInt -> IN undefined
+  | otherwise -> IS $ Pantomime.toInt# $ Pantomime.i2bv i
