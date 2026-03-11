@@ -61,6 +61,7 @@ import GHC.Core.Type qualified as GHC
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.Ppr (pprOptCo)
+import GHC.Core.Predicate (isEqPred)
 import GHC.Core.Opt.Arity (pushCoTyArg, pushCoValArg)
 import GHC.Utils.Outputable
   ( Outputable (..)
@@ -90,7 +91,6 @@ import GHC.Plugins
   , isReflexiveCo
   , mkTransCo
   , coercionRKind
-  , isCoVarType
   , mkCoCast
   , isForAllTy_ty
   , coercionType
@@ -709,14 +709,11 @@ mkCast expr co = do
     throwE ()
 
   case expr of
-    -- A reflexive cast is a no-op and thus may be removed immediately.
-    _ | isReflexiveCo co -> pure expr
-
-    -- TODO: This is a recursive call of HasCallStack, I should capture it in a
-    -- closure as to not blow it up instead!
     Cast body co' -> do
-      body' <- liftUnion body
-      mkCast body' $ mkTransCo co' co
+      let coT = mkTransCo co' co
+      if
+        | isReflexiveCo coT -> liftUnion body
+        | otherwise -> pure $ Cast body coT
 
     -- NOTE: This comment was written originally inside of GHC 'mkCast'. I'm
     -- unsure what 'g' refers to (it's not in the original code either), but
@@ -726,10 +723,15 @@ mkCast expr co = do
     -- The guard here checks that g has a (~#) on both sides, otherwise
     -- 'decomposeCo' fails. Can in principle happen with unsafeCoerce.
     -- ```
-    Coercion co' | isCoVarType $ coercionRKind co -> do
+    Coercion co' | isEqPred $ coercionRKind co -> do
       pure $ mkCoercion (mkCoCast co' co)
 
-    _ -> pure $ Cast (pure expr) co
+    -- TODO: Even with this improvement, we still do reflexivity check (and
+    -- the above sanity type-check) once for each body. Perhaps we should take
+    -- an 'Arg es' here?
+    _
+      | isReflexiveCo co -> pure expr
+      | otherwise -> pure $ Cast (pure expr) co
 
 mkVariant :: Variant es -> Eval es a
 mkVariant = Eval . ExceptT . pure . Left

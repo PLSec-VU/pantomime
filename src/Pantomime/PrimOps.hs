@@ -219,7 +219,7 @@ type UnsafeEqualityProofOp
 unsafeEqualityProof :: PrimOpExpr es
 unsafeEqualityProof = embed @UnsafeEqualityProofOp emptySubst $ liftF3 \_ tyL tyR -> do
   let prov = PluginProv "pantomime embedded 'unsafeEqualityProof'"
-  pure $ mkUnivCo prov Nominal tyR tyL
+  pure $ mkUnivCo prov [] Nominal tyR tyL
 
 true :: PrimOpExpr es
 true = embed @BoolTy emptySubst $ pure Grisette.true

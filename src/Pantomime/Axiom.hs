@@ -50,7 +50,6 @@ import Control.Applicative (Alternative (..))
 import Data.Data (Data)
 import Data.Function (on)
 import Data.Map (Map)
-import Data.Typeable (Typeable)
 import Data.Traversable (for)
 
 import Effectful
@@ -151,7 +150,7 @@ data PluginAxioms where
     -- matter: any later definitions may use ones defined earlier. Duplicate
     -- definitions are considered an error.
     } -> PluginAxioms
-  deriving (Show, Data, Typeable)
+  deriving (Show, Data)
 
 instance Semigroup PluginAxioms where
   (<>) l r = PluginAxioms
@@ -183,7 +182,7 @@ data PluginAxiomsR where
     --
     -- This may be used to extend substitution environments.
     } -> PluginAxiomsR
-    deriving (Data, Typeable)
+    deriving (Data)
 
 instance Outputable PluginAxiomsR where
   ppr PluginAxiomsR { .. } = hang "PluginAxiomsR" 2 $ vcat
@@ -249,7 +248,7 @@ resolvePluginAxioms PluginAxioms { .. } = do
     let prov = PluginProv "pantomime user-defined"
     let tyL = mkTyConTy tcL
     let tyR = mkTyConTy tcR
-    let co = mkUnivCo prov Representational tyL tyR
+    let co = mkUnivCo prov [] Representational tyL tyR
 
     -- Gather the dictionaries for 'Coercible'.
     let dictCo = do

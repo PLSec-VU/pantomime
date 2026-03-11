@@ -14,7 +14,7 @@ module Pantomime.Annotation
 
 import Data.Bifunctor (Bifunctor(..))
 import Data.Composition ((.:))
-import Data.Data (Data, Typeable)
+import Data.Data (Data)
 
 import Pantomime.Axiom (PluginAxioms)
 import Pantomime.BuiltIn qualified as Pantomime
@@ -23,7 +23,7 @@ import Pantomime.BuiltIn qualified as Pantomime
 -- result is of type Bool is valid. That is, whether it will always return True.
 data Theory where
   Theory :: PluginAxioms -> Theory
-  deriving (Show, Data, Typeable)
+  deriving (Show, Data)
 
 type Circuit s i o = s -> i -> (s, o)
 

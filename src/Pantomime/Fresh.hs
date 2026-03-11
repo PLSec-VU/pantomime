@@ -223,7 +223,7 @@ freshExpr axioms root = do
             let prov = PluginProv "pantomime user-defined"
             let tyL = mkTyConTy tc
             let tyR = mkTyConTy tc'
-            let univ = mkUnivCo prov Representational tyL tyR
+            let univ = mkUnivCo prov [] Representational tyL tyR
             let co = mkAppCos univ $ mkReflCo Nominal <$> args
 
             -- Create the final expression.
@@ -249,7 +249,7 @@ freshExpr axioms root = do
           -- Algebraic Data Type:
           -----------------------
           | Just (tc, args) <- splitTyConApp_maybe ty
-          , or $ fmap ($ tc)
+          , any ($ tc)
             [ isDataTyCon
             , isUnboxedTupleTyCon
             , isUnboxedSumTyCon

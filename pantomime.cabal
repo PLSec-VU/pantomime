@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.38.1.
+-- This file has been generated from package.yaml by hpack version 0.39.1.
 --
 -- see: https://github.com/sol/hpack
 
@@ -10,8 +10,8 @@ description:    Please see the README on GitHub at <https://github.com/PLSec-VU/
 homepage:       https://github.com/PLSec-VU/pantomime#readme
 bug-reports:    https://github.com/PLSec-VU/pantomime/issues
 author:         Robin Webbers
-maintainer:     example@example.com
-copyright:      2024 Author name here
+maintainer:     robin_webbers_1@hotmail.com
+copyright:      2026 Robin Webbers
 license:        BSD-3-Clause
 license-file:   LICENSE
 build-type:     Simple
@@ -39,6 +39,7 @@ library
       Effectful.GHC.TyThing
       Effectful.GHC.Unique
       Effectful.Grisette.Solver
+      Effectful.Profiler
       Pantomime
       Pantomime.Annotation
       Pantomime.Axiom
@@ -48,6 +49,7 @@ library
       Pantomime.Dict
       Pantomime.Embed
       Pantomime.Expr
+      Pantomime.Expr2
       Pantomime.Fresh
       Pantomime.Grisette.Mergeable
       Pantomime.Grisette.UnionT
@@ -93,14 +95,14 @@ library
       TypeApplications
       TypeFamilies
       TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module -finfo-table-map -fdistinct-constructor-tables
   build-depends:
       base >=4.7 && <5
     , composition
     , constraints >=0.14.2
     , containers
     , effectful-core >=2.5.1.0
-    , ghc >=9.6.4
+    , ghc >=9.12.2
     , ghc-prim
     , grisette >=0.13.0.0
     , hashable
@@ -163,21 +165,10 @@ executable pantomime-exe
   build-depends:
       QuickCheck
     , base >=4.7 && <5
-    , composition
     , constraints >=0.14.2
-    , containers
-    , effectful-core >=2.5.1.0
-    , ghc >=9.6.4
-    , ghc-prim
     , grisette >=0.13.0.0
-    , hashable
-    , microlens
     , mtl
     , pantomime
-    , template-haskell
-    , text
-    , transformers
-    , unordered-containers
   default-language: Haskell2010
 
 test-suite pantomime-test
@@ -218,23 +209,12 @@ test-suite pantomime-test
   build-depends:
       HUnit
     , base >=4.7 && <5
-    , composition
     , constraints >=0.14.2
-    , containers
     , directory
-    , effectful-core >=2.5.1.0
-    , ghc >=9.6.4
     , ghc-paths
-    , ghc-prim
     , grisette >=0.13.0.0
-    , hashable
     , hspec
-    , microlens
     , mtl
     , pantomime
     , silently
-    , template-haskell
-    , text
-    , transformers
-    , unordered-containers
   default-language: Haskell2010

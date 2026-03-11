@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 module Pantomime.Symbolise
   ( symbolise
   , symboliseBind

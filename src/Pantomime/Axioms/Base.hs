@@ -99,6 +99,9 @@ axioms = PluginAxioms
     -- System FC primitive operations.
     ----------------------------------
     , ('GHC.tagToEnum#, 'tagToEnum)
+    -- TODO: While these might be deprecated for use, they are in fact required
+    -- in this context... Not sure what to do if these are unexposed (but still
+    -- used internally) in the future.
     , ('GHC.dataToTagSmall#, 'dataToTag)
     , ('GHC.dataToTagLarge#, 'dataToTag)
     , ('GHC.raise#, 'Pantomime.raise)
@@ -122,11 +125,11 @@ axioms = PluginAxioms
     -- , (('GHC.quotInt#, 'quotInt#))
     -- , (('GHC.remInt#, 'remInt#))
     -- , (('GHC.quotRemInt#, 'quotRemInt#))
-    , (('GHC.andI#, 'andI#))
-    , (('GHC.orI#, 'orI#))
-    , (('GHC.xorI#, 'xorI#))
-    , (('GHC.notI#, 'notI#))
-    , (('GHC.negateInt#, 'negateInt#))
+    , ('GHC.andI#, 'andI#)
+    , ('GHC.orI#, 'orI#)
+    , ('GHC.xorI#, 'xorI#)
+    , ('GHC.notI#, 'notI#)
+    , ('GHC.negateInt#, 'negateInt#)
     -- , ('GHC.uncheckedIShiftL#, 'uncheckedIShiftL#)
     -- , ('GHC.uncheckedIShiftRA#, 'uncheckedIShiftRA#)
     -- , ('GHC.uncheckedIShiftRL#, 'uncheckedIShiftRL#)

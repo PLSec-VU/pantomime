@@ -672,7 +672,7 @@ bvmul = bvbinary (Prelude.*)
 
 {-# OPAQUE bvudiv #-}
 bvudiv :: forall n. BitVec n -> BitVec n -> BitVec n
-bvudiv = bvbinary (Prelude.div)
+bvudiv = bvbinary Prelude.div
 
 {-# OPAQUE bvsdiv #-}
 bvsdiv :: forall n. BitVec n -> BitVec n -> BitVec n
@@ -680,7 +680,7 @@ bvsdiv = bvbinary $ signedBin Prelude.div
 
 {-# OPAQUE bvurem #-}
 bvurem :: forall n. BitVec n -> BitVec n -> BitVec n
-bvurem = bvbinary (Prelude.rem)
+bvurem = bvbinary Prelude.rem
 
 {-# OPAQUE bvsrem #-}
 bvsrem :: forall n. BitVec n -> BitVec n -> BitVec n

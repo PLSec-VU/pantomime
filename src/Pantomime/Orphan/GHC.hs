@@ -39,6 +39,7 @@ import Grisette
   ( Mergeable (..)
   , MergingStrategy (..)
   , Default (..)
+  , EvalSym (..)
   )
 
 import Data.Function (on)
@@ -101,10 +102,6 @@ deriving via Uniquely FastString instance Mergeable FastString
 deriving instance Generic (VarBndr var argf)
 deriving via Default (VarBndr var argf)
   instance (Mergeable var, Mergeable argf) => Mergeable (VarBndr var argf)
-deriving via Generically (VarBndr var argf)
-  instance (Eq var, Eq argf) => Eq (VarBndr var argf)
-deriving via Generically (VarBndr var argf)
-  instance (Ord var, Ord argf) => Ord (VarBndr var argf)
 
 deriving instance Generic TyLit
 deriving via Generically TyLit instance Ord TyLit
@@ -123,6 +120,9 @@ deriving instance Generic Type
 deriving via Default Type instance Mergeable Type
 deriving via Generically Type instance Eq Type
 deriving via Generically Type instance Ord Type
+
+instance EvalSym Type where
+  evalSym _ _ = id
 
 deriving instance Generic (Scaled a)
 deriving via Default (Scaled a) instance Mergeable a => Mergeable (Scaled a)
