@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.39.1.
+-- This file has been generated from package.yaml by hpack version 0.38.1.
 --
 -- see: https://github.com/sol/hpack
 
@@ -28,8 +28,6 @@ library
       Control.Error
       Effectful.Break
       Effectful.Context
-      Effectful.Context.Dynamic
-      Effectful.Context.Static.Local
       Effectful.GHC.Annotations
       Effectful.GHC.CoreE
       Effectful.GHC.Display
@@ -64,7 +62,6 @@ library
       Pantomime.Symbolise
       Pantomime.Unification
       Pantomime.Util
-      Pantomime.Variant
   other-modules:
       Paths_pantomime
   autogen-modules:
