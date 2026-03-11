@@ -74,7 +74,7 @@ checkValid
   => Provider_ Solver () :> es
   => PluginAxiomsR
   -> CoreExpr
-  -> Eff es ()
+  -> Eff es Bool
 -- TODO: I should remove this early error catch. Also, these errors are very
 -- non-proper. We should throw errors that actually inform us about something!
 checkValid PluginAxiomsR { .. } expr = do
@@ -167,10 +167,11 @@ checkValid PluginAxiomsR { .. } expr = do
           , ppr bndr <+> "::" <+> ppr (varType bndr)
           , ppr arg'
           ]
-      error "Expression was **not** valid!"
+      dbg @SDoc "Expression was **not** valid!"
+      pure False
     Unsatisfiable -> do
       dbg @SDoc "Expression was valid!"
-      pure ()
+      pure True
     -- FIXME: I don't think this is always true. Especially so w.r.t. allowing
     -- user define Opaque types. Also not sure about some of the floating point
     -- stuff for example.

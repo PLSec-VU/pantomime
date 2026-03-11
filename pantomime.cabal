@@ -1,15 +1,15 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.37.0.
+-- This file has been generated from package.yaml by hpack version 0.39.1.
 --
 -- see: https://github.com/sol/hpack
 
-name:           uc-plugin
+name:           pantomime
 version:        0.1.0.0
-description:    Please see the README on GitHub at <https://github.com/RobinWebbers/uc-plugin#readme>
-homepage:       https://github.com/RobinWebbers/uc-plugin#readme
-bug-reports:    https://github.com/RobinWebbers/uc-plugin/issues
-author:         Robin Webbers
+description:    Please see the README on GitHub at <https://github.com/anonymous/pantomime#readme>
+homepage:       https://github.com/anonymous/pantomime#readme
+bug-reports:    https://github.com/anonymous/pantomime/issues
+author:         anonymous
 maintainer:     example@example.com
 copyright:      2024 Author name here
 license:        BSD-3-Clause
@@ -21,7 +21,7 @@ extra-source-files:
 
 source-repository head
   type: git
-  location: https://github.com/RobinWebbers/uc-plugin
+  location: https://github.com/anonymous/pantomime
 
 library
   exposed-modules:
@@ -35,11 +35,9 @@ library
       Effectful.GHC.Display
       Effectful.GHC.DynFlags
       Effectful.GHC.External
-      Effectful.GHC.ModGuts
       Effectful.GHC.TH
       Effectful.GHC.TyThing
       Effectful.GHC.Unique
-      Effectful.Grisette.Fresh
       Effectful.Grisette.Solver
       Pantomime
       Pantomime.Annotation
@@ -53,8 +51,6 @@ library
       Pantomime.Grisette.Mergeable
       Pantomime.Grisette.SizedBV
       Pantomime.Grisette.SomeBV
-      Pantomime.Grisette.Union
-      Pantomime.Orphan.Effectful
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes
@@ -68,10 +64,11 @@ library
       Pantomime.Symbolise
       Pantomime.Unification
       Pantomime.Util
+      Pantomime.Variant
   other-modules:
-      Paths_uc_plugin
+      Paths_pantomime
   autogen-modules:
-      Paths_uc_plugin
+      Paths_pantomime
   hs-source-dirs:
       src
   default-extensions:
@@ -118,7 +115,7 @@ library
     , unordered-containers
   default-language: Haskell2010
 
-executable uc-plugin-exe
+executable pantomime-exe
   main-is: Main.hs
   other-modules:
       ClassInline
@@ -135,9 +132,9 @@ executable uc-plugin-exe
       TwoAdders
       TwoAddersStall
       TwoAddersStallPrecise
-      Paths_uc_plugin
+      Paths_pantomime
   autogen-modules:
-      Paths_uc_plugin
+      Paths_pantomime
   hs-source-dirs:
       app
   default-extensions:
@@ -179,20 +176,20 @@ executable uc-plugin-exe
     , grisette >=0.13.0.0
     , microlens
     , mtl
+    , pantomime
     , template-haskell
     , text
     , transformers
-    , uc-plugin
     , unordered-containers
   default-language: Haskell2010
 
-test-suite uc-plugin-test
+test-suite pantomime-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
-      Paths_uc_plugin
+      Paths_pantomime
   autogen-modules:
-      Paths_uc_plugin
+      Paths_pantomime
   hs-source-dirs:
       test
   default-extensions:
@@ -237,10 +234,10 @@ test-suite uc-plugin-test
     , hspec
     , microlens
     , mtl
+    , pantomime
     , silently
     , template-haskell
     , text
     , transformers
-    , uc-plugin
     , unordered-containers
   default-language: Haskell2010

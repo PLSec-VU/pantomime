@@ -1,8 +1,8 @@
-name:                uc-plugin
+name:                pantomime
 version:             0.1.0.0
-github:              "RobinWebbers/uc-plugin"
+github:              "anonymous/pantomime"
 license:             BSD-3-Clause
-author:              "Robin Webbers"
+author:              "anonymous"
 maintainer:          "example@example.com"
 copyright:           "2024 Author name here"
 
@@ -17,7 +17,7 @@ extra-source-files:
 # To avoid duplicated efforts in documentation and dealing with the
 # complications of embedding Haddock markup inside cabal files, it is
 # common to point users to the README.md file.
-description:         Please see the README on GitHub at <https://github.com/RobinWebbers/uc-plugin#readme>
+description:         Please see the README on GitHub at <https://github.com/anonymous/pantomime#readme>
 
 default-extensions:
 - AllowAmbiguousTypes
@@ -79,7 +79,7 @@ library:
   source-dirs: src
 
 executables:
-  uc-plugin-exe:
+  pantomime-exe:
     main: Main.hs
     source-dirs: app
     ghc-options:
@@ -90,10 +90,10 @@ executables:
     - -fexpose-all-unfoldings
     dependencies:
     - QuickCheck
-    - uc-plugin
+    - pantomime
 
 tests:
-  uc-plugin-test:
+  pantomime-test:
     main: Spec.hs
     source-dirs: test
     ghc-options:
@@ -101,7 +101,7 @@ tests:
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
-    - uc-plugin
+    - pantomime
     - hspec
     - HUnit
     - ghc-paths

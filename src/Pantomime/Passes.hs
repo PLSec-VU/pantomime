@@ -1,11 +1,16 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedStrings #-}
+
 module Pantomime.Passes
   ( printAndLintPass
   , checkValidityPass
   ) where
 
-import GHC.Plugins hiding (empty, (<>), thNameToGhcName, getFirstAnnotations)
+import GHC.Plugins hiding (empty, thNameToGhcName, getFirstAnnotations)
 import GHC.Core.Lint
 import GHC.Driver.Config.Core.Lint (initLintConfig)
+import GHC.Clock (getMonotonicTimeNSec)
 
 import Grisette
   ( GrisetteSMTConfig (..)
@@ -19,6 +24,8 @@ import Data.Traversable (for)
 
 import Control.Error
 
+import Prelude hiding ((<>))
+
 import Language.Haskell.TH qualified as TH
 
 import Pantomime.Unification
@@ -27,6 +34,7 @@ import Pantomime.Axiom (resolvePluginAxioms)
 import Pantomime.Annotation
 
 import Effectful
+import Effectful.Dispatch.Static (unsafeEff_)
 import Effectful.Provider
 import Effectful.Grisette.Solver
 import Effectful.Exception (throwIO)
@@ -208,6 +216,12 @@ checkValidity
 -- TODO: The check itself permits recursive binders, so we should not restrict
 -- the input here really!
 checkValidity (Theory axioms) (Bind' var expr) = do
+  t0 <- unsafeEff_ getMonotonicTimeNSec
   axioms' <- resolvePluginAxioms axioms
-  checkValid axioms' expr
+  !result <- checkValid axioms' expr
+  t1 <- unsafeEff_ getMonotonicTimeNSec
+  let nanosInSecond = 1_000_000_000
+  let seconds = fromIntegral @_ @Double (t1 - t0) / nanosInSecond
+  let vals = ppr var <> ", " <> ppr seconds <> ", " <> ppr result <> "\n"
+  unsafeEff_ . appendFile "log.txt" $ showSDocUnsafe vals
   pure $ Bind' var expr
