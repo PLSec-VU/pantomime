@@ -71,6 +71,7 @@ library:
   # separate the base axioms to a separate package. I guess it would still be
   # used, just not visible most likely.
   - ghc-prim
+  - primitive
   # - ghc-stack-profiler
   - composition
   - containers

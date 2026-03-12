@@ -26,6 +26,9 @@ source-repository head
 library
   exposed-modules:
       Control.Error
+      Data.Member
+      Data.Product
+      Data.Sum
       Effectful.Break
       Effectful.Context
       Effectful.Context.Dynamic
@@ -62,7 +65,6 @@ library
       Pantomime.Symbolise
       Pantomime.Unification
       Pantomime.Util
-      Pantomime.Variant
   other-modules:
       Paths_pantomime
   autogen-modules:
@@ -107,6 +109,7 @@ library
     , hashable
     , microlens
     , mtl
+    , primitive
     , template-haskell
     , text
     , transformers

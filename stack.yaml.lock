@@ -16,12 +16,12 @@ packages:
     commit: ae4d837886efb2e7838f89271f343d6fa8130388
     git: git@github.com:RobinWebbers/grisette.git
 - completed:
-    hackage: sbv-13.5@sha256:00aea86ad09dcefb5d5286dd68bfb894709d2874052bcdadf80af3add9596af7,26690
+    hackage: sbv-13.6@sha256:65099c81504a2e85a49cc94a4f8bacad12c423b9171cf2ef3b6686a6a71d99ec,27240
     pantry-tree:
-      sha256: 65d23f68088ce549e8aa8ae77a35f2ec7c6491facbc4aeae8c2317101d9ddcda
-      size: 93933
+      sha256: fdf9578d9a43daff4fc8f8023f8ceac6eb2f4563797a4b03888c06e289952aa5
+      size: 116009
   original:
-    hackage: sbv-13.5
+    hackage: sbv-13.6
 - completed:
     hackage: th-abstraction-0.7.1.0@sha256:3011403d85b0070630e33d66b9370535ccd1e0e672ae58f847550b2b15bb4fd8,2268
     pantry-tree:
