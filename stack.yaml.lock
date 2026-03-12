@@ -5,6 +5,17 @@
 
 packages:
 - completed:
+    commit: ae4d837886efb2e7838f89271f343d6fa8130388
+    git: git@github.com:RobinWebbers/grisette.git
+    name: grisette
+    pantry-tree:
+      sha256: ac978bcc6a35ee65677dbe41373c2799759457dedee85c6888a2cb7b362a2068
+      size: 31883
+    version: 0.13.0.1
+  original:
+    commit: ae4d837886efb2e7838f89271f343d6fa8130388
+    git: git@github.com:RobinWebbers/grisette.git
+- completed:
     hackage: sbv-13.5@sha256:00aea86ad09dcefb5d5286dd68bfb894709d2874052bcdadf80af3add9596af7,26690
     pantry-tree:
       sha256: 65d23f68088ce549e8aa8ae77a35f2ec7c6491facbc4aeae8c2317101d9ddcda
@@ -19,12 +30,12 @@ packages:
   original:
     hackage: th-abstraction-0.7.1.0
 - completed:
-    hackage: QuickCheck-2.18.0.0@sha256:8da924b1009c9f1352ff367ab03345e36795958c7bb6c156aa460e3100753dfd,8678
+    hackage: QuickCheck-2.16.0.0@sha256:f4210647167f873196b01050ac074a44821b6687e26f792ad3474b6388c5f8b7,9208
     pantry-tree:
-      sha256: 721985f15de505c333b6368ac30ecd5b9caebd5d080eefcf813a91648943c099
-      size: 2882
+      sha256: d9ad9ff0ac7979e9ad808bd3485d17da1a386dda43a5c81b48901a0360290d81
+      size: 2627
   original:
-    hackage: QuickCheck-2.18.0.0
+    hackage: QuickCheck-2.16.0.0
 - completed:
     hackage: async-2.2.6@sha256:45d5587d8a348a7e2b3f04de963fe633db49b49cde10ca1e6f834bef3baecee9,3870
     pantry-tree:
@@ -313,12 +324,12 @@ packages:
   original:
     hackage: transformers-base-0.4.6
 - completed:
-    hackage: transformers-compat-0.8@sha256:246d2d55c4970592fb68d9d9282d1af719729af1a883c1c5b74fdd49d50866dc,3762
+    hackage: transformers-compat-0.7.2@sha256:044fb9955f63ee138fcebedfdcbe54afe741f2d5892a2d0bdf3a8052bd342643,5601
     pantry-tree:
-      sha256: 5d5c99408af0ab2b0b7bfc0754e37bb19b73d2c3efe7ccd6ae5c1a954422615b
-      size: 1225
+      sha256: f49610c6a2faf82111e5d4222576f4afbcfa904bf56665232c5aa077dfc7578f
+      size: 1724
   original:
-    hackage: transformers-compat-0.8
+    hackage: transformers-compat-0.7.2
 - completed:
     hackage: unliftio-core-0.2.1.0@sha256:f6a2736f858b5390d9384dca43d3ea4d96e9ca17217791791ca4951ba6e8072a,996
     pantry-tree:

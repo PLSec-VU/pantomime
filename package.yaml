@@ -65,12 +65,6 @@ ghc-options:
 
 library:
   source-dirs: src
-  ghc-options:
-  # - -fprof-auto
-  - -finfo-table-map
-  - -fdistinct-constructor-tables
-  # - +RTS -l -RTS
-  # - +RTS -p -RTS
   dependencies:
   - ghc >= 9.12.2
   # TODO: Not sure, but maybe I can remove the ghc-prim dependency once I
@@ -89,18 +83,6 @@ library:
   - hashable
 
 executables:
-  # profile-exe:
-  #   main: Main.hs
-  #   source-dirs: profile
-  #   ghc-options:
-  #   - -threaded
-  #   - -rtsopts
-  #   - -with-rtsopts=-N
-  #   dependencies:
-  #   - ghc
-  #   - ghc-paths
-  #   - ghc-boot
-  #   - transformers
   pantomime-exe:
     main: Main.hs
     source-dirs: app
@@ -110,7 +92,6 @@ executables:
     - -with-rtsopts=-N
     - -fplugin Pantomime
     - -fexpose-all-unfoldings
-    # - +RTS -l -RTS
     dependencies:
     - QuickCheck
     - pantomime
