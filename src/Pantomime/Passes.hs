@@ -222,6 +222,16 @@ checkValidity (Theory axioms) (Bind' var expr) = do
   t1 <- unsafeEff_ getMonotonicTimeNSec
   let nanosInSecond = 1_000_000_000
   let seconds = fromIntegral @_ @Double (t1 - t0) / nanosInSecond
-  let vals = ppr var <> ", " <> ppr seconds <> ", " <> ppr result <> "\n"
+  let qualified = case nameModule_maybe $ varName var of
+        Just name -> ppr name <> "."
+        Nothing -> ""
+  let vals = hcat
+        [ ppr qualified <> ppr var
+        , ", "
+        , ppr seconds
+        , ", "
+        , ppr result
+        , "\n"
+        ]
   unsafeEff_ . appendFile "log.txt" $ showSDocUnsafe vals
   pure $ Bind' var expr
