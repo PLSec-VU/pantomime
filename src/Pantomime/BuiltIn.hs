@@ -53,11 +53,18 @@ module Pantomime.BuiltIn
   , eqWord16#
   , eqWord32#
   , eqWord64#
-
-  , KnownNat (..)
-  , SNat
   , hsi2bv
   , hsi2i
+
+  -- | Operations on type-level natural numbers.
+  --
+  -- These mirror the original 'KnownNat' implementation up to the inner value
+  -- being the builtin 'Integer' of the symbolic executor.
+  , KnownNat (..)
+  , SNat
+  , natVal
+  , SomeNat (..)
+  , someNatVal
 
   -- | System Fc operations.
   , ite
@@ -104,6 +111,7 @@ module Pantomime.BuiltIn
   , BitVec
   , bv2i
   , bvsize
+  , bvnat
   , bvnot
   , bvneg
   , bvand
@@ -332,6 +340,15 @@ newtype SNat (n :: Nat) where
 -- | Get the 'Integer' corresponding to the 'KnownNat' constraint.
 natVal :: forall n. KnownNat n => Integer
 natVal = let UnsafeSNat i = natSing @n in i
+
+data SomeNat where
+  SomeNat :: KnownNat n => SomeNat
+
+someNatVal :: Integer -> Prelude.Maybe SomeNat
+someNatVal i = case ilt i 0 of
+  True -> Prelude.Nothing
+  False -> Prelude.Just case UnsafeSNat i of
+    nat@(UnsafeSNat @n _) -> withDict @(KnownNat n) nat $ SomeNat @n
 
 -- | Helper function to get the Haskell 'KnownNat' constraint.
 --
@@ -641,6 +658,13 @@ bv2i (BitVec x) = Integer $ Prelude.toInteger x
 {-# OPAQUE bvsize #-}
 bvsize :: forall n. BitVec n -> Integer
 bvsize BitVec {} = Integer $ Prelude.natVal @n Proxy
+
+-- TODO: I guess 'bvnat' should just be called 'bvsize' and then 'bvsize' should
+-- get an uglier name.
+bvnat :: forall n. BitVec n -> Dict (KnownNat n)
+bvnat bv = do
+  let nat = UnsafeSNat @n $ bvsize bv
+  withDict @(KnownNat n) nat Dict
 
 {-# OPAQUE bvnot #-}
 bvnot :: forall n. BitVec n -> BitVec n
