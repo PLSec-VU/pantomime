@@ -31,8 +31,7 @@ library
       Data.Sum
       Effectful.Break
       Effectful.Context
-      Effectful.Context.Dynamic
-      Effectful.Context.Static.Local
+      Effectful.Defer
       Effectful.GHC.Annotations
       Effectful.GHC.CoreE
       Effectful.GHC.Display
@@ -102,6 +101,7 @@ library
     , composition
     , constraints >=0.14.2
     , containers
+    , deepseq
     , effectful-core >=2.5.1.0
     , ghc >=9.12.2
     , ghc-prim

@@ -82,6 +82,7 @@ library:
   - effectful-core >= 2.5.1.0
   - text
   - hashable
+  - deepseq
 
 executables:
   pantomime-exe:
