@@ -31,7 +31,6 @@ library
       Data.Sum
       Effectful.Break
       Effectful.Context
-      Effectful.Defer
       Effectful.GHC.Annotations
       Effectful.GHC.CoreE
       Effectful.GHC.Display
@@ -47,6 +46,7 @@ library
       Pantomime.Axioms.Base
       Pantomime.Binding
       Pantomime.BuiltIn
+      Pantomime.Defer
       Pantomime.Dict
       Pantomime.Embed
       Pantomime.Expr
