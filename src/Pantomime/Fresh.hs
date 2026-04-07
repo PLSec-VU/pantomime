@@ -63,7 +63,7 @@ import Data.Text.Encoding (decodeUtf8)
 import Data.Traversable (for)
 
 import Pantomime.Axiom (TypeAxiomsR)
-import Pantomime.Defer (Deferrable)
+import Pantomime.Defer (Deferrable, defer)
 import Pantomime.Expr
 import Pantomime.Literal
   ( BuiltInTyCon
@@ -277,16 +277,16 @@ freshExpr axioms root = do
             | (dcN : dcs) <- reverse dataCons -> do
               let goDataCon dc = do
                     let fieldTys = scaledThing <$> dataConInstArgTys dc args
-                    valArgs <- for (zip [0..] fieldTys) \(idx, ty') -> liftEff $ thunk if
+                    valArgs <- for (zip [0..] fieldTys) \(idx, ty') -> if
                       -- If the types are surely apart, we can never reach the
                       -- construction of this value.
-                      -- TODO: As 'Coercion' cannot be 'Unreachabe', we have
+                      -- TODO: As 'Coercion' cannot be 'Unreachable', we have
                       -- to push this to the root of the DataCon. Hence, it is
                       -- clunkily put here for now. Maybe we can improve this...
                       | Just (Nominal, tyL, tyR) <- isEqPred' ty'
                       , SurelyApart <- tcUnifyTysFG alwaysBindFun [tyL] [tyR] -> do
                         mkUnreachable
-                      | otherwise -> go var
+                      | otherwise -> deferE $ go var
                         { varType = ty'
                         , varAccessor = Accessor dc idx : varAccessor var
                         }
@@ -427,7 +427,7 @@ freshArgs axioms ty scope0 = do
   let args = tyArgs <> valArgs
 
   -- Create symbolic instance of the arguments.
-  symbolic <- for args $ thunk . freshExpr axioms
+  symbolic <- for args $ defer . freshExpr axioms
 
   -- Zip the binders together with their symbolic instance.
   let binders = zip args symbolic

@@ -99,7 +99,6 @@ import Pantomime.Expr
   , failWithE
   , hoistEff
   , deferE
-  , thunk
   )
 import Pantomime.Util (SomeBitVec (..), SymBitVec)
 import Pantomime.Literal
@@ -423,7 +422,7 @@ project' subst sty expr = case sty of
   SLambda aty rty -> deferE \arg -> do
     fun <- hoistEff expr
     arg' <- deferE $ embed' subst aty arg
-    result <- liftEff . thunk $ mkApp fun arg'
+    result <- deferE $ mkApp fun arg'
     project' subst rty result
   SForall @n aty rty -> deferE \arg -> do
     -- Gather the function and argument.
@@ -435,7 +434,7 @@ project' subst sty expr = case sty of
     let subst' = extendTvSubst subst tv arg
 
     -- Construct the final expression.
-    result <- liftEff . thunk $ mkApp fun arg'
+    result <- deferE $ mkApp fun arg'
     project' subst' rty result
   STyVar _kind -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty

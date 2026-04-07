@@ -60,7 +60,6 @@ module Pantomime.Expr
 
   , liftEff
   , hoistEff
-  , thunk
   , deferE
   , throwE
   , failWithE
@@ -723,7 +722,7 @@ pushCoArg co arg = if
     (aco, rco) <- failWith () $ pushCoValArg co
 
     -- Cast the argument and return the result coercion.
-    arg' <- thunk do
+    arg' <- defer do
       arg' <- hoistEff arg
       mkCastMCo arg' aco
 
@@ -1026,7 +1025,7 @@ pushCoDataCon dc args co = do
 
   -- Cast all the value arguments using the substitution.
   let argTys = scaledThing <$> dataConRepArgTys dc
-  valArgs' <- for (zip valArgs argTys) \(val, ty) -> Thunked <$> thunk do
+  valArgs' <- for (zip valArgs argTys) \(val, ty) -> Thunked <$> defer do
     arg <- hoistEff val
     mkCast arg $ psiSubst ty
 
@@ -1043,10 +1042,6 @@ liftEff = lift
 -- TODO: We can probably kill this one after we swap away from 'Eval'.
 hoistEff :: Runtime a -> Eval es a
 hoistEff = RuntimeT . pure . runRuntime
-
--- TODO: We can probably kill this one after we swap away from 'Eval'.
-thunk :: Deferrable es => Eval es a -> Eff es (Runtime a)
-thunk = fmap Runtime . defer . runRuntimeT
 
 -- TODO: Remove this once we get rid of 'Eval'.
 instance Deferrable es => Defer es (Eval es a) where
