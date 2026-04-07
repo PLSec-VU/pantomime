@@ -1,4 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE DeriveGeneric #-}
 -- TODO: I want to remove many of these pragmas, also for the other files. Most
 -- of them should just be included in the top-level flags. There also seems to
 -- be a lot of obsolete stuff. Perhaps its good to first find out which flags
@@ -15,6 +17,9 @@ module Pantomime.Solve
   ( checkValid
   ) where
 
+import GHC.Core qualified as GHC
+import GHC.Core.FamInstEnv (FamInstEnvs)
+import GHC.Generics (Generic)
 import GHC.Plugins
   ( CoreProgram
   , Name
@@ -23,8 +28,9 @@ import GHC.Plugins
   , exprType
   , varType
   , vcat
-  , emptyInScopeSet
+  , emptyInScopeSet, Var
   )
+import GHC.Types.Id.Make (nospecId)
 import GHC.Utils.Outputable
   ( Outputable (..)
   , IsLine (..)
@@ -32,24 +38,25 @@ import GHC.Utils.Outputable
   , (<+>)
   )
 
-import Grisette (LogicalOp (..), EvalSym (..), Union, onUnion)
+import Grisette (LogicalOp (..), EvalSym (..), Union, SymBool, onUnion)
 
-import Control.Monad.Except (ExceptT (..))
+import Control.DeepSeq (NFData (..))
 
-import Data.Coerce (coerce)
 import Data.Foldable (for_)
+import Data.Traversable (for)
 
 import Language.Haskell.TH qualified as TH
 
 import Pantomime.Expr
-  ( Eval (..)
-  , Expr (..)
+  ( Expr (..)
+  , Arg
   , Variant (..)
   , Literal (..)
   , mkApps
   , pprArg
+  , pprRuntime
+  , runRuntime
   , throwE
-  , pprEval
   )
 import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Symbolise
@@ -57,7 +64,8 @@ import Pantomime.Subst
 import Pantomime.Fresh
 import Pantomime.Util (dbg)
 import Pantomime.Axiom (PluginAxiomsR (..))
-import Pantomime.Grisette.UnionT (UnionT (..))
+import Pantomime.PrimOps (PrimOp)
+import Pantomime.Defer (defer, withDeferrable)
 import Pantomime.Binding
   ( InterfaceThings
   , getInterfaceThings
@@ -74,8 +82,6 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
-import GHC.Types.Id.Make (nospecId)
-import GHC.Core qualified as GHC
 
 -- TODO: Definitely not the cleanest place to add these effects. I should look
 -- into where to do this.
@@ -84,12 +90,84 @@ runBuiltInTypes
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : es) a
+  => HasFamInstEnvs :> es
+  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : Context Reader FamInstEnvs : es) a
   -> Eff es a
 runBuiltInTypes eff = do
   tys <- getBuiltinTyCon
   ids <- getInterfaceThings
-  runContextReader ids . runContextReader tys $ eff
+  fam <- getFamInstEnvs
+  runContextReader fam . runContextReader ids . runContextReader tys $ eff
+
+type SymboliseEff =
+ '[ Context Reader BuiltInTyCon
+  , Context Reader InterfaceThings
+  , Context Reader FamInstEnvs
+  , Error ()
+  ]
+
+newtype Lie a where
+  Lie :: a -> Lie a
+  deriving Generic
+
+instance NFData (Lie a) where
+  rnf _ = ()
+
+construct
+  :: HasCallStack
+  => Context Reader BuiltInTyCon :> es
+  => Context Reader InterfaceThings :> es
+  => Context Reader FamInstEnvs :> es
+  => Error () :> es
+  => [(Var, forall fs. PrimOp fs)]
+  -> PluginAxiomsR
+  -> CoreProgram
+  -> CoreExpr
+  -- FIXME: This 'Lie' evades the check NFData constraint on 'withDeferrable'.
+  -- I'm not sure how to go around this, so for now we just let it crash if it
+  -- does occur.. :/
+  -> Eff es (SymBool, Lie (Eff SymboliseEff [(Var, Arg)]))
+construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDeferrable do
+  prim' <- for prim \(bndr, rhs) -> do
+    rhs' <- defer rhs
+    pure (bndr, rhs')
+
+  -- Create the final substitution.
+  subst0 <- extendIdSubstMany mkEmptySubst prim'
+  let termAxiomsR' = uncurry NonRec <$> termAxiomsR
+  subst1 <- symboliseBindMany subst0 termAxiomsR'
+  -- TODO: I think there is an ordering problem here between user
+  -- mappings and program definitions. I guess user mappings should
+  -- go first? The problem is that we don't want local definitions to
+  -- overwrite them. I guess for now, we can keep the ordering like this,
+  -- but this essentially restricts mappings to be used only outside of
+  -- their defining module. Not the worst thing though, as the functions
+  -- should truly be opaque outside of the defining module and they cannot
+  -- be guaranteed to not be misused within the module.
+  subst <- symboliseBindMany subst1 program
+
+  -- Create fresh arguments.
+  let ty = exprType expr
+  (args, _scope) <- freshArgs typeAxiomsR ty emptyInScopeSet
+
+  result <- defer do
+    fun <- symbolise subst expr
+    res <- mkApps fun $ fmap snd args
+    case res of
+      Lit (Bool value) -> pure value
+      _ -> throwE ()
+
+  let doc = pprRuntime (\par -> par . text . show) id result
+  dbg doc
+
+  -- TODO: What to do about raise? Do we really just want to return false? I
+  -- guess for now it makes sense.
+  let eq = flip (onUnion @Union) (runRuntime result) \case
+        Left Unreachable -> true
+        Left UB -> false
+        Left Raise {} -> false
+        Right value -> value
+  pure (eq, Lie $ pure args)
 
 checkValid
   :: forall es
@@ -106,69 +184,18 @@ checkValid
   => PluginAxiomsR
   -> CoreExpr
   -> Eff es ()
-checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
+checkValid axioms expr = runBuiltInTypes do
   -- TODO: Somehow this code doesn't read very nice. I think I should review it.
   program <- get @CoreProgram
 
-  -- bitVector <- reifiedBitVector
-  -- unsafeRefl <- reifiedUnsafeRefl
-  -- bool <- reifiedBool
-  primOps <- bindingsGHC
+  prim <- bindingsGHC
 
-  -- let reified = unsafeRefl : bool -- ++ bitVector
-
-  -- TODO: Does it make sense to build this up on every invocation? I feel like
-  -- it would be better to do this once per module. In fact, the final symbolise
-  -- call could actually just be a lookup from the substitution. Idk, I feel
-  -- like there is room for improvement here. Note, we might want to skip out
-  -- on the setup if the module does not have any (active) annotations. Not sure
-  -- if the setup is actually a lot of work, but it seems odd to do it like
-  -- this...
-  subst0 <- extendIdSubstMany mkEmptySubst primOps
-  -- TODO: I think there is an ordering problem here between user
-  -- mappings and program definitions. I guess user mappings should
-  -- go first? The problem is that we don't want local definitions to
-  -- overwrite them. I guess for now, we can keep the ordering like this,
-  -- but this essentially restricts mappings to be used only outside of
-  -- their defining module. Not the worst thing though, as the functions
-  -- should truly be opaque outside of the defining module and they cannot
-  -- be guaranteed to not be misused within the module.
   -- TODO: Is there perhaps a better place to add this? Ideally we just do it
   -- as a normal axiom, but I cannot find where 'nospec' is defined...
   idId <- thNameToGhcName 'id >>= lookupIdAll
-  let axioms' = uncurry NonRec <$> (nospecId, GHC.Var idId) : termAxiomsR
+  let axioms' = axioms { termAxiomsR = (nospecId, GHC.Var idId) : termAxiomsR axioms } 
 
-  subst1 <- symboliseBindMany subst0 axioms'
-  subst <- symboliseBindMany subst1 program
-
-  -- Create fresh arguments.
-  let ty = exprType expr
-  let (args, _scope) = freshArgs typeAxiomsR ty emptyInScopeSet
-
-  -- Apply the function to the fresh arguments and convert it to a boolean.
-  -- TODO: Once we also have external support for symbolic booleans, maybe it
-  -- makes sense to require those as the final assertion? We can simply create
-  -- a function on the front-end to convert a Bool to a pantomime symbolic
-  -- boolean. Ideally, a user can write expressions using only the Pantomime
-  -- primitives and not get any overhead of the expression being written in
-  -- Haskell.
-  let result = do
-        fun <- symbolise subst expr
-        res <- mkApps fun $ fmap snd args
-        case res of
-          Lit (Bool value) -> pure value
-          _ -> throwE ()
-
-  doc <- pprEval id (\par -> pure . par . text . show) result
-  dbg doc
-  -- TODO: What to do about raise? Do we really just want to return false? I
-  -- guess for now it makes sense.
-  union <- coerce result
-  let eq = flip (onUnion @Union) union \case
-        Left Unreachable -> true
-        Left UB -> false
-        Left Raise {} -> false
-        Right value -> value
+  (eq, Lie args) <- construct prim axioms' program expr
 
   solution <- provide_ @Solver $ solve (symNot eq)
 
@@ -195,9 +222,10 @@ checkValid PluginAxiomsR { .. } expr = runBuiltInTypes do
     Satisfiable model -> do
       -- TODO: I should probably check whether the arguments are recursive
       -- before printing? Alternatively, I could just have a maximum depth.
-      for_ args \(bndr, arg) -> do
+      args' <- inject args
+      for_ args' \(bndr, arg) -> do
         let arg' = evalSym True model arg
-        argdoc <- pprArg id arg'
+        let argdoc = pprArg id arg'
         dbg $ vcat
           [ "==================="
           , ppr bndr <+> "::" <+> ppr (varType bndr)

@@ -9,6 +9,7 @@ module Pantomime.Defer
   -- is forced.
   ( Deferrable
   , DeferWith
+  , Defer (..) -- TODO: Remove this export once we rid of 'Eval'.
   , defer
   , withDeferrable
   ) where
@@ -21,11 +22,11 @@ import Data.Kind (Constraint)
 import Effectful (Eff, Effect)
 import Effectful.Context (Context, ContextMode (..))
 import Effectful.Dispatch.Static (unsafeEff, unEff)
+import Effectful.Dispatch.Static.Primitive (Env)
 import Effectful.Error.Static (Error)
 import Effectful.Exception (evaluateDeep)
-import Effectful.Internal.Env (Env)
 import Effectful.Reader.Static (Reader)
-import GHC.IO.Unsafe (unsafeDupablePerformIO)
+import GHC.IO (unsafeDupablePerformIO)
 
 -- | Whether all effects in the stack can be deferred.
 type family DeferWith (es :: [Effect]) :: Constraint where

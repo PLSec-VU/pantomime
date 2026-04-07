@@ -3,15 +3,11 @@
 -- {-# LANGUAGE UnliftedNewtypes #-}
 {-# LANGUAGE GADTs #-}
 -- {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE ExtendedLiterals #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE RoleAnnotations #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE BangPatterns #-}
 
 module Main
@@ -22,7 +18,7 @@ module Main
   , sim
   , proj
   , theory
-  , test
+  -- , test
   -- , test2
   ) where
 
@@ -40,80 +36,45 @@ module Main
 -- -- import GHC.Base (Int64#, uncheckedIShiftRA64#)
 -- import GHC.Base (Int#, (+#), Word (..), word2Int#, int2Word#, (-#), Int (..))
 -- import GHC.Base (Int#, (+#), Int (..))
-import GHC.Base
-  ( Coercible
-  , TYPE
-  , RuntimeRep (..)
-  , Type
-  , Int (..)
-  , Int#
-  , Int8#
-  , Word#
-  , raiseOverflow#
-  , raise#
-  , plusInt8#
-  , coerce
-  , tagToEnum#
-  , word2Int#
-  , negateInt#
-  , word2Int#
-  , int2Word#
-  )
-import GHC.Int (Int8 (..))
-import Data.Typeable
-import GHC.TypeNats (Nat, KnownNat, type (+))
-import Data.Bits (Bits (..), FiniteBits (..))
-import GHC.Num.Integer
-  ( integerToInt#
-  , integerToWord#
-  , Integer (..)
-  )
-import GHC.Num.BigNat (bigNatToWord#)
-
-import GHC.Exts (IsList (..))
 
 import Prelude
 import Pantomime
-import Pantomime.Primitive.BitVector qualified as Pantomime
-import Pantomime.Clash qualified as Clash (axioms)
-import Pantomime.Base qualified as Base (axioms)
-import Pantomime.Axiom (PluginAxioms (..))
+import Pantomime.BuiltIn qualified as Pantomime
+-- import Pantomime.Clash qualified as Clash (axioms)
+import Pantomime.Axioms.Base qualified as Base (axioms)
 -- import Pantomime.Primitive.BitVector (BitVector)
 -- import Pantomime.Primitive.BitVector qualified as BitVector
 import Control.Monad.State
 
-import Clash.Sized.Internal.BitVector (BitVector)
-import Clash.Sized.Internal.Unsigned (Unsigned)
-import Clash.Sized.Internal.Signed
-  ( Signed
-  , (+#)
-  , (-#)
-  , (*#)
-  , negate#
-  , complement#
-  , and#
-  , or#
-  , xor#
-  , abs#
-  , eq#
-  , neq#
-  , lt#
-  , le#
-  , gt#
-  , ge#
-  , shiftL#
-  , shiftR#
-  , fromInteger#
-  , unpack#
-  , pack#
-  , size#
-  )
-import Grisette (BitCast(..))
-import Clash.Prelude (bitCoerce, Resize (..), (++#), slice, d2, d3, msb)
+-- import Clash.Sized.Internal.BitVector (BitVector)
+-- import Clash.Sized.Internal.Unsigned (Unsigned)
+-- import Clash.Sized.Internal.Signed
+--   ( Signed
+--   , (+#)
+--   , (-#)
+--   , (*#)
+--   , negate#
+--   , complement#
+--   , and#
+--   , or#
+--   , xor#
+--   , abs#
+--   , eq#
+--   , neq#
+--   , lt#
+--   , le#
+--   , gt#
+--   , ge#
+--   , shiftL#
+--   , shiftR#
+--   , fromInteger#
+--   , unpack#
+--   , pack#
+--   , size#
+--   )
+-- import Clash.Prelude (bitCoerce, Resize (..), (++#), slice, d2, d3, msb)
 
 import Core2 qualified
-import Control.Monad (void)
-import Data.Maybe (isJust)
 
 -- import Numeric (showHex)
 -- -- import GHC.Base (Int64#, uncheckedIShiftRL64#)
@@ -183,8 +144,8 @@ import Data.Maybe (isJust)
 --       , ('integerToWord#, 'integerToWord')
 --       ]
 --     }) #-}
--- {-# ANN theory (Theory $ Base.axioms <> Clash.axioms) #-}
-theory :: Maybe Int -> Maybe (Int, Int) -> Bool
+-- {-# ANN theory (Theory Base.axioms) #-}
+theory :: Maybe Int -> Maybe (Int, Int) -> Pantomime.Bool
 theory = pantomime Pantomime
   { observation = obs'
   , implementation = adder
@@ -305,9 +266,9 @@ stateless f _ i = ((), f i)
 
 -- newtype MyBool = MyBool Bool
 
-newtype Test n where
-  Test :: Signed n -> Test n
-  deriving (Num, Eq, Bits)
+-- newtype Test n where
+--   Test :: Signed n -> Test n
+--   deriving (Num, Eq, Bits)
 
 -- {-# ANN test (Theory $ Base.axioms <> Clash.axioms) #-}
 -- test :: Test (3 + 2) -> Test 5 -> Bool
@@ -323,8 +284,8 @@ add _ ( Just a , Just b) = ( Just (a+b) , Nothing )
 add s _ = ( Nothing , s)
 
 -- {-# ANN test (Theory Base.axioms) #-}
-test :: Pantomime.BitVector 23 -> Bool
-test x = x == Pantomime.stupidMinBound
+-- test :: Pantomime.BitVec 23 -> Bool
+-- test x = x == Pantomime.stupidMinBound
 -- test :: Maybe Int -> (Maybe Int, Maybe Int) -> (Maybe Int, Bool)
 -- test s i = let (s', o) = add s i in (s', isJust o)
 
@@ -369,9 +330,9 @@ take' n xs = if
 -- --   let x' = bitCoerce x
 --   0 <= x
 
-type family BitSz x :: Nat
+-- type family BitSz x :: Nat
 
-type instance BitSz (Pantomime.BitVector n) = n
+-- type instance BitSz (Pantomime.BitVector n) = n
 
 -- test :: Pantomime.BitVector (BitSz (Pantomime.BitVector 2)) -> Bool
 -- test x = go @(Pantomime.BitVector 2) x
@@ -1117,10 +1078,11 @@ main = do
         let (s', o) = Core2.core s i
         (Core2.proj s', Core2.obs' o)
 
-  print $ leaksim st instr
-  print $ implobs st instr
+  pure ()
+  -- print $ leaksim st instr
+  -- print $ implobs st instr
 
-  print $ Core2.theory st instr
+  -- print $ Core2.theory st instr
 
   -- let st0 = Core2.State
   --       { reg = 0x00000000

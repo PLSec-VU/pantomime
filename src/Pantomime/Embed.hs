@@ -12,16 +12,6 @@ module Pantomime.Embed
   , embed'
   , project
   , project'
-
-  -- | Helper functions to make embeddings more ergonomic to write.
-  , liftF1
-  , liftF2
-  , liftF3
-  , liftF4
-  , liftF5
-  , liftF6
-  , liftF7
-  , liftF8
   ) where
 
 import Data.Char (ord, chr)
@@ -31,12 +21,11 @@ import Data.Void (Void, absurd)
 import Effectful
 import Effectful.Error.Static (Error, HasCallStack)
 import Effectful.Context
-import Effectful.GHC.External (HasFamInstEnvs, getFamInstEnvs)
 
 import GHC.Builtin.Types.Literals (typeNatAddTyCon)
 import GHC.Builtin.Uniques (mkAlphaTyVarUnique)
 import GHC.Core.Type (substTy)
-import GHC.Core.FamInstEnv (normaliseType)
+import GHC.Core.FamInstEnv (normaliseType, FamInstEnvs)
 import GHC.Core.Reduction (Reduction (..))
 import GHC.Core.TyCo.Rep (Type (..))
 import GHC.Plugins
@@ -88,7 +77,7 @@ import Pantomime.Expr
   ( Expr (..)
   , Literal (..)
   , Eval
-  , EvalExpr
+  , Runtime
   , mkLit
   , mkCon
   , mkDataCon
@@ -108,6 +97,9 @@ import Pantomime.Expr
   , liftEff
   , throwE
   , failWithE
+  , hoistEff
+  , deferE
+  , thunk
   )
 import Pantomime.Util (SomeBitVec (..), SymBitVec)
 import Pantomime.Literal
@@ -116,6 +108,7 @@ import Pantomime.Literal
   , SomeLiteralType
   , projectLitTy
   )
+import Pantomime.Defer (Deferrable)
 
 -- TODO: We could think about making this slightly more structured? Maybe
 -- introduce a language similar to a GHC Type? Really, the only reason we are
@@ -229,30 +222,30 @@ instance Reflect Lifted where
 instance (Reflect k, Reflect a, Reflect b) => Reflect (UnsafeEqualityTy k a b) where
   reflect = SUnsafeEqualityTy reflect reflect reflect
 
-type family Repr a es where
-  Repr BoolTy _ = SymBool
-  Repr IntegerTy _ = SymInteger
-  Repr (BitVecTy _) _ = SomeBitVec SymBitVec
-  Repr (ArrayTy _ _) _ = SomeArray
-  Repr (PrimitiveTy _) _ = (CoercionN, SomeLiteralType)
-  Repr (a :-> b) es = Eval es (Repr a es) -> Eval es (Repr b es)
+type family Repr a where
+  Repr BoolTy = SymBool
+  Repr IntegerTy = SymInteger
+  Repr (BitVecTy _) = SomeBitVec SymBitVec
+  Repr (ArrayTy _ _) = SomeArray
+  Repr (PrimitiveTy _) = (CoercionN, SomeLiteralType)
+  Repr (a :-> b) = Runtime (Repr a) -> Runtime (Repr b)
   -- Whilst we could technically extract the 'Repr' of the forall argument, it
   -- would be very cumbersome as it is a type and not a term. Instead, we just
   -- leave it abstractly as a 'Type' for now. Note that we don't need to wrap
-  -- it in 'Eval' as forcing a 'Type' should always be possible.
-  Repr (_ :. b) es = Type -> Eval es (Repr b es)
-  Repr ('TyVar _ _) es = Expr es
-  Repr NaturalTy _ = Void
-  Repr (Natural _) _ = Void
-  Repr (_ :+ _) _ = Void
-  Repr (_ :<= _) _ = ()
-  Repr (KnownNatTy _) _ = SomeNat
-  Repr (TYPE _) _ = Void
-  Repr RuntimeRepTy _ = Void
-  Repr (BoxedRep _) _ = Void
-  Repr LevityTy _ = Void
-  Repr Lifted _ = Void
-  Repr (UnsafeEqualityTy _ _ _) _ = CoercionN
+  -- it in 'Runtime' as forcing a 'Type' should always be possible.
+  Repr (_ :. b) = Type -> Runtime (Repr b)
+  Repr ('TyVar _ _) = Expr
+  Repr NaturalTy = Void
+  Repr (Natural _) = Void
+  Repr (_ :+ _) = Void
+  Repr (_ :<= _) = ()
+  Repr (KnownNatTy _) = SomeNat
+  Repr (TYPE _) = Void
+  Repr RuntimeRepTy = Void
+  Repr (BoxedRep _) = Void
+  Repr LevityTy = Void
+  Repr Lifted = Void
+  Repr (UnsafeEqualityTy _ _ _) = CoercionN
 
 -- TODO: I guess having the whole type thing is a bit overkill. Really, we could
 -- just remove it and place the 'Repr' typeclass inside of the rhs of 'STy'
@@ -281,53 +274,52 @@ data STy a where
 embed
   :: forall a es
    . HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => Reflect a
   => Subst
-  -> Eval es (Repr a es)
-  -> EvalExpr es
-embed subst repr = embed' subst (reflect @a) repr
+  -> Runtime (Repr a)
+  -> Eval es Expr
+embed subst = embed' subst $ reflect @a
 
 project
   :: forall a es
    . HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => Reflect a
   => Subst
-  -> EvalExpr es
-  -> Eval es (Repr a es)
-project subst repr = project' subst (reflect @a) repr
+  -> Runtime Expr
+  -> Eval es (Repr a)
+project subst = project' subst $ reflect @a
 
 -- TODO: 'embed'' and 'project'' are mutually recursive and grow the callstack.
 -- We should adjust it so this doesn't occur.
 embed'
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => Subst
   -> STy a
-  -> Eval es (Repr a es)
-  -> EvalExpr es
+  -> Runtime (Repr a)
+  -> Eval es Expr
 embed' subst sty repr = case sty of
-  SBoolTy -> do
-    b <- repr
-    pure $ mkLit (mkBool b)
-  SIntegerTy -> do
-    i <- repr
-    pure $ mkLit (mkInteger i)
+  SBoolTy -> hoistEff $ mkLit . mkBool <$> repr
+  SIntegerTy -> hoistEff $ mkLit . mkInteger <$> repr
   SBitVecTy _ -> do
-    SomeBitVec bv <- repr
+    SomeBitVec bv <- hoistEff repr
     let lit = mkLit $ mkBitVec bv
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
     let co' = mkSymCo $ mkSubCo co
     mkCast lit co'
   SArrayTy _ _ -> do
-    SomeArray arr <- repr
+    SomeArray arr <- hoistEff repr
     let lit = mkLit $ mkArray arr
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
     let co' = mkSymCo $ mkSubCo co
@@ -336,16 +328,16 @@ embed' subst sty repr = case sty of
   SLambda aty rty -> do
     -- Gather the type for the lambda.
     ty <- liftEff $ embedSTy subst sty
-    pure $ mkLam ty \arg -> do
-      let arg' = project' subst aty arg
-      fun <- repr
+    mkLam ty \arg -> do
+      arg' <- deferE $ project' subst aty arg
+      fun <- hoistEff repr
       embed' subst rty $ fun arg'
   SForall @n aty rty -> do
     -- Gather the type for the lambda.
     ty <- liftEff $ embedSTy subst sty
-    pure $ mkLam ty \arg -> do
+    mkLam ty \arg -> do
       -- Gather the function and argument.
-      fun <- repr
+      fun <- hoistEff repr
       arg' <- liftEff $ forceTy arg
 
       -- Extend the substition.
@@ -355,21 +347,21 @@ embed' subst sty repr = case sty of
       -- Construct the final expression.
       embed' subst' rty $ fun arg'
   STyVar _kind -> do
-    expr <- repr
+    expr <- hoistEff repr
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
     let co' = mkSymCo $ mkSubCo co
     mkCast expr co'
-  SNaturalTy -> repr >>= absurd
-  SNatural -> repr >>= absurd
-  SAddTy _ _ -> repr >>= absurd
+  SNaturalTy -> hoistEff repr >>= absurd
+  SNatural -> hoistEff repr >>= absurd
+  SAddTy _ _ -> hoistEff repr >>= absurd
   SLEqTy _ _ -> throwE ()
   SKnownNatTy _n -> throwE ()
-  STYPE _ -> repr >>= absurd
-  SRuntimeRepTy -> repr >>= absurd
-  SBoxedRep _ -> repr >>= absurd
-  SLevityTy -> repr >>= absurd
-  SLifted -> repr >>= absurd
-  SUnsafeEqualityTy _ _ _ -> do
+  STYPE _ -> absurd <$> hoistEff repr
+  SRuntimeRepTy -> absurd <$> hoistEff repr
+  SBoxedRep _ -> absurd <$> hoistEff repr
+  SLevityTy -> absurd <$> hoistEff repr
+  SLifted -> absurd <$> hoistEff repr
+  SUnsafeEqualityTy {} -> do
     -- Get the type of the expression.
     ty <- liftEff $ embedSTy subst sty
     (tc, args) <- failWithE () $ splitTyConApp_maybe ty
@@ -388,52 +380,54 @@ embed' subst sty repr = case sty of
       _ -> throwE ()
 
     -- Force the coercion.
-    co <- repr
+    co <- hoistEff repr
 
     -- Construct the final expressionexpression
     mkApps spine $ pure <$> [mkType kind, mkType tyL, mkType tyR, mkCoercion co]
 
 project'
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => Subst
   -> STy a
-  -> EvalExpr es
-  -> Eval es (Repr a es)
+  -> Runtime Expr
+  -> Eval es (Repr a)
 project' subst sty expr = case sty of
-  SBoolTy -> expr >>= \case
+  SBoolTy -> hoistEff expr >>= \case
     Lit (Bool b) -> pure b
     _ -> throwE ()
-  SIntegerTy -> expr >>= \case
+  SIntegerTy -> hoistEff expr >>= \case
     Lit (Integer i) -> pure i
     _ -> throwE ()
   SBitVecTy _n -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    inner <- expr
+    inner <- hoistEff expr
     expr' <- mkCast inner $ mkSubCo co
     case expr' of
       Lit (BitVec bv) -> pure $ SomeBitVec bv
       _ -> throwE ()
   SArrayTy _ _ -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    inner <- expr
+    inner <- hoistEff expr
     expr' <- mkCast inner $ mkSubCo co
     case expr' of
       Lit (Array bv) -> pure $ SomeArray bv
       _ -> throwE ()
   SPrimitiveTy pty -> do
-    _ <- expr
+    _ <- hoistEff expr
     pty' <- liftEff $ embedSTy subst pty
     liftEff $ projectLitTy pty'
-  SLambda aty rty -> pure \arg -> do
-    fun <- expr
-    let arg' = embed' subst aty arg
-    project' subst rty $ mkApp fun arg'
-  SForall @n aty rty -> pure \arg -> do
+  SLambda aty rty -> deferE \arg -> do
+    fun <- hoistEff expr
+    arg' <- deferE $ embed' subst aty arg
+    result <- liftEff . thunk $ mkApp fun arg'
+    project' subst rty result
+  SForall @n aty rty -> deferE \arg -> do
     -- Gather the function and argument.
-    fun <- expr
+    fun <- hoistEff expr
     let arg' = pure $ mkType arg
 
     -- Extend the substition.
@@ -441,10 +435,11 @@ project' subst sty expr = case sty of
     let subst' = extendTvSubst subst tv arg
 
     -- Construct the final expression.
-    project' subst' rty $ mkApp fun arg'
+    result <- liftEff . thunk $ mkApp fun arg'
+    project' subst' rty result
   STyVar _kind -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    repr <- expr
+    repr <- hoistEff expr
     mkCast repr $ mkSubCo co
   SNaturalTy -> throwE ()
   SNatural -> throwE ()
@@ -453,7 +448,7 @@ project' subst sty expr = case sty of
     -- TODO: I guess we should actually ensure that this is well formed? It's
     -- a type family though, so I'm not sure how much actually remains of this
     -- thing. Same for other type families in here btw (like 'Primitive').
-    _ <- expr
+    _ <- hoistEff expr
     pure ()
   SKnownNatTy _ -> do
     ty <- liftEff $ embedSTy subst sty
@@ -468,7 +463,7 @@ project' subst sty expr = case sty of
       (_, co') <- instNewTyCon_maybe tc' args'
       pure $ mkTransCo co co'
 
-    let expr' = expr >>= flip mkCast co
+    let expr' = hoistEff expr >>= flip mkCast co
 
     expr' >>= \case
       -- TODO: It would probably be good to distinguish between two errors here.
@@ -483,8 +478,8 @@ project' subst sty expr = case sty of
   SBoxedRep _ -> throwE ()
   SLevityTy -> throwE ()
   SLifted -> throwE ()
-  SUnsafeEqualityTy _ _ _ -> do
-    expr' <- expr
+  SUnsafeEqualityTy {} -> do
+    expr' <- hoistEff expr
     let (_spine, args) = collectArgs expr'
     case args of
       [_kind, _ty, co] -> liftEff $ forceCo co
@@ -532,7 +527,7 @@ embedSTy' ty = do
     STyVar @n kind -> do
       tv <- mkTemplateTyVar' @n kind
       pure $ mkTyVarTy tv
-    SNaturalTy -> pure $ naturalTy
+    SNaturalTy -> pure naturalTy
     SNatural @n -> pure $ mkNumLitTy (natVal @n Proxy)
     SAddTy l r -> do
       l' <- embedSTy' l
@@ -592,60 +587,12 @@ mkTemplateTyVar idx kind = do
 normaliseSTy
   :: HasCallStack
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => Subst
   -> Role
   -> STy n
   -> Eff es Reduction
 normaliseSTy subst role sty = do
   ty <- embedSTy subst sty
-  fam <- getFamInstEnvs
+  fam <- get @FamInstEnvs
   pure $ normaliseType fam role ty
-
-liftF1
-  :: Applicative f
-  => (a -> b)
-  -> f (a -> b)
-liftF1 = pure
-
-liftF2
-  :: Applicative f
-  => (a -> b -> c)
-  -> f (a -> f (b -> c))
-liftF2 f = pure $ liftF1 . f
-
-liftF3
-  :: Applicative f
-  => (a -> b -> c -> d)
-  -> f (a -> f (b -> f (c -> d)))
-liftF3 f = pure $ liftF2 . f
-
-liftF4
-  :: Applicative f
-  => (a -> b -> c -> d -> e)
-  -> f (a -> f (b -> f (c -> f (d -> e))))
-liftF4 f = pure $ liftF3 . f
-
-liftF5
-  :: Applicative f
-  => (a -> b -> c -> d -> e -> g)
-  -> f (a -> f (b -> f (c -> f (d -> f (e -> g)))))
-liftF5 f = pure $ liftF4 . f
-
-liftF6
-  :: Applicative f
-  => (a -> b -> c -> d -> e -> g -> h)
-  -> f (a -> f (b -> f (c -> f (d -> f (e -> f (g -> h))))))
-liftF6 f = pure $ liftF5 . f
-
-liftF7
-  :: Applicative f
-  => (a -> b -> c -> d -> e -> g -> h -> i)
-  -> f (a -> f (b -> f (c -> f (d -> f (e -> f (g -> f (h -> i)))))))
-liftF7 f = pure $ liftF6 . f
-
-liftF8
-  :: Applicative f
-  => (a -> b -> c -> d -> e -> g -> h -> i -> j)
-  -> f (a -> f (b -> f (c -> f (d -> f (e -> f (g -> f (h -> f (i -> j))))))))
-liftF8 f = pure $ liftF7 . f

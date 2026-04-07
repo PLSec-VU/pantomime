@@ -36,10 +36,9 @@ import Data.Typeable (Typeable, type (:~:) (..), eqT)
 import Effectful
 import Effectful.Context
 import Effectful.Error.Static
-import Effectful.GHC.External
 
 import GHC.Core.Reduction (Reduction(..))
-import GHC.Core.FamInstEnv (normaliseType)
+import GHC.Core.FamInstEnv (normaliseType, FamInstEnvs)
 import GHC.Plugins
   ( Type
   , TyCon
@@ -193,24 +192,23 @@ instance Ord SomeLiteralType where
   compare (SomeLiteralType lhs) (SomeLiteralType rhs) = case (lhs, rhs) of
     (BoolType, BoolType) -> EQ
     (BoolType, _) -> GT
+    (_, BoolType) -> LT
 
-    (IntegerType, BoolType) -> LT
     (IntegerType, IntegerType) -> EQ
     (IntegerType, _) -> GT
+    (_, IntegerType) -> LT
 
-    (BitVecType, BoolType) -> LT
-    (BitVecType, IntegerType) -> LT
     (BitVecType @nl, BitVecType @nr) -> do
       let nL = natVal @nl Proxy
       let nR = natVal @nr Proxy
       compare nL nR
-    (BitVecType, ArrayType _ _) -> GT
+    (BitVecType, _) -> GT
+    (_, BitVecType) -> LT
 
     (ArrayType keyTyL valTyL, ArrayType keyTyR valTyR) -> do
       let lhs' = (SomeLiteralType keyTyL, SomeLiteralType valTyL)
       let rhs' = (SomeLiteralType keyTyR, SomeLiteralType valTyR)
       compare lhs' rhs'
-    (ArrayType _ _, _) -> LT
 
 instance Mergeable SomeLiteralType where
   rootStrategy = SortedStrategy id $ \_ -> SimpleStrategy \_ value _ -> value
@@ -352,11 +350,11 @@ projectLitTy
   :: HasCallStack
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => Type
   -> Eff es (CoercionN, SomeLiteralType)
 projectLitTy ty = do
-  fam <- getFamInstEnvs
+  fam <- get @FamInstEnvs
   -- NOTE: Altough normalising the entire term is slow, we only really do this
   -- if we actually force the entire type within reifyLitType (in which case, we
   -- needed to normalise anyway).

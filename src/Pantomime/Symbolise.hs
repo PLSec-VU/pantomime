@@ -1,3 +1,4 @@
+{-# LANGUAGE RecursiveDo #-}
 module Pantomime.Symbolise
   ( symbolise
   , symboliseBind
@@ -23,33 +24,35 @@ import Pantomime.Expr
 import Pantomime.Subst
 import Pantomime.Util (foldlBy)
 import Pantomime.Binding (InterfaceThings (..))
+import Pantomime.Defer (defer, Deferrable)
 
 import Grisette (LogicalOp (..), SymBool, mrgIte)
 
 import Control.Arrow (Arrow (..))
-import Control.Monad (foldM, unless, join)
+import Control.Monad (foldM, unless)
+
+import Data.Traversable (for)
 
 import Effectful
 import Effectful.Error.Static
-import Effectful.GHC.External
 import Effectful.Context
 
 symbolise
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
-  => HasFamInstEnvs :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader InterfaceThings :> es
-  => Subst es
+  => Subst
   -> GHC.CoreExpr
-  -> EvalExpr es
+  -> Eval es Expr
 symbolise = go
   where
     -- TODO: I think we should add notes where we add helper functions like this
     -- to signify it is to ensure the callstack doesn't grow.
     go subst = \case
       GHC.Var var
-        | Just expr <- lookupIdSubst subst var -> expr
+        | Just expr <- lookupIdSubst subst var -> hoistEff expr
 
         | Just expr <- GHC.maybeUnfoldingTemplate $ GHC.realIdUnfolding var
         -- TODO: I have this check for now, as it makes debugging a bit easier.
@@ -92,12 +95,12 @@ symbolise = go
 
       GHC.App fun arg -> do
         fun' <- go subst fun
-        let arg' = go subst arg
+        arg' <- deferE $ go subst arg
         mkApp fun' arg'
 
       expr@(GHC.Lam bndr body) -> do
         let ty = substTy subst $ GHC.exprType expr
-        pure $ mkLam ty \arg -> do
+        mkLam ty \arg -> do
           subst' <- liftEff $ extendSubst subst bndr arg
           go subst' body
 
@@ -172,40 +175,39 @@ symbolise = go
 -- TODO: This is mutually recursive with 'symbolise'. I have to find a way not
 -- to bloat the callstack!
 symboliseBind
-  :: forall es fs
+  :: forall es
    . HasCallStack
+  => Deferrable es
   => Error () :> es
-  => Error () :> fs
-  => HasFamInstEnvs :> fs
-  => Context Reader BuiltInTyCon :> fs
-  => Context Reader InterfaceThings :> fs
-  => Subst fs
+  => Context Reader BuiltInTyCon :> es
+  => Context Reader InterfaceThings :> es
+  => Subst
   -> GHC.CoreBind
-  -> Eff es (Subst fs)
+  -> Eff es Subst
 symboliseBind subst = \case
   GHC.NonRec bndr rhs -> do
-    let rhs' = symbolise subst rhs
+    rhs' <- defer $ symbolise subst rhs
     extendIdSubst subst bndr rhs'
 
   GHC.Rec pairs -> do
-    let subst' :: forall gs. Error () :> gs => Eff gs (Subst fs)
-        subst' = extendIdSubstMany subst pairs'
-        pairs' = second symbolise' <$> pairs
-        symbolise' rhs = liftEff subst' >>= \s -> symbolise s rhs
-    subst'
+    rec
+      subst' <- extendIdSubstMany subst pairs'
+      pairs' <- for pairs \(bndr, rhs) -> do
+        rhs' <- defer $ symbolise subst' rhs
+        pure (bndr, rhs')
+    pure subst'
 
 symboliseBindMany
-  :: forall f es fs
+  :: forall f es
    . HasCallStack
-  => Error () :> es
-  => Error () :> fs
+  => Deferrable es
   => Foldable f
-  => HasFamInstEnvs :> fs
-  => Context Reader BuiltInTyCon :> fs
-  => Context Reader InterfaceThings :> fs
-  => Subst fs
+  => Error () :> es
+  => Context Reader BuiltInTyCon :> es
+  => Context Reader InterfaceThings :> es
+  => Subst
   -> f GHC.CoreBind
-  -> Eff es (Subst fs)
+  -> Eff es Subst
 symboliseBindMany = foldM symboliseBind
 
 isPrimType :: Type -> Bool
@@ -231,12 +233,13 @@ isPrimType ty = case GHC.splitTyConApp_maybe ty of
 -- user describe it as well.
 symboliseLit
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader InterfaceThings :> es
-  => Subst es
+  => Subst
   -> GHC.Literal
-  -> EvalExpr es
+  -> Eval es Expr
 symboliseLit subst lit = do
   -- Gather the identifier for equality.
   InterfaceThings { .. } <- liftEff $ get @InterfaceThings
@@ -262,9 +265,10 @@ symboliseLit subst lit = do
     _ -> throwE ()
 
   -- Lookup the equality function.
-  convert <- join . failWithE () $ lookupIdSubst subst convertId
+  convert <- failWithE () $ lookupIdSubst subst convertId
+  convert' <- hoistEff convert
 
-  mkApps convert [pure $ mkLit lit']
+  mkApps convert' [pure $ mkLit lit']
 
 -- | Create a symbolic equaltiy check between a scrutinee and a literal.
 --
@@ -272,11 +276,12 @@ symboliseLit subst lit = do
 -- check, as the representation of literals is also user-defined.
 symboliseEqLit
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader InterfaceThings :> es
   => Context Reader BuiltInTyCon :> es
-  => Subst es
-  -> Expr es
+  => Subst
+  -> Expr
   -> GHC.Literal
   -> Eval es SymBool
 symboliseEqLit subst lhs rhs = do
@@ -298,10 +303,13 @@ symboliseEqLit subst lhs rhs = do
     _ -> throwE ()
 
   -- Lookup the equality function.
-  eq <- join . failWithE () $ lookupIdSubst subst eqId
+  eq <- failWithE () $ lookupIdSubst subst eqId
+  eq' <- hoistEff eq
+
+  lit <- deferE $ symboliseLit subst rhs
 
   -- Call the equality function and uwrap the boolean result.
-  result <- mkApps eq [pure lhs, symboliseLit subst rhs]
+  result <- mkApps eq' [pure lhs, lit]
   case result of
     Lit (Bool result') -> pure result'
     _ -> throwE ()

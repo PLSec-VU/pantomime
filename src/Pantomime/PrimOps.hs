@@ -1,6 +1,7 @@
 module Pantomime.PrimOps
   -- | System Fc operations.
-  ( ite
+  ( PrimOp
+  , ite
   , tagToEnum
   , dataToTag
   , raise
@@ -70,8 +71,8 @@ import Data.Typeable (type (:~:) (..), eqT, Proxy (..))
 import Effectful (type (:>))
 import Effectful.Context (Context, ContextMode(..))
 import Effectful.Error.Static (HasCallStack, Error)
-import Effectful.GHC.External (HasFamInstEnvs)
 
+import GHC.Core.FamInstEnv (FamInstEnvs)
 import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
 import GHC.Plugins (Role (..), emptySubst, dataConTagZ, mkUnivCo)
 import GHC.TypeLits (type (<=), SomeNat (..), natVal)
@@ -94,15 +95,18 @@ import Grisette.Internal.SymPrim.SymArray qualified as Array
 
 import Pantomime.Embed
 import Pantomime.Expr
-  ( EvalExpr
-  , Expr (..)
+  ( Expr (..)
   , Constructor (..)
+  , Eval
+  , Runtime
   , collectArgs
   , mkLit
   , mkEnumCon
   , mkRaise
   , failWithE
   , throwE
+  , hoistEff
+  , deferE
   )
 import Pantomime.Literal
   ( BuiltInTyCon
@@ -114,16 +118,20 @@ import Pantomime.Literal
   )
 import Pantomime.Util (SomeBitVec(..), KnownPos, SymBitVec)
 import Pantomime.Dict
+import Pantomime.Defer (Deferrable, Defer (..))
 import Prelude
   ( Applicative (..)
   , Monad (..)
   , Num (..)
   , Integral (..)
   , Maybe (..)
+  , type (~)
   , ($)
   , (<$>)
+  , (.)
   , fst
   , fromIntegral
+  , id
   )
 
 -- TODO: It might make sense to expose equality (and especially 'distinct') as
@@ -135,12 +143,13 @@ import Prelude
 -- between bitvec and integer is important. Not sure if there are others? Maybe
 -- real numbers once we support them?
 
-type PrimOpExpr es
+type PrimOp es
   =  HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
-  => EvalExpr es
+  => Context Reader FamInstEnvs :> es
+  => Eval es Expr
 
 -- TODO: This one cannot be declared in Haskell... It can with BoxedRep, but
 -- still a definition is not possible.
@@ -152,8 +161,8 @@ type ITEOp
   :-> TyVar 1 (TyVar 0 RuntimeRepTy)
   :-> TyVar 1 (TyVar 0 RuntimeRepTy)
 
-ite :: PrimOpExpr es
-ite = embed @ITEOp emptySubst $ liftF4 \_ scrut tr fl -> do
+ite :: PrimOp es
+ite = embed2 @ITEOp \_ scrut tr fl -> hoistEff do
   scrut' <- scrut
   mrgIte scrut' tr fl
 
@@ -165,9 +174,9 @@ type TagToEnumOp
   :.  BitVecTy (Natural 64)
   :-> TyVar 0 TypeKind
 
-tagToEnum :: PrimOpExpr es
-tagToEnum = embed @TagToEnumOp emptySubst $ liftF2 \ty bvE -> do
-  SomeBitVec @n bv <- bvE
+tagToEnum :: PrimOp es
+tagToEnum = embed2 @TagToEnumOp \ty bvE -> do
+  SomeBitVec @n bv <- hoistEff bvE
   Refl <- failWithE () $ eqT @n @64
   -- TODO: I'm not sure how this interacts with the whole type normalisation.
   -- I don't think this is correct. Maybe we should reduce the type first? I
@@ -178,6 +187,36 @@ tagToEnum = embed @TagToEnumOp emptySubst $ liftF2 \ty bvE -> do
   -- some Representational reduction?
   mkEnumCon bv ty
 
+-- TODO: Perhaps we should move this typeclass and the 'embed2' function to the
+-- 'Embed' module, as it actually replaces much of what is defined there!
+class Wrap a where
+  type Wrapped a
+  wrap :: a -> Wrapped a 
+
+instance Wrap (Runtime a) where
+  type Wrapped (Runtime a) = Runtime a
+  wrap = id
+
+instance Wrap b => Wrap (a -> b) where
+  type Wrapped (a -> b) = Runtime (a -> Wrapped b)
+  wrap f = pure $ wrap . f
+
+embed2
+  :: forall ty es a
+   . HasCallStack
+  => Reflect ty
+  => Wrapped (Deferred a) ~ Runtime (Repr ty)
+  => Defer es a
+  => Wrap (Deferred a)
+  => Error () :> es
+  => Context Reader BuiltInTyCon :> es
+  => Context Reader FamInstEnvs :> es
+  => a
+  -> Eval es Expr
+embed2 x = do
+  y <- deferE x
+  embed @ty emptySubst $ wrap y
+
 -- forall (l :: Levity) (a :: TYPE (Boxed l)). l -> Int#
 type DataToTagOp
   =   Forall 0 LevityTy
@@ -185,9 +224,9 @@ type DataToTagOp
   :.  TyVar 1 (BoxedRep (TyVar 0 LevityTy))
   :-> BitVecTy (Natural 64)
 
-dataToTag :: PrimOpExpr es
-dataToTag = embed @DataToTagOp emptySubst $ liftF3 \_ _ valueE -> do
-  value <- valueE
+dataToTag :: PrimOp es
+dataToTag = embed2 @DataToTagOp \_ _ valueE -> do
+  value <- hoistEff valueE
   -- TODO: Maybe we should make the conversion a function inside of
   -- Pantomime.Expr? It feels a bit odd here.
   case fst $ collectArgs value of
@@ -203,9 +242,8 @@ type RaiseOp
   :.  TyVar 2 (TYPE (BoxedRep (TyVar 0 LevityTy)))
   :-> TyVar 3 (TYPE (TyVar 1 RuntimeRepTy))
 
-raise :: PrimOpExpr es
-raise = embed @RaiseOp emptySubst $ liftF5 \_ _ _ _ err -> do
-  mkRaise err
+raise :: PrimOp es
+raise = embed2 @RaiseOp \_ _ _ _ err -> mkRaise err
 
 type UnsafeEqualityProofOp
   =   Forall 0 TypeKind
@@ -216,46 +254,47 @@ type UnsafeEqualityProofOp
         (TyVar 1 (TyVar 0 TypeKind))
         (TyVar 2 (TyVar 0 TypeKind))
 
-unsafeEqualityProof :: PrimOpExpr es
-unsafeEqualityProof = embed @UnsafeEqualityProofOp emptySubst $ liftF3 \_ tyL tyR -> do
+unsafeEqualityProof :: forall es. PrimOp es
+unsafeEqualityProof = embed2 @UnsafeEqualityProofOp \_ tyL tyR -> do
   let prov = PluginProv "pantomime embedded 'unsafeEqualityProof'"
-  pure $ mkUnivCo prov [] Nominal tyR tyL
+  pure @(Eval es) $ mkUnivCo prov [] Nominal tyR tyL
 
-true :: PrimOpExpr es
-true = embed @BoolTy emptySubst $ pure Grisette.true
+true :: forall es. PrimOp es
+true = embed2 @BoolTy $ pure @(Eval es) Grisette.true
 
-false :: PrimOpExpr es
-false = embed @BoolTy emptySubst $ pure Grisette.false
+false :: forall es. PrimOp es
+false = embed2 @BoolTy $ pure @(Eval es) Grisette.false
 
-not :: PrimOpExpr es
-not = embed @(BoolTy :-> BoolTy) emptySubst $ liftF1 \value -> do
-  symNot <$> value
+not :: PrimOp es
+not = embed2 @(BoolTy :-> BoolTy) \value -> do
+  symNot <$> hoistEff value
 
 boolbinary
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => (SymBool -> SymBool -> SymBool)
-  -> EvalExpr es
-boolbinary f = embed @(BoolTy :-> BoolTy :-> BoolTy) emptySubst $ liftF2 \lhs rhs -> do
-  lhs' <- lhs
-  rhs' <- rhs
+  -> Eval es Expr
+boolbinary f = embed2 @(BoolTy :-> BoolTy :-> BoolTy) \lhs rhs -> do
+  lhs' <- hoistEff lhs
+  rhs' <- hoistEff rhs
   pure $ f lhs' rhs'
 
-implies :: PrimOpExpr es
+implies :: PrimOp es
 implies = boolbinary symImplies
 
-and :: PrimOpExpr es
+and :: PrimOp es
 and = boolbinary (.&&)
 
-or :: PrimOpExpr es
+or :: PrimOp es
 or = boolbinary (.||)
 
-iff :: PrimOpExpr es
+iff :: PrimOp es
 iff = boolbinary (.==)
 
-xor :: PrimOpExpr es
+xor :: PrimOp es
 xor = boolbinary (./=)
 
 type IntegerBitVecOp
@@ -265,67 +304,69 @@ type IntegerBitVecOp
   :->  IntegerTy
   :->  BitVecTy (TyVar 0 NaturalTy)
 
-i2bv :: PrimOpExpr es
-i2bv = embed @IntegerBitVecOp emptySubst $ liftF4 \_ n _ i -> do
-  SomeNat @n _ <- n
+i2bv :: PrimOp es
+i2bv = embed2 @IntegerBitVecOp \_ n _ i -> do
+  SomeNat @n _ <- hoistEff n
   Dict <- failWithE () $ posNat @n
-  i' <- i
+  i' <- hoistEff i
   pure $ SomeBitVec @n (symFromIntegral i')
 
-ineg :: PrimOpExpr es
-ineg = embed @(IntegerTy :-> IntegerTy) emptySubst $ liftF1 \value -> do
-  negate <$> value
+ineg :: PrimOp es
+ineg = embed2 @(IntegerTy :-> IntegerTy) \value -> do
+  negate <$> hoistEff value
 
-iabs :: PrimOpExpr es
-iabs = embed @(IntegerTy :-> IntegerTy) emptySubst $ liftF1 \value -> do
-  abs <$> value
+iabs :: PrimOp es
+iabs = embed2 @(IntegerTy :-> IntegerTy) \value -> do
+  abs <$> hoistEff value
 
 ibinary
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => (SymInteger -> SymInteger -> SymInteger)
-  -> EvalExpr es
-ibinary f = embed @(IntegerTy :-> IntegerTy :-> IntegerTy) emptySubst $ liftF2 \lhs rhs -> do
-  lhs' <- lhs
-  rhs' <- rhs
+  -> Eval es Expr
+ibinary f = embed2 @(IntegerTy :-> IntegerTy :-> IntegerTy) \lhs rhs -> do
+  lhs' <- hoistEff lhs
+  rhs' <- hoistEff rhs
   pure $ f lhs' rhs'
 
-iadd :: PrimOpExpr es
+iadd :: PrimOp es
 iadd = ibinary (+)
 
-imul :: PrimOpExpr es
+imul :: PrimOp es
 imul = ibinary (*)
 
-idiv :: PrimOpExpr es
+idiv :: PrimOp es
 idiv = ibinary div
 
-imod :: PrimOpExpr es
+imod :: PrimOp es
 imod = ibinary mod
 
 icompare
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => (SymInteger -> SymInteger -> SymBool)
-  -> EvalExpr es
-icompare f = embed @(IntegerTy :-> IntegerTy :-> BoolTy) emptySubst $ liftF2 \lhs rhs -> do
-  lhs' <- lhs
-  rhs' <- rhs
+  -> Eval es Expr
+icompare f = embed2 @(IntegerTy :-> IntegerTy :-> BoolTy) \lhs rhs -> do
+  lhs' <- hoistEff lhs
+  rhs' <- hoistEff rhs
   pure $ f lhs' rhs'
 
-ieq :: PrimOpExpr es
+ieq :: PrimOp es
 ieq = icompare (.==)
 
-ineq :: PrimOpExpr es
+ineq :: PrimOp es
 ineq = icompare (./=)
 
-ile :: PrimOpExpr es
+ile :: PrimOp es
 ile = icompare (.<=)
 
-ilt :: PrimOpExpr es
+ilt :: PrimOp es
 ilt = icompare (.<)
 
 type BitVecIntegerOp
@@ -333,13 +374,13 @@ type BitVecIntegerOp
   :.  BitVecTy (TyVar 0 NaturalTy)
   :-> IntegerTy
 
-bv2i :: PrimOpExpr es
-bv2i = embed @BitVecIntegerOp emptySubst $ liftF2 \_n bv -> do
+bv2i :: PrimOp es
+bv2i = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
   SomeBitVec bv' <- bv
   pure $ symFromIntegral bv'
 
-bvsize :: PrimOpExpr es
-bvsize = embed @BitVecIntegerOp emptySubst $ liftF2 \_n bv -> do
+bvsize :: PrimOp es
+bvsize = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
   SomeBitVec @n _ <- bv
   pure $ fromInteger (natVal @n Proxy)
 
@@ -350,21 +391,22 @@ type UnBitVecOp
 
 bvunary
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => (forall n. KnownPos n => SymBitVec n -> SymBitVec n)
-  -> EvalExpr es
-bvunary f = embed @UnBitVecOp emptySubst $ liftF2 \_n bv -> do
+  -> Eval es Expr
+bvunary f = embed2 @UnBitVecOp \_n bv -> hoistEff do
   SomeBitVec bv' <- bv
   pure $ SomeBitVec (f bv')
 
 -- | Bitvector bitwise complement.
-bvnot :: PrimOpExpr es
+bvnot :: PrimOp es
 bvnot = bvunary complement
 
 -- | Bitvector negation.
-bvneg :: PrimOpExpr es
+bvneg :: PrimOp es
 bvneg = bvunary negate
 
 type BinBitVecOp
@@ -375,14 +417,15 @@ type BinBitVecOp
 
 bvbinary
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => (forall n. KnownPos n => SymBitVec n -> SymBitVec n -> SymBitVec n)
-  -> EvalExpr es
-bvbinary f = embed @BinBitVecOp emptySubst $ liftF3 \_n lhs rhs -> do
-  SomeBitVec @nl lhs' <- lhs
-  SomeBitVec @nr rhs' <- rhs
+  -> Eval es Expr
+bvbinary f = embed2 @BinBitVecOp \_n lhs rhs -> do
+  SomeBitVec @nl lhs' <- hoistEff lhs
+  SomeBitVec @nr rhs' <- hoistEff rhs
   Refl <- failWithE () $ eqT @nl @nr
   pure $ SomeBitVec (f lhs' rhs')
 
@@ -395,51 +438,51 @@ asSignedBin f lhs rhs = do
   toUnsigned $ f lhs' rhs'
 
 -- | Bitvector bitwise and.
-bvand :: PrimOpExpr es
+bvand :: PrimOp es
 bvand = bvbinary (.&.)
 
 -- | Bitvector bitwise or.
-bvor :: PrimOpExpr es
+bvor :: PrimOp es
 bvor = bvbinary (.|.)
 
 -- | Bitvector bitwise exclusive or.
-bvxor :: PrimOpExpr es
+bvxor :: PrimOp es
 bvxor = bvbinary Bits.xor
 
 -- | Bitvector addition.
-bvadd :: PrimOpExpr es
+bvadd :: PrimOp es
 bvadd = bvbinary (+)
 
 -- | Bitvector multiplication.
-bvmul :: PrimOpExpr es
+bvmul :: PrimOp es
 bvmul = bvbinary (*)
 
 -- | Bitvector unsigned division.
-bvudiv :: PrimOpExpr es
+bvudiv :: PrimOp es
 bvudiv = bvbinary div
 
 -- | Bitvector signed division.
-bvsdiv :: PrimOpExpr es
+bvsdiv :: PrimOp es
 bvsdiv = bvbinary $ asSignedBin div
   
 -- | Bitvector unsigned remainder.
-bvurem :: PrimOpExpr es
+bvurem :: PrimOp es
 bvurem = bvbinary rem
 
 -- | Bitvector signed remainder.
-bvsrem :: PrimOpExpr es
+bvsrem :: PrimOp es
 bvsrem = bvbinary $ asSignedBin rem
 
 -- | Bitvector shift left.
-bvshl :: PrimOpExpr es
+bvshl :: PrimOp es
 bvshl = bvbinary symShift
 
 -- | Bitvector logical shift right.
-bvlshr :: PrimOpExpr es
+bvlshr :: PrimOp es
 bvlshr = bvbinary symShiftNegated
 
 -- | Bitvector arithmetic shift right.
-bvashr :: PrimOpExpr es
+bvashr :: PrimOp es
 bvashr = bvbinary $ asSignedBin symShiftNegated
 
 -- -- TODO: both bvrol and bvror are parametric over the shift amount more akin to
@@ -460,14 +503,15 @@ type CompareBitVecOp
 
 bvcompare
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => (forall n. KnownPos n => SymBitVec n -> SymBitVec n -> SymBool)
-  -> EvalExpr es
-bvcompare f = embed @CompareBitVecOp emptySubst $ liftF3 \_ lhs rhs -> do
-  SomeBitVec @nl lhs' <- lhs
-  SomeBitVec @nr rhs' <- rhs
+  -> Eval es Expr
+bvcompare f = embed2 @CompareBitVecOp \_ lhs rhs -> do
+  SomeBitVec @nl lhs' <- hoistEff lhs
+  SomeBitVec @nr rhs' <- hoistEff rhs
   Refl <- failWithE () $ eqT @nl @nr
   pure $ f lhs' rhs'
 
@@ -479,22 +523,22 @@ asSignedCmp f lhs rhs = do
   let rhs' = toSigned rhs
   f lhs' rhs'
 
-bveq :: PrimOpExpr es
+bveq :: PrimOp es
 bveq = bvcompare (.==)
 
-bvneq :: PrimOpExpr es
+bvneq :: PrimOp es
 bvneq = bvcompare (./=)
 
-bvule :: PrimOpExpr es
+bvule :: PrimOp es
 bvule = bvcompare (.<=)
 
-bvsle :: PrimOpExpr es
+bvsle :: PrimOp es
 bvsle = bvcompare $ asSignedCmp (.<=)
 
-bvult :: PrimOpExpr es
+bvult :: PrimOp es
 bvult = bvcompare (.<)
 
-bvslt :: PrimOpExpr es
+bvslt :: PrimOp es
 bvslt = bvcompare $ asSignedCmp (.<)
 
 type ConcatBitVecOp
@@ -504,8 +548,8 @@ type ConcatBitVecOp
   :-> BitVecTy (TyVar 1 NaturalTy)
   :-> BitVecTy (TyVar 0 NaturalTy :+ TyVar 1 NaturalTy)
 
-bvconcat :: PrimOpExpr es
-bvconcat = embed @ConcatBitVecOp emptySubst $ liftF4 \_ _ lhs rhs -> do
+bvconcat :: PrimOp es
+bvconcat = embed2 @ConcatBitVecOp \_ _ lhs rhs -> hoistEff do
   SomeBitVec @nl lhs' <- lhs
   SomeBitVec @nr rhs' <- rhs
   SomeNat' @n <- pure $ typeAdd @nl @nr
@@ -532,18 +576,18 @@ bvextend
     -> SymBitVec l
     -> SymBitVec r
      )
-  -> PrimOpExpr es
-bvextend f = embed @ExtendBitVecOp emptySubst $ liftF5 \_ _ r _ bv -> do
-  SomeBitVec @l bv' <- bv
-  SomeNat @r _ <- r
+  -> PrimOp es
+bvextend f = embed2 @ExtendBitVecOp \_ _ r _ bv -> do
+  SomeBitVec @l bv' <- hoistEff bv
+  SomeNat @r _ <- hoistEff r
   Dict <- failWithE () $ leqNat @l @r
   Dict <- failWithE () $ posNat @r
   pure $ SomeBitVec (f (Proxy @r) bv')
 
-bvzext :: PrimOpExpr es
+bvzext :: PrimOp es
 bvzext = bvextend sizedBVZext
 
-bvsext :: PrimOpExpr es
+bvsext :: PrimOp es
 bvsext = bvextend sizedBVSext
 
 -- :: forall idx width n
@@ -559,16 +603,16 @@ type SelectBitVecOp
   :.  Forall 2 NaturalTy
   :.  KnownNatTy (TyVar 0 NaturalTy)
   :-> KnownNatTy (TyVar 1 NaturalTy)
-  :-> (Natural 1 :<= (TyVar 1 NaturalTy))
+  :-> (Natural 1 :<= TyVar 1 NaturalTy)
   :-> (TyVar 0 NaturalTy :+ TyVar 1 NaturalTy :<= TyVar 2 NaturalTy)
   :-> BitVecTy (TyVar 2 NaturalTy)
   :-> BitVecTy (TyVar 1 NaturalTy)
 
-bvselect :: PrimOpExpr es
-bvselect = embed @SelectBitVecOp emptySubst $ liftF8 \_ _ _ idx width _ _  bv -> do
-  SomeNat @idx _ <- idx
-  SomeNat @width _ <- width
-  SomeBitVec @n bv' <- bv
+bvselect :: PrimOp es
+bvselect = embed2 @SelectBitVecOp \_ _ _ idx width _ _  bv -> do
+  SomeNat @idx _ <- hoistEff idx
+  SomeNat @width _ <- hoistEff width
+  SomeBitVec @n bv' <- hoistEff bv
   Dict <- failWithE () $ posNat @width
   SomeNat' @sum <- pure $ typeAdd @idx @width
   Dict <- failWithE () $ leqNat @sum @n
@@ -583,13 +627,13 @@ type ArrayConstOp
   :-> TyVar 1 TypeKind
   :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
 
-aconst :: PrimOpExpr es
-aconst = embed @ArrayConstOp emptySubst $ liftF5 \_ _ pk _ valE -> do
+aconst :: PrimOp es
+aconst = embed2 @ArrayConstOp \_ _ pk _ valE -> do
   -- Gather constraints for primitive types.
-  (_kco, SomeLiteralType @k kty) <- pk
+  (_kco, SomeLiteralType @k kty) <- hoistEff pk
 
   -- Gather the literal, knowing it is one due to the constraint.
-  Literal @v vty val <- valE >>= \case
+  Literal @v vty val <- hoistEff valE >>= \case
     Lit lit -> pure lit
     _ -> throwE ()
 
@@ -611,13 +655,13 @@ type ArraySelectOp
   :-> TyVar 0 TypeKind
   :-> TyVar 1 TypeKind
 
-aselect :: PrimOpExpr es
-aselect = embed @ArraySelectOp emptySubst $ liftF6 \_ _ _ _ arrE keyE -> do
+aselect :: PrimOp es
+aselect = embed2 @ArraySelectOp \_ _ _ _ arrE keyE -> do
   -- Get the inner array.
-  SomeArray @k @v arr <- arrE
+  SomeArray @k @v arr <- hoistEff arrE
 
   -- Gather the literal, knowing it is one due to the constraint.
-  Literal kty key <- keyE >>= \case
+  Literal kty key <- hoistEff keyE >>= \case
     Lit lit -> pure lit
     _ -> throwE ()
 
@@ -639,18 +683,18 @@ type ArrayStoreOp
   :-> TyVar 1 TypeKind
   :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
 
-astore :: PrimOpExpr es
-astore = embed @ArrayStoreOp emptySubst $ liftF7 \_ _ _ _ arrE keyE valE -> do
+astore :: PrimOp es
+astore = embed2 @ArrayStoreOp \_ _ _ _ arrE keyE valE -> do
   -- Get the inner array.
-  SomeArray @k @v arr <- arrE
+  SomeArray @k @v arr <- hoistEff arrE
 
   -- Gather the literal, knowing it is one due to the constraint.
-  Literal kty key <- keyE >>= \case
+  Literal kty key <- hoistEff keyE >>= \case
     Lit lit -> pure lit
     _ -> throwE ()
 
   -- Gather the literal, knowing it is one due to the constraint.
-  Literal vty val <- valE >>= \case
+  Literal vty val <- hoistEff valE >>= \case
     Lit lit -> pure lit
     _ -> throwE ()
 

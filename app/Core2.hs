@@ -30,9 +30,9 @@ import Data.Word
 import Data.Bits
 import Data.Maybe (fromMaybe)
 import Pantomime (Pantomime(..), Theory (..), pantomime) --, NonInterference (..), nonInterference0, nonInterference1)
-import Pantomime.Base qualified as Base
+import Pantomime.Axioms.Base qualified as Base
+import Pantomime.BuiltIn qualified as Pantomime
 import Control.Arrow (Arrow(..))
-import Data.Composition ((.:))
 
 data Instr
   = Add Word8
@@ -86,8 +86,8 @@ core state0 rawInstr = do
   let state3  = fetch state2 (rawInstr, jump)
   (state3, (out, fePC state3))
 
-{-# ANN theory (Theory Base.axioms) #-}
-theory :: State -> Word16 -> Bool
+-- {-# ANN theory (Theory Base.axioms) #-}
+theory :: State -> Word16 -> Pantomime.Bool
 theory = pantomime Pantomime
   { implementation = core
   , leakage = leak

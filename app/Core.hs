@@ -12,7 +12,8 @@ import Data.Word
 import Data.Bits
 
 import Pantomime (Pantomime(..), Theory (..), pantomime)
-import Pantomime.Base qualified as Base
+import Pantomime.Axioms.Base qualified as Base
+import Pantomime.BuiltIn qualified as Pantomime
 
 
 data Instr = Add Word8 | Clr | Out | Jmp Word8 | Beq Word8
@@ -63,7 +64,7 @@ proc state rawInstr =
         ( state''', (out, pc state'''))
 
 -- {-# ANN theory (Theory Base.axioms) #-}
-theory :: State -> Word16 -> Bool
+theory :: State -> Word16 -> Pantomime.Bool
 theory = pantomime Pantomime
   { implementation = proc
   , leakage = leak

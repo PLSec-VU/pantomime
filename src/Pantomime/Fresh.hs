@@ -6,11 +6,12 @@ module Pantomime.Fresh
   ) where
 
 import GHC.Builtin.Types.Prim (eqPrimTyCon, eqReprPrimTyCon)
+import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe, FamInstEnvs)
 import GHC.Core.Reduction (Reduction (..), mkReduction, homogeniseHetRedn)
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
-import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe)
-import GHC.Types.Unique (Uniquable (..), getKey)
 import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
+import GHC.Core.Unify (tcUnifyTysFG, alwaysBindFun, UnifyResultM (..))
+import GHC.Types.Unique (Uniquable (..), getKey)
 import GHC.Utils.Outputable (Outputable (..))
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
@@ -59,8 +60,10 @@ import Grisette
 
 import Data.Constraint (Dict (..))
 import Data.Text.Encoding (decodeUtf8)
+import Data.Traversable (for)
 
 import Pantomime.Axiom (TypeAxiomsR)
+import Pantomime.Defer (Deferrable)
 import Pantomime.Expr
 import Pantomime.Literal
   ( BuiltInTyCon
@@ -72,17 +75,14 @@ import Pantomime.Util (freshIds, freshTyVars, foldlBy, SymBitVec)
 
 import Effectful
 import Effectful.Error.Static
-import Effectful.GHC.External
-import Effectful.Context (Context, ContextMode (..))
-import GHC.Core.Unify (tcUnifyTysFG, alwaysBindFun, UnifyResultM (..))
-import Data.Traversable (for)
+import Effectful.Context (Context, ContextMode (..), get)
 
 data FreshInstEnv where
   FreshInstEnv ::
     { fieUser :: TyConEnv TyCon
     } -> FreshInstEnv
 
-data Variable es where
+data Variable where
   Variable ::
     { varName :: Name
     -- ^ Root name.
@@ -90,9 +90,9 @@ data Variable es where
     -- ^ Accessor path, note that the first entry is accessed last.
     , varType :: Type
     -- ^ Type of this variable.
-    , varArgs :: [Arg es]
+    , varArgs :: [Arg]
     -- ^ Arguments which the variable depends on.
-    } -> Variable es
+    } -> Variable
 
 data Accessor where
   Accessor
@@ -119,7 +119,7 @@ data VarType where
 -- this is better for debugging. I'll have to profile to see if this is actually
 -- that bad. :)
 varToSymbol
-  :: Variable es
+  :: Variable
   -> VarType
   -> Symbol
 varToSymbol var dst = do
@@ -139,7 +139,7 @@ varToSymbol var dst = do
 
 symbolicVar
   :: Solvable (ConType s) s
-  => Variable es
+  => Variable
   -> VarType
   -> s
 symbolicVar var dst = case varArgs var of
@@ -158,18 +158,19 @@ symbolicVar var dst = case varArgs var of
 -- The freshness hinges on the freshness of the Var.
 freshExpr
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => Context Reader BuiltInTyCon :> es
   => TyConEnv TyCon
   -> Var
-  -> EvalExpr es
+  -> Eval es Expr
 freshExpr axioms root = do
   -- TODO: Is it better to this lookup once? Whilst it is a reader-like effect,
   -- it is implemented through IO, so I'm a bit wary of running it in a hot loop
   -- like this one. The only way to know is just to profile I guess, but for now
   -- I'll put it outside.
-  fam <- liftEff getFamInstEnvs
+  fam <- liftEff $ get @FamInstEnvs
   -- TODO: Add note on callstack and recursion
   -- TODO: I don't like the nesting this gives. Maybe we should move these
   -- definitions inwards somehow. Perhaps just a standalone helper definition?
@@ -276,7 +277,7 @@ freshExpr axioms root = do
             | (dcN : dcs) <- reverse dataCons -> do
               let goDataCon dc = do
                     let fieldTys = scaledThing <$> dataConInstArgTys dc args
-                    valArgs <- for (zip [0..] fieldTys) \(idx, ty') -> if
+                    valArgs <- for (zip [0..] fieldTys) \(idx, ty') -> liftEff $ thunk if
                       -- If the types are surely apart, we can never reach the
                       -- construction of this value.
                       -- TODO: As 'Coercion' cannot be 'Unreachabe', we have
@@ -285,7 +286,7 @@ freshExpr axioms root = do
                       | Just (Nominal, tyL, tyR) <- isEqPred' ty'
                       , SurelyApart <- tcUnifyTysFG alwaysBindFun [tyL] [tyR] -> do
                         mkUnreachable
-                      | otherwise -> pure $ go var
+                      | otherwise -> go var
                         { varType = ty'
                         , varAccessor = Accessor dc idx : varAccessor var
                         }
@@ -396,13 +397,14 @@ freshExpr axioms root = do
 
 freshArgs
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
+  => Context Reader FamInstEnvs :> es
   => TypeAxiomsR
   -> Type
   -> InScopeSet
-  -> ([(Var, Arg es)], InScopeSet)
+  -> Eff es ([(Var, Arg)], InScopeSet)
 freshArgs axioms ty scope0 = do
   -- Gather the argument types.
   let (tyVars, funTy) = splitForAllTyVars ty
@@ -425,10 +427,10 @@ freshArgs axioms ty scope0 = do
   let args = tyArgs <> valArgs
 
   -- Create symbolic instance of the arguments.
-  let symbolic = freshExpr axioms <$> args
+  symbolic <- for args $ thunk . freshExpr axioms
 
   -- Zip the binders together with their symbolic instance.
   let binders = zip args symbolic
 
   -- Return the binders and the new scope.
-  (binders, scope2)
+  pure (binders, scope2)

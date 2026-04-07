@@ -1,4 +1,5 @@
 {-# LANGUAGE MagicHash #-}
+{-# LANGUAGE ImpredicativeTypes #-}
 
 module Pantomime.Binding
   ( InterfaceThings (..)
@@ -12,9 +13,7 @@ import Control.Error (LookupError)
 import Control.Monad ((>=>))
 import Data.Traversable (for)
 import Effectful
-import Effectful.Context
 import Effectful.Error.Static
-import Effectful.GHC.External (HasFamInstEnvs)
 import Effectful.GHC.TyThing (HasThings, lookupTyCon, lookupId)
 import Effectful.GHC.TH (THNameToGHCName, thNameToGhcName)
 import GHC.Plugins (Name, Var, Id)
@@ -22,8 +21,8 @@ import GHC.TypeNats qualified as Builtin (type (<=))
 import Language.Haskell.TH qualified as TH
 import Pantomime.BuiltIn qualified as Builtin
 import Pantomime.PrimOps qualified as PrimOps
+import Pantomime.PrimOps (PrimOp)
 import Pantomime.Literal (BuiltInTyCon (..))
-import Pantomime.Expr (EvalExpr)
 import Unsafe.Coerce qualified as Builtin (UnsafeEquality, unsafeEqualityProof)
 
 -- TODO: I need a better name for this!
@@ -103,12 +102,7 @@ getBuiltinTyCon = do
   tcUnsafeEquality <- thNameToTyCon ''Builtin.UnsafeEquality
   pure BuiltInTyCon { .. }
 
-bindingsTH
-  :: HasCallStack
-  => Error () :> es
-  => Context Reader BuiltInTyCon :> es
-  => HasFamInstEnvs :> es
-  => [(TH.Name, EvalExpr es)]
+bindingsTH :: [(TH.Name, forall es. PrimOp es)]
 bindingsTH =
   -- System FC bindings.
   ----------------------
@@ -185,10 +179,7 @@ bindingsGHC
   => Error (LookupError Name) :> es
   => HasThings :> es
   => THNameToGHCName :> es
-  => Error () :> fs
-  => Context Reader BuiltInTyCon :> fs
-  => HasFamInstEnvs :> fs
-  => Eff es [(Var, EvalExpr fs)]
+  => Eff es [(Var, forall fs. PrimOp fs)]
 bindingsGHC = for bindingsTH \(th, expr) -> do
   name <- thNameToGhcName th
   var <- lookupId name

@@ -4,12 +4,20 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE FunctionalDependencies #-}
 
 module Pantomime.Expr
-  ( Eval (..)
+  ( Eval
+  , Runtime
+  , RuntimeT (..)
+  , pattern Runtime
+  , runRuntime
+  , pattern RuntimeT
+  , runRuntimeT
   , Variant (..)
   , Expr (..)
-  , EvalExpr
+  , Spine
   , Arg
   , Literal (..)
   , Type
@@ -18,7 +26,7 @@ module Pantomime.Expr
 
   , pprExpr
   , pprArg
-  , pprEval
+  , pprRuntime
 
   , mkDataCon
   , mkEnumCon
@@ -51,6 +59,9 @@ module Pantomime.Expr
   , collectScrut
 
   , liftEff
+  , hoistEff
+  , thunk
+  , deferE
   , throwE
   , failWithE
   , dbgE
@@ -163,14 +174,18 @@ import Data.List ((!?))
 import Data.Traversable (for)
 import Data.Typeable (type (:~:) (..), eqT)
 
-import Control.Arrow (Arrow(..))
-import Control.Monad.Except (ExceptT (..))
+import Control.Arrow (Arrow (..), (>>>))
 import Control.Monad ((>=>), foldM, unless)
-import Control.Monad.Trans (MonadTrans(..))
+import Control.Monad.Except (ExceptT (..))
+import Control.Monad.Identity (Identity (..))
+import Control.Monad.Trans (MonadTrans (..))
 
 import Effectful
 import Effectful.Context
 import Effectful.Error.Static
+import Pantomime.Defer (defer, Deferrable, Defer (..))
+import GHC.IO (unsafeDupablePerformIO)
+import Effectful.Dispatch.Static (unEff)
 
 -- TODO: I recently swapped this implementation from another one because I
 -- thought the old one was broken w.r.t. laziness. I found out later that the
@@ -229,8 +244,25 @@ import Effectful.Error.Static
 -- for this setup. There also should be a big warning sign of the commutativity
 -- restriction, we can refer to UnionT for this as I explain much of how it
 -- works there.
-newtype Eval es a where
-  Eval :: ExceptT (Variant es) (UnionT (Eff es)) a -> Eval es a
+-- newtype Eval es a where
+--   Eval :: ExceptT (Variant es) (UnionT (Eff es)) a -> Eval es a
+--   deriving Functor
+--   deriving Applicative
+--   deriving Monad
+--   deriving TryMerge
+--   deriving Mergeable
+--   deriving Mergeable1
+--   deriving SimpleMergeable
+--   deriving SimpleMergeable1
+--   deriving SymBranching
+--   deriving EvalSym
+--   deriving EvalSym1
+type Eval es = RuntimeT (Eff es)
+
+type Runtime = RuntimeT Identity
+
+newtype RuntimeT m a where
+  RuntimeT' :: ExceptT Variant (UnionT m) a -> RuntimeT m a
   deriving Functor
   deriving Applicative
   deriving Monad
@@ -243,45 +275,68 @@ newtype Eval es a where
   deriving EvalSym
   deriving EvalSym1
 
+instance MonadTrans RuntimeT where
+  lift = RuntimeT' . lift . lift
+
+instance Outputable (Runtime Expr) where
+  ppr = pprRuntime pprExpr id
+
+pattern Runtime :: Union (Either Variant a) -> Runtime a
+pattern Runtime m <- (coerce -> m)
+  where
+    Runtime = coerce
+
+runRuntime ::Runtime a -> Union (Either Variant a)
+runRuntime = coerce
+
+pattern RuntimeT :: m (Union (Either Variant a)) -> RuntimeT m a
+pattern RuntimeT m <- (coerce -> m)
+  where
+    RuntimeT = coerce
+
+runRuntimeT :: RuntimeT m a -> m (Union (Either Variant a))
+runRuntimeT = coerce
+
 -- TODO: I'm not sure if I like this name. Perhaps we can think about what other
 -- options these have. Unlike the other error types, these ones don't need a
 -- stack trace, as they're actually just valid values. In fact, I **really**
--- want these to merge! Perhaps something like NominalExcept/Error?
-data Variant es where
-  UB :: Variant es
-  Unreachable :: Variant es
+-- want these to merge! Perhaps something like NominalExcept/Error? Otherwise,
+-- RuntimeAlt?
+data Variant where
+  UB :: Variant
+  Unreachable :: Variant
   -- TODO: Should this not contain an Expr or EvalExpr? In any case, we haven't
   -- really implemented errors yet, so we should just look into this still.
   --
   -- Future reference, we have implemented raise# using the EvalExpr for now.
   -- I guess we'll have to see if this actually makes sense, but we don't do
   -- much with errors anyway still.
-  Raise :: EvalExpr es -> Variant es
+  Raise :: Spine -> Variant
   deriving Generic
-  deriving Mergeable via Default (Variant es)
-  deriving EvalSym via Default (Variant es)
+  deriving Mergeable via Default Variant
+  deriving EvalSym via Default Variant
 
 -- TODO: I feel like a comment on this one is due: this is pretty much the main
 -- data structure of the evaluator (together with Eval)!
-data Expr es where
+data Expr where
   Lit
     :: Literal
-    -> Expr es
+    -> Expr
   Con
     :: Constructor
-    -> Expr es
+    -> Expr
   Type
     :: Type
-    -> Expr es
+    -> Expr
   Coercion
     :: Coercion
-    -> Expr es
+    -> Expr
   Lam
     :: Type
     -- ^ Expression type
-    -> (Arg es -> EvalExpr es)
+    -> (Arg -> Spine)
     -- ^ Closure
-    -> Expr es
+    -> Expr
   -- TODO: I guess the only time App is used is for DataCon. Maybe having it
   -- in here is too general and it should just be part of DataCon? I guess
   -- technically a Cast might also be at the root no? Whilst we do fold casts
@@ -295,38 +350,41 @@ data Expr es where
   --
   -- VERDICT: I don't see a reason to keep the App node.
   App
-    :: Expr es
-    -> Thunk es
-    -> Expr es
+    :: Expr
+    -> Thunk
+    -> Expr
   Cast
-    :: Union (Expr es)
+    :: Union Expr
     -> CoercionR
-    -> Expr es
+    -> Expr
   deriving Generic
-  deriving Mergeable via Default (Expr es)
+  deriving Mergeable via Default Expr
 
-instance EvalSym (Expr es) where
+instance EvalSym Expr where
   evalSym fill model = \case
     Lit lit -> Lit $ evalSym' lit
     Con con -> Con $ evalSym' con
     Type ty -> Type ty
     Coercion co -> Coercion co
-    Lam ty closure -> Lam ty \arg -> evalSym' (closure arg)
+    Lam ty closure -> Lam ty $ evalSym' . closure
     App fun arg -> App (evalSym' fun) (evalSym' arg)
     Cast body co -> Cast (evalSym' body) co
     where
       evalSym' :: EvalSym a => a -> a
       evalSym' = evalSym fill model
 
+instance Outputable Expr where
+  ppr = pprExpr id
+
 -- | Expressions within the evaluation context. You may also think of these as
 -- thunks. It is expected that the spine of this expression is never a 'Type' or
 -- 'Coercion'.
-type EvalExpr es = Eval es (Expr es)
+type Spine = Runtime Expr
 
 -- | Like 'EvalExpr', this may be considered a thunk. Unlike 'EvalExpr', this is
 -- an expression that may appear in the argument position. This entails that
 -- it may be a 'Type' or 'Coercion' in the spine.
-type Arg es = EvalExpr es
+type Arg = Runtime Expr
 
 -- TODO: For now, I've made this Thunk so data constructors with different
 -- existentials applications do not merge. I'm not sure whether perhaps it is
@@ -374,13 +432,13 @@ type Arg es = EvalExpr es
 -- field is of type TyCoVar. Still, this is correct. Coercions should simply be
 -- wrapped via the use of mkCoercionTy. It took me a long time to figure this
 -- out, so I wrote it down here!
-data Thunk es where
-  Thunked :: Arg es -> Thunk es
-  Forced :: Either Type Coercion -> Thunk es
+data Thunk where
+  Thunked :: Arg -> Thunk
+  Forced :: Either Type Coercion -> Thunk
   deriving Generic
-  deriving Mergeable via Default (Thunk es)
+  deriving Mergeable via Default Thunk
 
-instance EvalSym (Thunk es) where
+instance EvalSym Thunk where
   evalSym fill model = \case
     Thunked value -> Thunked $ evalSym fill model value
     Forced value -> Forced value
@@ -448,11 +506,12 @@ mkDataCon dc = if
 mkEnumCon
   :: forall n es
    . KnownPos n
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => SymBitVec n
   -> Type
-  -> EvalExpr es
+  -> Eval es Expr
 mkEnumCon tag ty = do
   -- Ensure we have an enumeration type.
   (tc, targs) <- failWithE () $ splitTyConApp_maybe ty
@@ -485,27 +544,23 @@ constructorType con = do
 
 pprExpr
   :: (SDoc -> SDoc)
-  -> Expr es
-  -> Eff es SDoc
+  -> Expr
+  -> SDoc
 pprExpr addParens = \case
-  Lit lit -> pure $ ppr lit
-  Con con -> pure $ ppr con
-  Type ty -> pure $ "@" GHC.<> ppr ty
-  Coercion co -> pure $ "@~" GHC.<> ppr co
+  Lit lit -> ppr lit
+  Con con -> ppr con
+  Type ty -> "@" GHC.<> ppr ty
+  Coercion co -> "@~" GHC.<> ppr co
   Cast expr co -> do
-    expr' <- pprUnion expr parens pprExpr
-    pure . addParens $ sep
+    let expr' = pprUnion pprExpr parens expr
+    addParens $ sep
       [ expr'
       , "`cast`" <+> pprOptCo co
       ]
   -- TODO: This one is a bit more difficult. Really the only way to print a
   -- lambda is to provide it with fresh arguments. The problem is that we need
   -- a lot more context for printing in that way.
-  --
-  -- Since we actually changed the underyling monad in Eval to allow for more
-  -- effects, we could actually implement this now. :) The only annoying thing
-  -- is the dependency on the fresh variable generation here...
-  Lam {} -> pure "TODO lambda"
+  Lam {} -> "TODO lambda"
     -- (result, args) <- saturateLam @64 $ mkExpr expr
     -- let bndrs = fst <$> args
     -- let bndr = "\\" <+> sep (ppr <$> bndrs) <+> GHC.arrow
@@ -513,40 +568,39 @@ pprExpr addParens = \case
     -- pure . addParens $ hang bndr 2 body
   expr@App {} -> do
     let (fun, args) = collectArgs expr
-    header <- pprExpr parens fun
-    args' <- for args $ pprArg parens
+    let header = pprExpr parens fun
+    let args' = pprArg parens <$> args
     let body = sep args'
-    pure . addParens $ hang header 2 body
+    addParens $ hang header 2 body
 
 pprArg
   :: (SDoc -> SDoc)
-  -> Arg es
-  -> Eff es SDoc
-pprArg addParens = pprEval addParens pprExpr
+  -> Arg
+  -> SDoc
+pprArg = pprRuntime pprExpr
 
-pprEval
-  :: forall a es
+pprRuntime
+  :: forall a
    . Mergeable a
-  => (SDoc -> SDoc)
-  -> ((SDoc -> SDoc) -> a -> Eff es SDoc)
-  -> Eval es a
-  -> Eff es SDoc
-pprEval addParens f m = do
-  value :: Union (Either (Variant es) a) <- coerce m
-  pprUnion value addParens \p -> \case
+  => ((SDoc -> SDoc) -> a -> SDoc)
+  -> (SDoc -> SDoc)
+  -> Runtime a
+  -> SDoc
+pprRuntime inner = do
+  coerce $ pprUnion \addParens -> \case
     Left alt -> case alt of
-      UB -> pure "UB"
-      Unreachable -> pure "Unreachable"
-      Raise expr -> ("raise#" <+>) <$> pprArg p expr
-    Right expr -> f p expr
+      UB -> "UB"
+      Unreachable -> "Unreachable"
+      Raise expr -> "raise#" <+> pprArg addParens expr
+    Right value -> inner addParens value
 
 pprUnion
   :: Mergeable a
-  => Union a
+  => ((SDoc -> SDoc) -> a -> SDoc)
   -> (SDoc -> SDoc)
-  -> ((SDoc -> SDoc) -> a -> Eff es SDoc)
-  -> Eff es SDoc
-pprUnion union addParens inner = case union of
+  -> Union a
+  -> SDoc
+pprUnion inner addParens = \case
   Single value -> inner addParens value
   If scrut true false -> do
     -- Vertically concatenate using ($+$).
@@ -556,11 +610,11 @@ pprUnion union addParens inner = case union of
     let hang' d1 n d2 = vcat' [d1, nest n d2]
 
     -- Pretty print branches.
-    true' <- pprUnion true parens inner
-    false' <- pprUnion false parens inner
+    let true' = pprUnion inner parens true
+    let false' = pprUnion inner parens false
 
     -- Hange the branches below an if-then-else.
-    pure . addParens . hang' "ite" 2 $ vcat'
+    addParens . hang' "ite" 2 $ vcat'
       [ text $ show scrut
       , true'
       , false'
@@ -595,44 +649,46 @@ mkArray = Array
 
 mkCon
   :: Constructor
-  -> Expr es
+  -> Expr
 mkCon = Con
 
 mkLit
   :: Literal
-  -> Expr es
+  -> Expr
 mkLit = Lit
 
 mkType
   :: Type
-  -> Expr es
+  -> Expr
 mkType = Type
 
 mkCoercion
   :: Coercion
-  -> Expr es
+  -> Expr
 mkCoercion = Coercion
 
 mkLam
-  :: Type
-  -> (Arg es -> EvalExpr es)
-  -> Expr es
-mkLam = Lam
+  :: Deferrable es
+  => Type
+  -> (Arg -> Eval es Expr)
+  -> Eval es Expr
+mkLam ty closure = Lam ty <$> deferE closure
 
 mkApp
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => Expr es
-  -> Arg es
-  -> EvalExpr es
+  => Expr
+  -> Arg
+  -> Eval es Expr
 mkApp fun arg = case fun of
   Cast body co -> do
-    (arg', rco) <- pushCoArg co arg
+    (arg', rco) <- liftEff $ pushCoArg co arg
     body' <- liftUnion body
     expr <- mkApp body' arg'
     mkCastMCo expr rco
-  Lam _ty closure -> closure arg
+  Lam _ty closure -> hoistEff $ closure arg
   _ -> liftEff do
     ty <- exprType fun
     if
@@ -644,47 +700,52 @@ mkApp fun arg = case fun of
 
 pushCoArg
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => CoercionR
-  -> Arg es
-  -> Eval es (Arg es, MCoercionR)
+  -> Arg
+  -> Eff es (Arg, MCoercionR)
 pushCoArg co arg = if
   | tyL <- coercionLKind co
   , isForAllTy_ty tyL -> do
     -- The argument needs to be a type. As such, we can force it.
-    ty <- liftEff $ forceTy arg
+    ty <- forceTy arg
 
     -- Attempt to push the coercion into the type argument.
-    (ty', rco) <- failWithE () $ pushCoTyArg co ty
+    (ty', rco) <- failWith () $ pushCoTyArg co ty
 
     -- Return the type argument and result coercion.
     pure (pure $ mkType ty', rco)
 
   | otherwise -> do
     -- Attempt to split the coercion into an argument and result coercion.
-    (aco, rco) <- failWithE () $ pushCoValArg co
+    (aco, rco) <- failWith () $ pushCoValArg co
 
     -- Cast the argument and return the result coercion.
-    let arg' = arg >>= flip mkCastMCo aco
+    arg' <- thunk do
+      arg' <- hoistEff arg
+      mkCastMCo arg' aco
+
     pure (arg', rco)
 
 mkApps
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => Expr es
-  -> [Arg es]
-  -> EvalExpr es
+  => Expr
+  -> [Arg]
+  -> Eval es Expr
 mkApps = foldM mkApp
 
 mkCastMCo
   :: HasCallStack
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => Expr es
+  => Expr
   -> MCoercionR
-  -> EvalExpr es
+  -> Eval es Expr
 mkCastMCo expr = \case
   MRefl -> pure expr
   MCo co -> mkCast expr co
@@ -693,9 +754,9 @@ mkCast
   :: HasCallStack
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => Expr es
+  => Expr
   -> CoercionR
-  -> EvalExpr es
+  -> Eval es Expr
 mkCast expr co = do
   -- Ensure the coercion has role representational.
   unless (coercionRole co == Representational) do
@@ -733,8 +794,8 @@ mkCast expr co = do
       | isReflexiveCo co -> pure expr
       | otherwise -> pure $ Cast (pure expr) co
 
-mkVariant :: Variant es -> Eval es a
-mkVariant = Eval . ExceptT . pure . Left
+mkVariant :: Variant -> Eval es a
+mkVariant = RuntimeT . pure . pure . Left
 
 mkUnreachable :: Eval es a
 mkUnreachable = mkVariant Unreachable
@@ -742,7 +803,7 @@ mkUnreachable = mkVariant Unreachable
 mkUB :: Eval es a
 mkUB = mkVariant UB
 
-mkRaise :: EvalExpr es -> Eval es a
+mkRaise :: Runtime Expr -> Eval es a
 mkRaise = mkVariant . Raise
 
 -- | Force an expression into a type or coercion.
@@ -756,26 +817,22 @@ forceTyCo
   :: forall es
    . HasCallStack
   => Error () :> es
-  => Arg es
+  => Arg
   -> Eff es (Either Type Coercion)
-forceTyCo arg = do
-  -- Simply pass an already existing error, if possible.
-  arg' :: Union (Either (Variant es) (Expr es)) <- coerce arg
+forceTyCo = runRuntime >>> \case
+  -- Attempt to get a single 'Type' or 'Coercion'.
+  Single (Right value)
+    | Type ty <- value -> pure $ Left ty
+    | Coercion co <- value -> pure $ Right co
 
-  case arg' of
-    -- Attempt to get a single 'Type' or 'Coercion'.
-    Single (Right value)
-      | Type ty <- value -> pure $ Left ty
-      | Coercion co <- value -> pure $ Right co
-
-    -- The expression was not in the expected shape.
-    _ -> throwError ()
+  -- The expression was not in the expected shape.
+  _ -> throwError ()
 
 -- | Force an expression into a type using 'forceTyCo'.
 forceTy
   :: HasCallStack
   => Error () :> es
-  => Arg es
+  => Arg
   -> Eff es Type
 forceTy = forceTyCo >=> either pure (const $ throwError ())
 
@@ -783,7 +840,7 @@ forceTy = forceTyCo >=> either pure (const $ throwError ())
 forceCo
   :: HasCallStack
   => Error () :> es
-  => Arg es
+  => Arg
   -> Eff es Coercion
 forceCo = forceTyCo >=> either (const $ throwError ()) pure
 
@@ -810,7 +867,7 @@ exprType
   :: HasCallStack
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => Expr fs
+  => Expr
   -> Eff es Type
 exprType = \case
   Lit lit -> embedLitTyOf lit
@@ -838,14 +895,14 @@ exprType = \case
 
 -- | Collect the arguments of an application.
 collectArgs
-  :: Expr es
-  -> (Expr es, [Arg es])
+  :: Expr
+  -> (Expr, [Arg])
 collectArgs = second (fmap unthunk) . collectThunks
 
 -- | Collect the thunks of an application.
 collectThunks
-  :: Expr es
-  -> (Expr es, [Thunk es])
+  :: Expr
+  -> (Expr, [Thunk])
 collectThunks = go []
   where
     go args = \case
@@ -856,8 +913,8 @@ collectThunks = go []
 --
 -- Really, args are just always thunks. This will put forced values into thunks.
 unthunk
-  :: Thunk es
-  -> Arg es
+  :: Thunk
+  -> Arg
 unthunk = \case
   Thunked value -> value
   Forced value -> case value of
@@ -880,10 +937,11 @@ unthunk = \case
 -- arguments of a DataCon if possible.
 collectScrut
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
-  => Expr es
-  -> Eval es (Either (Expr es) Constructor, [Arg es])
+  => Expr
+  -> Eval es (Either Expr Constructor, [Arg])
 collectScrut = \case
   -- On a cast, we may attempt to push a TyConAppCo into the arguments of
   -- a DataCon literal.
@@ -928,12 +986,13 @@ collectScrut = \case
 -- | Push a TyConAppCo into the arguments of a DataCon.
 pushCoDataCon
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => DataCon
-  -> [Thunk es]
+  -> [Thunk]
   -> Coercion
-  -> Eff es ([Type], [Thunk es])
+  -> Eff es ([Type], [Thunk])
 pushCoDataCon dc args co = do
   -- Check whether the outer type is a TyConAppCo.
   let tyR = coercionRKind co
@@ -962,22 +1021,42 @@ pushCoDataCon dc args co = do
 
   -- Create the new existential type arguments and the type substitution for
   -- the argument casts.
-  let (psiSubst, exTys')
-        = liftCoSubstWithEx Representational dcUnivVars univCo dcExVars exTys
+  let (psiSubst, exTys') = do
+        liftCoSubstWithEx Representational dcUnivVars univCo dcExVars exTys
 
   -- Cast all the value arguments using the substitution.
   let argTys = scaledThing <$> dataConRepArgTys dc
-  let castArg arg ty = arg >>= flip mkCast (psiSubst ty)
-  let valArgs' = Thunked <$> zipWith castArg valArgs argTys
+  valArgs' <- for (zip valArgs argTys) \(val, ty) -> Thunked <$> thunk do
+    arg <- hoistEff val
+    mkCast arg $ psiSubst ty
 
   -- Wrap the existential type arguments back into thunks.
   let exArgs = Forced . Left <$> exTys'
 
   pure (univArgsR, exArgs ++ valArgs')
 
+-- TODO: We should probably just make this a typeclass and move it to Util.
 -- | Lift a result into the evaluation context.
 liftEff :: Eff es a -> Eval es a
-liftEff = Eval . lift . lift
+liftEff = lift
+
+-- TODO: We can probably kill this one after we swap away from 'Eval'.
+hoistEff :: Runtime a -> Eval es a
+hoistEff = RuntimeT . pure . runRuntime
+
+-- TODO: We can probably kill this one after we swap away from 'Eval'.
+thunk :: Deferrable es => Eval es a -> Eff es (Runtime a)
+thunk = fmap Runtime . defer . runRuntimeT
+
+-- TODO: Remove this once we get rid of 'Eval'.
+instance Deferrable es => Defer es (Eval es a) where
+  type Deferred (Eval es a) = Runtime a
+
+  defer' = Runtime . unsafeDupablePerformIO .: unEff . runRuntimeT
+
+-- TODO: Remove this once we get rid of 'Eval'.
+deferE :: Defer es a => a -> Eval es (Deferred a)
+deferE = lift . defer
 
 -- | Throw an error within the 'Eval' monadic context.
 throwE
