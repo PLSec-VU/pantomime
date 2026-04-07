@@ -191,10 +191,10 @@ symboliseBind subst = \case
 
   GHC.Rec pairs -> do
     rec
-      subst' <- extendIdSubstMany subst pairs'
       pairs' <- for pairs \(bndr, rhs) -> do
         rhs' <- defer $ symbolise subst' rhs
         pure (bndr, rhs')
+      subst' <- extendIdSubstMany subst pairs'
     pure subst'
 
 symboliseBindMany
