@@ -40,7 +40,6 @@ library
       Pantomime
       Pantomime.Annotation
       Pantomime.Axiom
-      Pantomime.Axioms.Base
       Pantomime.Binding
       Pantomime.BuiltIn
       Pantomime.Defer
@@ -101,7 +100,6 @@ library
     , deepseq
     , effectful-core >=2.5.1.0
     , ghc >=9.12.2
-    , ghc-prim
     , grisette >=0.13.0.0
     , hashable
     , microlens
@@ -111,63 +109,6 @@ library
     , text
     , transformers
     , unordered-containers
-  default-language: Haskell2010
-
-executable pantomime-exe
-  main-is: Main.hs
-  other-modules:
-      ClassInline
-      Core
-      Core2
-      LocalClass
-      Processor
-      ProcessorControl
-      ProcessorControlModular
-      ProcessorModular
-      RW
-      ThreeAdder
-      Two2Adders
-      TwoAdders
-      TwoAddersStall
-      TwoAddersStallPrecise
-      Paths_pantomime
-  autogen-modules:
-      Paths_pantomime
-  hs-source-dirs:
-      app
-  default-extensions:
-      AllowAmbiguousTypes
-      BlockArguments
-      ConstraintKinds
-      DataKinds
-      DeriveDataTypeable
-      DeriveTraversable
-      FlexibleContexts
-      FlexibleInstances
-      GADTs
-      ImportQualifiedPost
-      KindSignatures
-      LambdaCase
-      MultiParamTypeClasses
-      MultiWayIf
-      NamedFieldPuns
-      RankNTypes
-      RecordWildCards
-      ScopedTypeVariables
-      TemplateHaskell
-      TupleSections
-      TypeAbstractions
-      TypeApplications
-      TypeFamilies
-      TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module -threaded -rtsopts -with-rtsopts=-N -fplugin Pantomime -fexpose-all-unfoldings
-  build-depends:
-      QuickCheck
-    , base >=4.7 && <5
-    , constraints >=0.14.2
-    , grisette >=0.13.0.0
-    , mtl
-    , pantomime
   default-language: Haskell2010
 
 test-suite pantomime-test

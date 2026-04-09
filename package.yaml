@@ -67,12 +67,7 @@ library:
   source-dirs: src
   dependencies:
   - ghc >= 9.12.2
-  # TODO: Not sure, but maybe I can remove the ghc-prim dependency once I
-  # separate the base axioms to a separate package. I guess it would still be
-  # used, just not visible most likely.
-  - ghc-prim
   - primitive
-  # - ghc-stack-profiler
   - composition
   - containers
   - unordered-containers
@@ -83,20 +78,6 @@ library:
   - text
   - hashable
   - deepseq
-
-executables:
-  pantomime-exe:
-    main: Main.hs
-    source-dirs: app
-    ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
-    - -fplugin Pantomime
-    - -fexpose-all-unfoldings
-    dependencies:
-    - QuickCheck
-    - pantomime
 
 tests:
   pantomime-test:
