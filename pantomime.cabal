@@ -26,9 +26,6 @@ source-repository head
 library
   exposed-modules:
       Control.Error
-      Data.Member
-      Data.Product
-      Data.Sum
       Effectful.Break
       Effectful.Context
       Effectful.GHC.Annotations
