@@ -53,16 +53,18 @@ module Pantomime.BuiltIn
   , eqWord16#
   , eqWord32#
   , eqWord64#
-  , hsi2bv
   , hsi2i
+  , i2hsi
 
   -- | Operations on type-level natural numbers.
   --
   -- These mirror the original 'KnownNat' implementation up to the inner value
   -- being the builtin 'Integer' of the symbolic executor.
   , KnownNat (..)
-  , SNat
   , natVal
+  , SNat (SNat)
+  , (%+)
+  , (%-)
   , SomeNat (..)
   , someNatVal
 
@@ -146,11 +148,15 @@ module Pantomime.BuiltIn
   , astore
   ) where
 
-import Control.Monad.Identity (Identity(..))
-import Data.Coerce (coerce)
-import Data.Composition ((.:))
+import Control.Monad (guard)
+import Control.Monad.Identity (Identity (..))
 import Data.Bits qualified as Prelude (Bits (..))
-import Data.Data (Proxy(..))
+import Data.Coerce (coerce)
+import Data.Constraint (HasDict (..))
+import Data.Constraint.Unsafe qualified as Prelude (unsafeSNat)
+import Data.Composition ((.:))
+import Data.Constraint.Unsafe (unsafeAxiom)
+import Data.Data (Proxy (..))
 import Data.Hashable (Hashable (..))
 import GHC.Base
   ( TYPE
@@ -170,16 +176,16 @@ import GHC.Base
   , noinline
   )
 import GHC.TypeLits qualified as Prelude (natVal)
-import GHC.TypeNats (Nat, type (+), type (<=))
+import GHC.TypeNats (Nat, type (+), type (-), type (<=))
 import GHC.TypeNats qualified as Prelude (KnownNat)
 import Grisette (SymShift(..), SizedBV (..), IntN, SignConversion (..))
 import Grisette.Internal.SymPrim.Array qualified as Grisette
-import Prelude qualified
-import Prelude (Applicative (..), Ordering (..), ($))
+import Pantomime.Dict (Dict (..), SomeNat' (..), typeAdd, unsafeEq)
 import Pantomime.Util qualified as Util (BitVec)
-import Pantomime.Dict (Dict (..), SomeNat' (..), typeAdd, unsafeAxiom, unsafeEq)
-import Data.Constraint.Unsafe qualified as Prelude (unsafeSNat)
+import Prelude qualified
+import Prelude (Applicative (..), Ordering (..), ($), (.))
 
+-- TODO: I guess we could also make this a typeclass without variables?
 class Private a
 
 instance Private a
@@ -227,8 +233,17 @@ instance (Primitive k, Primitive v) => Primitive (Array k v)
 -- we would handle this correctly? Maybe with a pragma?
 type PlatformWordSize = 64
 
--- | Literal construction function for built-in Haskell 'Int#' literal. Note
--- that
+-- | Literal construction function for built-in Haskell 'Int#' literal.
+--
+-- Note that this should not be used directly. Instead, this should get a user
+-- interpretation that matches the representation for 'Int#' as given by the
+-- user.
+-- TODO: I guess the above is true for all these functions below. Perhaps we can
+-- document this once and have the instances reference this?
+--
+-- Actually though, it would be good to have functions to switch between Haskell
+-- and Pantomime types, as one would perhaps also want to use these if they
+-- plan on actually using these primitives for some check.
 {-# OPAQUE toInt# #-}
 toInt# :: BitVec PlatformWordSize -> Int#
 toInt# = noinline toInt#
@@ -310,19 +325,19 @@ eqWord64# :: Word64# -> Word64# -> Bool
 eqWord64# = noinline eqWord64#
 
 -- TODO: Not sure I like this name.
--- | Convert a Haskell 'Integer' to a pantomime 'BitVec'.
+-- | Convert a Haskell 'Integer' to a pantomime 'Integer'.
 --
--- This function will be used to implement 'fromInteger' for 'BitVec', and as
--- such will allow one to write their literals. As the conversion depends on the
--- interpretation of 'Integer', we can only ask a user to provide an instance
--- for this.
-{-# OPAQUE hsi2bv #-}
-hsi2bv :: forall n. KnownNat n => 1 <= n => Prelude.Integer -> BitVec n
-hsi2bv x = withKnownNat @n $ BitVec (Prelude.fromInteger x)
-
+-- This function will be used to implement 'fromInteger' for pantomime
+-- 'Integer', and as such will allow one to write their literals. As the
+-- conversion depends on the interpretation of haskell 'Integer', we can only
+-- ask a user to provide an instance for this.
 {-# OPAQUE hsi2i #-}
 hsi2i :: Prelude.Integer -> Integer
-hsi2i = Integer
+hsi2i = coerce
+
+{-# OPAQUE i2hsi #-}
+i2hsi :: Integer -> Prelude.Integer
+i2hsi = coerce
 
 -- | 'KnownNat' constraint using Pantomime primitive 'Integer'.
 class KnownNat (n :: Nat) where
@@ -333,13 +348,44 @@ instance Prelude.KnownNat n => KnownNat n where
     let i = Prelude.natVal @n Proxy
     UnsafeSNat @n $ hsi2i i
 
--- | Singleton natural number using Pantomime primitive 'Integer'.
-newtype SNat (n :: Nat) where
-  UnsafeSNat :: Integer -> SNat n
+instance HasDict (KnownNat n) (SNat n) where
+  evidence nat = withDict @(KnownNat n) nat Dict
 
 -- | Get the 'Integer' corresponding to the 'KnownNat' constraint.
 natVal :: forall n. KnownNat n => Integer
 natVal = let UnsafeSNat i = natSing @n in i
+
+-- | Singleton natural number using Pantomime primitive 'Integer'.
+newtype SNat (n :: Nat) where
+  UnsafeSNat :: Integer -> SNat n
+
+-- | A explicitly bidirectional pattern synonym relating an 'SNat' to a
+-- 'KnownNat' constraint.
+pattern SNat :: forall n. () => KnownNat n => SNat n
+pattern SNat <- (knownNatInstance -> KnownNatInstance)
+  where
+    SNat = natSing
+{-# COMPLETE SNat #-}
+
+-- An internal data type that is only used for defining the SNat pattern
+-- synonym.
+data KnownNatInstance (n :: Nat) where
+  KnownNatInstance :: KnownNat n => KnownNatInstance n
+
+-- An internal function that is only used for defining the SNat pattern
+-- synonym.
+knownNatInstance :: forall n. SNat n -> KnownNatInstance n
+knownNatInstance nat = withDict @(KnownNat n) nat KnownNatInstance
+
+infixl 6 %+
+(%+) :: SNat l -> SNat r -> SNat (l + r)
+(%+) = coerce $ (Prelude.+) @Integer
+
+infixl 6 %-
+(%-) :: forall l r. SNat l -> SNat r -> Prelude.Maybe (SNat (l - r))
+(%-) = coerce $ \lhs rhs -> do
+  guard $ lhs Prelude.>= rhs
+  pure @Prelude.Maybe @Integer $ lhs Prelude.- rhs
 
 data SomeNat where
   SomeNat :: KnownNat n => SomeNat
@@ -610,7 +656,7 @@ instance (KnownNat n, 1 <= n) => Prelude.Num (BitVec n) where
   (*) = bvmul
   abs = Prelude.id
   signum value = ite (bveq value 0) 0 1
-  fromInteger = hsi2bv
+  fromInteger = i2bv . hsi2i
   negate = bvneg
 
 bvunary

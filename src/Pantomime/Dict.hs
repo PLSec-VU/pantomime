@@ -4,7 +4,6 @@
 
 module Pantomime.Dict
   ( Dict (..)
-  , unsafeAxiom
   , unsafeEq
   , eqNat
   , leqNat
