@@ -134,6 +134,7 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
 
   -- Create the final substitution.
   subst0 <- extendIdSubstMany mkEmptySubst prim'
+
   let termAxiomsR' = uncurry NonRec <$> termAxiomsR
   subst1 <- symboliseBindMany subst0 termAxiomsR'
   -- TODO: I think there is an ordering problem here between user
@@ -157,11 +158,8 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
       Lit (Bool value) -> pure value
       _ -> throwE ()
 
-  let doc = pprRuntime (\par -> par . text . show) id result
-  dbg doc
-
   -- TODO: What to do about raise? Do we really just want to return false? I
-  -- guess for now it makes sense.
+  -- guess for now it is fine.
   let eq = flip (onUnion @Union) (runRuntime result) \case
         Left Unreachable -> true
         Left UB -> false

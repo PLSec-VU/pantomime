@@ -66,6 +66,7 @@ module Pantomime.PrimOps
 
 import Data.Bits (Bits((.&.), (.|.), complement))
 import Data.Bits qualified as Bits (xor)
+import Data.Constraint.Unsafe (unsafeAxiom)
 import Data.Typeable (type (:~:) (..), eqT, Proxy (..))
 
 import Effectful (type (:>))

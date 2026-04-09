@@ -40,8 +40,9 @@ import Grisette
   , wrapStrategy
   )
 
-import Data.Data (Proxy(..))
 import Data.Constraint (Dict(..))
+import Data.Constraint.Unsafe (unsafeAxiom)
+import Data.Data (Proxy(..))
 import Data.Foldable (foldrM)
 import Data.Typeable (type (:~:)(..), eqT)
 
@@ -54,7 +55,6 @@ import Effectful (Eff, (:>))
 import Effectful.Error.Static (Error, CallStack, throwError_)
 import Effectful.Dispatch.Static (unsafeEff_)
 
-import Pantomime.Dict (unsafeAxiom)
 import Pantomime.Grisette.Mergeable (impossible)
 
 -- | Type alias for known naturals that are positive.

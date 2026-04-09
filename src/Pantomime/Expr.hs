@@ -71,7 +71,7 @@ import GHC.Core.Type qualified as GHC
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.Ppr (pprOptCo)
-import GHC.Core.Predicate (isEqPred)
+import GHC.Core.Predicate (isEqPrimPred)
 import GHC.Core.Opt.Arity (pushCoTyArg, pushCoValArg)
 import GHC.Utils.Outputable
   ( Outputable (..)
@@ -783,12 +783,12 @@ mkCast expr co = do
     -- The guard here checks that g has a (~#) on both sides, otherwise
     -- 'decomposeCo' fails. Can in principle happen with unsafeCoerce.
     -- ```
-    Coercion co' | isEqPred $ coercionRKind co -> do
+    Coercion co' | isEqPrimPred $ coercionRKind co -> do
       pure $ mkCoercion (mkCoCast co' co)
 
     -- TODO: Even with this improvement, we still do reflexivity check (and
     -- the above sanity type-check) once for each body. Perhaps we should take
-    -- an 'Arg es' here?
+    -- an 'Arg' here?
     _
       | isReflexiveCo co -> pure expr
       | otherwise -> pure $ Cast (pure expr) co

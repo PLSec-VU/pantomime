@@ -49,7 +49,7 @@ import Effectful.GHC.External (HasInstEnvs, lookupUniqueInst)
 -- Note that there may actually exists a unification for all the parts
 -- individually. However, there doesn't exists a single mapping to unify all
 -- type pairs.
-data UnificationError = UnificationError [(Type, Type)]
+newtype UnificationError = UnificationError [(Type, Type)]
 
 instance Outputable UnificationError where
   ppr (UnificationError pairs) = do
@@ -403,7 +403,7 @@ subsumeExpr dicts expr ty = do
   subst <- failWith err $ tcMatchTy curTy reqTy
 
   -- Make evidence variables.
-  let names = zip (repeat "dict") $ fmap unrestricted reqEv
+  let names = ("dict", ) . unrestricted <$> reqEv
   let (lamEv, _) = freshIds names $ mkInScopeSetList reqTv
 
   -- Construct the arguments to supply to the expression to unify.

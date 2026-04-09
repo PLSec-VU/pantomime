@@ -73,6 +73,7 @@ import GHC.TypeLits
 import Grisette (SymInteger, SymBool, ToCon (..))
 import Grisette.Internal.SymPrim.SymArray (SymArray)
 
+import Pantomime.Defer (Deferrable)
 import Pantomime.Expr
   ( Expr (..)
   , Literal (..)
@@ -100,14 +101,13 @@ import Pantomime.Expr
   , hoistEff
   , deferE
   )
-import Pantomime.Util (SomeBitVec (..), SymBitVec)
 import Pantomime.Literal
   ( BuiltInTyCon (..)
   , LiteralTypeable
   , SomeLiteralType
   , projectLitTy
   )
-import Pantomime.Defer (Deferrable)
+import Pantomime.Util (SomeBitVec (..), SymBitVec)
 
 -- TODO: We could think about making this slightly more structured? Maybe
 -- introduce a language similar to a GHC Type? Really, the only reason we are
