@@ -73,6 +73,23 @@ class Private
 -- This constraint should only be obtained via 'withDeferrable'.
 class Private => Deferrable (es :: [Effect])
 
+-- TODO: We can relax the constraints a bit here, which would make the usability
+-- a lot better:
+-- Instead of only giving 'Deferrable' if the entire effect stack can be
+-- deferred, we can give a token 'CanDefer' only by ensuring we put some outer
+-- result normal form. Then a call to 'defer' needs both 'DeferWith' and
+-- 'CanDefer'. Question: Should 'CanDefer' (or whatever we call it) be
+-- parameterized on the effect stack in question? My intuition says yes, as
+-- there otherwise might be misuse on the wrong stack? I guess the stack should
+-- be super set of the one of 'CanDefer'? Ideally we don't carry around the
+-- additional effect parameter everywhere though. 'CanDefer es' should imply
+-- 'CanDefer subEs' somehow. I'll think about it some more!
+--
+-- The benefit of this is that we can now run 'withDeferrable' in a broader
+-- effect context and just 'inject' the computations that actually actually
+-- satisfy 'CanDefer' into a larger effect stack. This would resolve the problem
+-- I'm facing in 'Pantomime.Solve' where we cannot pass around some values
+-- while really the effect handlers could still resolve them!
 -- | Get the typeclass constraint that allows us to call 'defer'.
 --
 -- Note the 'NFData' constraint to ensure any deferred instances of 'Error' do
