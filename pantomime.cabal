@@ -50,7 +50,6 @@ library
       Pantomime.Grisette.Mergeable
       Pantomime.Grisette.UnionT
       Pantomime.Literal
-      Pantomime.Orphan.Effectful
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes

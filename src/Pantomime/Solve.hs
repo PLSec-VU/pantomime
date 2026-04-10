@@ -54,7 +54,6 @@ import Pantomime.Expr
   , Literal (..)
   , mkApps
   , pprArg
-  , pprRuntime
   , runRuntime
   , throwE
   )

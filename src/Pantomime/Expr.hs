@@ -5,7 +5,6 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE FunctionalDependencies #-}
 
 module Pantomime.Expr
   ( Eval
@@ -125,6 +124,7 @@ import GHC.Plugins
   )
 
 import GHC.Generics (Generic)
+import GHC.IO (unsafeDupablePerformIO)
 import GHC.Stack (withFrozenCallStack)
 
 import Grisette
@@ -153,8 +153,8 @@ import Grisette
 -- now, we still need to touch these internal things...
 import Grisette.Internal.SymPrim.SymArray (SymArray)
 
+import Pantomime.Defer (defer, Deferrable, Defer (..))
 import Pantomime.Literal
-import Pantomime.Orphan.Effectful ()
 import Pantomime.Orphan.GHC ()
 import Pantomime.Grisette.UnionT
 import Pantomime.Grisette.Mergeable (impossible)
@@ -181,85 +181,16 @@ import Control.Monad.Trans (MonadTrans (..))
 
 import Effectful
 import Effectful.Context
-import Effectful.Error.Static
-import Pantomime.Defer (defer, Deferrable, Defer (..))
-import GHC.IO (unsafeDupablePerformIO)
 import Effectful.Dispatch.Static (unEff)
+import Effectful.Error.Static
 
--- TODO: I recently swapped this implementation from another one because I
--- thought the old one was broken w.r.t. laziness. I found out later that the
--- test case was just wrong (i.e. really infite, this one would also not pass
--- it). I'd like to see if we can reintroduce the old one, as I liked not having
--- the Result within the Union. In fact, I think this style of Result would
--- actually allow general effects to be available inside of Eval. The caveat
--- here is that the branches do not actually branch for the effects themselve.
--- This doesn't seem like a bad restriction though. For most effects: i.e.
--- errors and reader this is no real problem: we only care about the first error
--- anyways and reading does not require ordering anyway. For something like
--- state or writer, it could be a little bit more iffy. I guess we should
--- document this if we do want to allow full effects!
---
--- Just so I can find it later, this was the commit hash with the diff:
--- 29b937f6a911dace85647615c18d278bdbc6b0a7
---
--- I actually tried the old one, indeed it was **not** broken. Now I'm not
--- entirely sure which one I should favor... This one has the nice property of
--- not requiring a 'for' and 'join' on the inner union for the monadic bind.
--- I'm not sure if this one would work if we want to do a full Eff system in
--- place of just Result though. On the other hand though, I'm not sure if it was
--- slow to do a 'for' and then 'join' (and if there maybe is a better way).
---
--- Actually, I was thinking about how to write a 'UnionT' monad transformer
--- to wrap the around the Eff monad. Interestingly, the 'for' and 'join'
--- implementation is exactly like a broken 'ListT'. Note, the way it is broken
--- is very different from the reason I thought it was broken. It actually has
--- to do with commutativity of the monadic bind.
---
--- We can think if it is possible to write a non-broken UnionT, but for now it
--- is fine to leave it implemented like this I guess. Probably good to look at
--- the non-broken ListT implementations in order to find out how to write a good
--- one for Union. Perhaps the merging makes it a little bit hard...
---
--- For now though, let's just not bother and use this one!
---
--- Btw, I guess Either is commutative up to which error it emits. For us, any
--- arbitrary decision on this is fine. Reader is also commutative. I guess for
--- those two, we could actually implement Eval using the 'for' and 'join'
--- method, with the asterix of picking an arbitrary error branch. Having a
--- reader could be quite nice btw. We should employ the same trick as for the
--- error when indexing it btw!
---
--- I don't believe it is actually possible to write a good UnionT
--- implementation. That is, what would the effect be of two computations that
--- should be merged. Should we take just one of them? Which one? If we do take
--- effects of both, which ordering should be employed for this?
---
--- Still, having to redefine an effect-like monad restricted to the correct
--- effects feels a tad bit silly. Would it not make more sense to just have a
--- big warning of which effects are actually allowed by this?
---
--- TODO: So I've changed Eval now to allow full commutative effects. The text
--- above should probably be compiled into some sort of reasoning why we chose
--- for this setup. There also should be a big warning sign of the commutativity
--- restriction, we can refer to UnionT for this as I explain much of how it
--- works there.
--- newtype Eval es a where
---   Eval :: ExceptT (Variant es) (UnionT (Eff es)) a -> Eval es a
---   deriving Functor
---   deriving Applicative
---   deriving Monad
---   deriving TryMerge
---   deriving Mergeable
---   deriving Mergeable1
---   deriving SimpleMergeable
---   deriving SimpleMergeable1
---   deriving SymBranching
---   deriving EvalSym
---   deriving EvalSym1
 type Eval es = RuntimeT (Eff es)
 
 type Runtime = RuntimeT Identity
 
+-- TODO: We should probably note on the fact that this is not a proper monad
+-- transformed due to the use of UnionT. In the context where we use it, it is
+-- completely acceptable though!
 newtype RuntimeT m a where
   RuntimeT' :: ExceptT Variant (UnionT m) a -> RuntimeT m a
   deriving Functor
