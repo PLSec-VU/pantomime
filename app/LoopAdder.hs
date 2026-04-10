@@ -9,7 +9,7 @@ import Data.Maybe (fromMaybe)
 type Circ s i o = s -> i -> (s, o)
 
 {------------------------------ Adder ------------------------------}
--- fast path in the *second* input
+-- fast path in both inputs
 add :: Circ (Maybe Int) (Maybe Int, Maybe Int) (Maybe Int)
 add (Just res) _       = (Nothing, Just res) 
 add _ (Just 0, Just b) = (Nothing, Just b)
