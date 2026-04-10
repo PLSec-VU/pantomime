@@ -14,10 +14,8 @@ module Effectful.GHC.Display
 import Data.Composition ((.:))
 import Effectful
 import Effectful.Dispatch.Dynamic (send)
-
 import GHC.Utils.Outputable (Outputable (..), SDoc, text)
 import GHC.Types.Error (MessageClass (..))
-
 
 -- | Effect to get display 'SDoc'.
 data Display :: Effect where

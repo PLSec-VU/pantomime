@@ -42,7 +42,7 @@ import GHC.Plugins
 import GHC.Tc.Utils.TcType (eqType)
 import GHC.Utils.Outputable (Outputable (..), IsDoc (..), hang)
 
-import GHC.Exts (IsList(..))
+import GHC.Exts (IsList (..))
 
 import Control.Monad ((>=>), guard, when)
 import Control.Applicative (Alternative (..))
