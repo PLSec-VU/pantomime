@@ -62,6 +62,7 @@ module Pantomime.PrimOps
   , aconst
   , aselect
   , astore
+  , aeq
   ) where
 
 import Data.Bits (Bits((.&.), (.|.), complement))
@@ -706,3 +707,21 @@ astore = embed2 @ArrayStoreOp \_ _ _ _ arrE keyE valE -> do
   -- Create the modified array.
   let array = Array.store arr key val
   pure $ SomeArray array
+
+type ArrayEqOp
+  =   Forall 0 TypeKind
+  :.  Forall 1 TypeKind
+  :.  PrimitiveTy (TyVar 0 TypeKind)
+  :-> PrimitiveTy (TyVar 1 TypeKind)
+  :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
+  :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
+  :-> BoolTy
+
+aeq :: PrimOp es
+aeq = embed2 @ArrayEqOp \_ _ _ _ arrL arrR -> do
+  SomeArray @kL @vL arrL' <- hoistEff arrL
+  SomeArray @kR @vR arrR' <- hoistEff arrR
+
+  Refl <- failWithE () $ eqLiteralType (literalType @kL) (literalType @kR)
+  Refl <- failWithE () $ eqLiteralType (literalType @vL) (literalType @vR)
+  pure $ arrL' .== arrR'

@@ -1,7 +1,4 @@
 {-# LANGUAGE PolyKinds #-}
--- TODO: We redefine Dict here, but there is the 'constraints' package which has
--- utils for manipulating it. I guess it's better to just import that!
-
 module Pantomime.Dict
   ( Dict (..)
   , unsafeEq
@@ -13,7 +10,6 @@ module Pantomime.Dict
   , SomeNat' (..)
   , typeSub
   , typeAdd
-  , withSize
   ) where
 
 import GHC.TypeNats
@@ -71,6 +67,12 @@ geqToLeq = case Dict @(n >= m) of Dict -> unsafeAxiom
 -- TODO: This one feels a bit obsolote no? Can't we just split any usage of this
 -- into a normal SomeNat and a Dict? Maybe not, but this solution feels very
 -- dirty in any case. We should consider looking into a more clean approach.
+--
+-- Actually, we can just use SNat and provide a %+ and %- operation on those.
+-- This works much better!
+--
+-- Also, this stuff should just be moved into Pantomime.Util at that point. It's
+-- barely stuff about 'Dict' in this module...
 data SomeNat' eq where
   SomeNat' :: forall n eq. (KnownNat n, n ~ eq) => SomeNat' eq
 
@@ -91,9 +93,3 @@ typeAdd = runIdentity do
   SomeNat @n _ <- pure . someNatVal $ lhs' + rhs'
   Dict <- pure $ unsafeEq @(lhs + rhs) @n
   pure $ SomeNat' @(lhs + rhs)
-
--- TODO: Move this thing to Pantomime.Grisette.BitVector
-withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
-withSize con sym = case natVal $ Proxy @n of
-  0 -> case unsafeEq @n @0 of Dict -> con
-  _ -> case unsafeAxiom @(1 <= n) of Dict -> sym

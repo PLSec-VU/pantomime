@@ -146,9 +146,9 @@ module Pantomime.BuiltIn
   , aconst
   , aselect
   , astore
+  , aeq
   ) where
 
-import Control.Monad (guard)
 import Control.Monad.Identity (Identity (..))
 import Data.Bits qualified as Prelude (Bits (..))
 import Data.Coerce (coerce)
@@ -382,10 +382,12 @@ infixl 6 %+
 (%+) = coerce $ (Prelude.+) @Integer
 
 infixl 6 %-
-(%-) :: forall l r. SNat l -> SNat r -> Prelude.Maybe (SNat (l - r))
-(%-) = coerce $ \lhs rhs -> do
-  guard $ lhs Prelude.>= rhs
-  pure @Prelude.Maybe @Integer $ lhs Prelude.- rhs
+(%-) :: forall l r.  r <= l => SNat l -> SNat r -> SNat (l - r)
+(%-) = do
+  -- NOTE: The dictionary ensures it is safe to perform this subtraction. We use
+  -- it here to avoid a redundant constraint warning.
+  let _ = Dict @(r <= l)
+  coerce $ (Prelude.-) @Integer
 
 data SomeNat where
   SomeNat :: KnownNat n => SomeNat
@@ -677,12 +679,17 @@ bvcompare
   -> BitVec n
   -> BitVec n
   -> Bool
-bvcompare f (BitVec x) (BitVec y) = if f x y then True else False
+bvcompare f (BitVec x) (BitVec y) = case f x y of
+  Prelude.True -> True
+  Prelude.False -> False
 
 signedBin
   :: forall n
-   . (Prelude.KnownNat n => 1 <= n => IntN n -> IntN n -> IntN n)
-  -> (Prelude.KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Util.BitVec n)
+   . Prelude.KnownNat n => 1 <= n
+  => (IntN n -> IntN n -> IntN n)
+  -> Util.BitVec n
+  -> Util.BitVec n
+  -> Util.BitVec n
 signedBin f lhs rhs = do
   let lhs' = toSigned lhs
   let rhs' = toSigned rhs
@@ -690,8 +697,12 @@ signedBin f lhs rhs = do
 
 signedCmp
   :: forall n
-   . (Prelude.KnownNat n => 1 <= n => IntN n -> IntN n -> Prelude.Bool)
-  -> (Prelude.KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n -> Prelude.Bool)
+   . Prelude.KnownNat n
+  => 1 <= n
+  => (IntN n -> IntN n -> Prelude.Bool)
+  -> Util.BitVec n
+  -> Util.BitVec n
+  -> Prelude.Bool
 signedCmp f lhs rhs = do
   let lhs' = toSigned lhs
   let rhs' = toSigned rhs
@@ -707,6 +718,9 @@ bvsize BitVec {} = Integer $ Prelude.natVal @n Proxy
 
 -- TODO: I guess 'bvnat' should just be called 'bvsize' and then 'bvsize' should
 -- get an uglier name.
+-- TODO: Somehow it makes more sense to me to return 'SNat n'. I think for this
+-- one btw, we might be able to just construct it within Pantomime. I.e. then we
+-- don't need the ugly 'bvsize' trick.
 bvnat :: forall n. BitVec n -> Dict (KnownNat n)
 bvnat bv = do
   let nat = UnsafeSNat @n $ bvsize bv
@@ -863,6 +877,9 @@ newtype Array (k :: Type) (v :: Type) where
   -- Check out 'Primitive' in order to see why.
   deriving (Prelude.Eq, Hashable)
 
+-- TODO: I think we kind of need this? I'm not sure...
+type role Array nominal nominal
+
 -- TODO: Maybe it makes more sense to let 'Primitive' be carried inside of
 -- 'Array'. I think this reflects a bit better the array primitive under the
 -- hood?
@@ -884,3 +901,13 @@ astore
   -> v
   -> Array k v
 astore = coerce $ Grisette.store @k @v
+
+{-# OPAQUE aeq #-}
+aeq
+  :: forall k v
+   . Primitive k
+  => Primitive v
+  => Array k v
+  -> Array k v
+  -> Bool
+aeq = coerce $ (Prelude.==) @(Grisette.Array k v)

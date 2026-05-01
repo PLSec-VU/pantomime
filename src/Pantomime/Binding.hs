@@ -171,6 +171,7 @@ bindingsTH =
   , ('Builtin.aconst, PrimOps.aconst)
   , ('Builtin.aselect, PrimOps.aselect)
   , ('Builtin.astore, PrimOps.astore)
+  , ('Builtin.aeq, PrimOps.aeq)
   ]
 
 bindingsGHC
