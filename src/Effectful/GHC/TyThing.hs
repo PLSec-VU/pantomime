@@ -12,27 +12,40 @@ module Effectful.GHC.TyThing
   , LookupError (..)
   , MonadThings (..)
   , TyThing (..)
+  , lookupClass
   , lookupIdLocal
   , lookupIdAll
+  , lookupTyConLocal
+  , lookupTyConAll
   ) where
 
 import Prelude hiding (break)
 
 import Effectful
+import Effectful.Context
 import Effectful.Dispatch.Dynamic (send)
 import Effectful.Error.Static (HasCallStack, Error, throwError_, runError)
 import Effectful.Break
 
-import GHC.Plugins (CoreProgram, Id, Bind (..), varName, dataConWrapId)
+import GHC.Plugins
+  ( CoreProgram
+  , Id
+  , TyCon
+  , Bind (..)
+  , varName
+  , dataConWrapId
+  , tyConName
+  , tyConClass_maybe
+  )
+import GHC.Core.Class (Class)
 import GHC.Core.ConLike (ConLike(..))
 import GHC.Types.TyThing (TyThing (..), MonadThings (..))
 import GHC.Types.Name (Name)
 
+import Control.Error
+
 import Data.Foldable (find, asum)
 import Data.Functor ((<&>))
-
-import Control.Error
-import Effectful.Context
 
 -- | Effect drop-in for 'MonadThings'.
 data HasThings :: Effect where
@@ -72,6 +85,17 @@ instance (Error (LookupError Name) :> es, HasThings :> es) => MonadThings (Eff e
       ATyCon tyCon -> pure tyCon
       _ -> throwError_ $ LookupError name
 
+lookupClass
+  :: HasCallStack
+  => Error (LookupError Name) :> es
+  => HasThings :> es
+  => Name
+  -> Eff es Class
+lookupClass name = do
+  tc <- lookupTyCon name
+  let err = throwError_ $ LookupError name
+  maybe err pure $ tyConClass_maybe tc
+
 -- | Lookup a local identifier.
 lookupIdLocal
   :: HasCallStack
@@ -108,6 +132,42 @@ lookupIdAll name = runBreak do
   -- Attempt to lookup from the global and local namespace.
   attempt $ lookupId name
   attempt $ lookupIdLocal name
+
+  -- All lookups failed. We throw from here, as this is the most sensible
+  -- location for the stack trace to end up at.
+  throwError_ $ LookupError name
+
+-- | Lookup a local type constructor.
+lookupTyConLocal
+  :: HasCallStack
+  => Error (LookupError Name) :> es
+  => Context Reader [TyCon] :> es
+  => Name
+  -> Eff es TyCon
+lookupTyConLocal name = do
+  tcs <- get @[TyCon]
+  let result = find (\tc -> tyConName tc == name) tcs
+  let err = throwError_ $ LookupError name
+  maybe err pure result
+
+-- | Lookup a type constructor in both the local and global environment.
+lookupTyConAll
+  :: HasCallStack
+  => Error (LookupError Name) :> es
+  => Context Reader [TyCon] :> es
+  => HasThings :> es
+  => Name
+  -> Eff es TyCon
+lookupTyConAll name = runBreak do
+  -- Perform the lookup operation, resolving on success.
+  let attempt m = do
+        let continue = const $ pure ()
+        result <- runError @(LookupError Name) m
+        either continue break result
+
+  -- Attempt to lookup from the global and local namespace.
+  attempt $ lookupTyCon name
+  attempt $ lookupTyConLocal name
 
   -- All lookups failed. We throw from here, as this is the most sensible
   -- location for the stack trace to end up at.

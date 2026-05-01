@@ -3,8 +3,8 @@ version:             0.1.0.0
 github:              "PLSec-VU/pantomime"
 license:             BSD-3-Clause
 author:              "Robin Webbers"
-maintainer:          "example@example.com"
-copyright:           "2024 Author name here"
+maintainer:          "robin_webbers_1@hotmail.com"
+copyright:           "2026 Robin Webbers"
 
 extra-source-files:
 - README.md
@@ -47,21 +47,9 @@ default-extensions:
 
 dependencies:
 - base >= 4.7 && < 5
-- ghc >= 9.6.4
-- ghc-prim
-- composition
-- containers
-- unordered-containers
 - constraints >= 0.14.2
-- transformers
-- template-haskell
-- mtl
-- microlens
 - grisette >= 0.13.0.0
-# TODO: Remove clash dependency once we can externalise its interpretation.
-- clash-prelude
-- effectful-core >= 2.5.1.0
-- text
+- mtl
 
 ghc-options:
 - -Wall
@@ -77,20 +65,19 @@ ghc-options:
 
 library:
   source-dirs: src
-
-executables:
-  pantomime-exe:
-    main: Main.hs
-    source-dirs: app
-    ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
-    - -fplugin Pantomime
-    - -fexpose-all-unfoldings
-    dependencies:
-    - QuickCheck
-    - pantomime
+  dependencies:
+  - ghc >= 9.12.2
+  - primitive
+  - composition
+  - containers
+  - unordered-containers
+  - transformers
+  - template-haskell
+  - microlens
+  - effectful-core >= 2.5.1.0
+  - text
+  - hashable
+  - deepseq
 
 tests:
   pantomime-test:

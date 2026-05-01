@@ -4,28 +4,37 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Pantomime.Expr
-  ( Eval (..)
+  ( Eval
+  , Runtime
+  , RuntimeT (..)
+  , pattern Runtime
+  , runRuntime
+  , pattern RuntimeT
+  , runRuntimeT
   , Variant (..)
   , Expr (..)
-  , EvalExpr
+  , Spine
   , Arg
   , Literal (..)
   , Type
   , Coercion
+  , Constructor (..)
 
   , pprExpr
   , pprArg
-  , pprEval
+  , pprRuntime
 
-  , mkLit
   , mkDataCon
   , mkEnumCon
-  , mkIntN
-  , mkWordN
+  , mkBitVec
   , mkInteger
   , mkBool
+  , mkCon
+  , mkLit
+  , mkArray
   , mkType
   , mkCoercion
   , mkLam
@@ -42,15 +51,15 @@ module Pantomime.Expr
   , forceTy
   , forceCo
 
-  , exprToBool
   , eqType
-  , eqLit
+  , eqCon
   , exprType
-  , litType
   , collectArgs
   , collectScrut
 
   , liftEff
+  , hoistEff
+  , deferE
   , throwE
   , failWithE
   , dbgE
@@ -61,6 +70,7 @@ import GHC.Core.Type qualified as GHC
 import GHC.Core.TyCo.Compare (eqType)
 import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.Ppr (pprOptCo)
+import GHC.Core.Predicate (isEqPrimPred)
 import GHC.Core.Opt.Arity (pushCoTyArg, pushCoValArg)
 import GHC.Utils.Outputable
   ( Outputable (..)
@@ -90,46 +100,38 @@ import GHC.Plugins
   , isReflexiveCo
   , mkTransCo
   , coercionRKind
-  , isCoVarType
   , mkCoCast
   , isForAllTy_ty
   , coercionType
   , splitFunTy_maybe
   , splitForAllTyCoVar_maybe
   , tyConDataCons
-  , dataConRepType
   , mkCoercionTy
   , tyCoVarsOfTypes
   , mkInScopeSet
   , splitTyConApp_maybe
   , dataConExTyCoVars
+  , dataConWorkId
+  , dataConRepArgTys
   , splitAtList
   , dropList
   , dataConUnivTyVars
   , decomposeCo
   , tyConArity
-  , tyConFamilySize
   , tyConRolesRepresentational
   , liftCoSubstWithEx
-  , dataConRepArgTys
-  , boolTyCon
-  , trueDataCon
-  , falseDataCon
+  , varType
   )
 
-import GHC.TypeNats (KnownNat)
 import GHC.Generics (Generic)
+import GHC.IO (unsafeDupablePerformIO)
 import GHC.Stack (withFrozenCallStack)
 
-import Grisette.Unified (EvalModeTag (..))
-import Grisette qualified (LogicalOp (..))
 import Grisette
   ( Union
   , SymBool
   , SymInteger
   , SymEq (..)
-  , SymOrd (..)
-  , LogicalOp ((.&&))
   , ToSym (..)
   , ToCon (..)
   , TryMerge (..)
@@ -142,100 +144,55 @@ import Grisette
   , EvalSym (..)
   , EvalSym1 (..)
   , Default (..)
-  , LinkedRep
-  , ConRep (..)
   , wrapStrategy
   , liftUnion
-  , mrgIf
   , pattern Single
   , pattern If
   )
 -- TODO: Change import once we fully integrate SymArray into grisette! Right
 -- now, we still need to touch these internal things...
 import Grisette.Internal.SymPrim.SymArray (SymArray)
-import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim (..))
 
-import Pantomime.Orphan.Grisette ()
+import Pantomime.Defer (defer, Deferrable, Defer (..))
+import Pantomime.Literal
 import Pantomime.Orphan.GHC ()
 import Pantomime.Grisette.UnionT
-import Pantomime.Grisette.SomeBV (SomeBV (..))
-import Pantomime.Grisette.Mergeable (NoEval1 (..), DynIdx (..), impossible)
-import Pantomime.Grisette.BitVector (IntN, WordN)
-import Pantomime.Util (failWith, dbg)
+import Pantomime.Grisette.Mergeable (impossible)
+import Pantomime.Util
+  ( SomeBitVec (..)
+  , SymBitVec
+  , BitVec
+  , KnownPos
+  , failWith
+  , dbg
+  )
 
 import Data.Composition ((.:))
 import Data.Coerce (coerce)
-import Data.List ((!?), uncons)
+import Data.List ((!?))
 import Data.Traversable (for)
-import Data.Typeable (type (:~:) (..), Typeable, eqT)
+import Data.Typeable (type (:~:) (..), eqT)
 
-import Control.Arrow (Arrow(..))
-import Control.Monad.Except (ExceptT (..))
+import Control.Arrow (Arrow (..), (>>>))
 import Control.Monad ((>=>), foldM, unless)
-import Control.Monad.Trans (MonadTrans(..))
+import Control.Monad.Except (ExceptT (..))
+import Control.Monad.Identity (Identity (..))
+import Control.Monad.Trans (MonadTrans (..))
 
 import Effectful
+import Effectful.Context
+import Effectful.Dispatch.Static (unEff)
 import Effectful.Error.Static
 
--- TODO: I recently swapped this implementation from another one because I
--- thought the old one was broken w.r.t. laziness. I found out later that the
--- test case was just wrong (i.e. really infite, this one would also not pass
--- it). I'd like to see if we can reintroduce the old one, as I liked not having
--- the Result within the Union. In fact, I think this style of Result would
--- actually allow general effects to be available inside of Eval. The caveat
--- here is that the branches do not actually branch for the effects themselve.
--- This doesn't seem like a bad restriction though. For most effects: i.e.
--- errors and reader this is no real problem: we only care about the first error
--- anyways and reading does not require ordering anyway. For something like
--- state or writer, it could be a little bit more iffy. I guess we should
--- document this if we do want to allow full effects!
---
--- Just so I can find it later, this was the commit hash with the diff:
--- 29b937f6a911dace85647615c18d278bdbc6b0a7
---
--- I actually tried the old one, indeed it was **not** broken. Now I'm not
--- entirely sure which one I should favor... This one has the nice property of
--- not requiring a 'for' and 'join' on the inner union for the monadic bind.
--- I'm not sure if this one would work if we want to do a full Eff system in
--- place of just Result though. On the other hand though, I'm not sure if it was
--- slow to do a 'for' and then 'join' (and if there maybe is a better way).
---
--- Actually, I was thinking about how to write a 'UnionT' monad transformer
--- to wrap the around the Eff monad. Interestingly, the 'for' and 'join'
--- implementation is exactly like a broken 'ListT'. Note, the way it is broken
--- is very different from the reason I thought it was broken. It actually has
--- to do with commutativity of the monadic bind.
---
--- We can think if it is possible to write a non-broken UnionT, but for now it
--- is fine to leave it implemented like this I guess. Probably good to look at
--- the non-broken ListT implementations in order to find out how to write a good
--- one for Union. Perhaps the merging makes it a little bit hard...
---
--- For now though, let's just not bother and use this one!
---
--- Btw, I guess Either is commutative up to which error it emits. For us, any
--- arbitrary decision on this is fine. Reader is also commutative. I guess for
--- those two, we could actually implement Eval using the 'for' and 'join'
--- method, with the asterix of picking an arbitrary error branch. Having a
--- reader could be quite nice btw. We should employ the same trick as for the
--- error when indexing it btw!
---
--- I don't believe it is actually possible to write a good UnionT
--- implementation. That is, what would the effect be of two computations that
--- should be merged. Should we take just one of them? Which one? If we do take
--- effects of both, which ordering should be employed for this?
---
--- Still, having to redefine an effect-like monad restricted to the correct
--- effects feels a tad bit silly. Would it not make more sense to just have a
--- big warning of which effects are actually allowed by this?
---
--- TODO: So I've changed Eval now to allow full commutative effects. The text
--- above should probably be compiled into some sort of reasoning why we chose
--- for this setup. There also should be a big warning sign of the commutativity
--- restriction, we can refer to UnionT for this as I explain much of how it
--- works there.
-newtype Eval es a where
-  Eval :: ExceptT (Variant es) (UnionT (Eff es)) a -> Eval es a
+type Eval es = RuntimeT (Eff es)
+
+type Runtime = RuntimeT Identity
+
+-- TODO: We should probably note on the fact that this is not a proper monad
+-- transformed due to the use of UnionT. In the context where we use it, it is
+-- completely acceptable though!
+newtype RuntimeT m a where
+  RuntimeT' :: ExceptT Variant (UnionT m) a -> RuntimeT m a
   deriving Functor
   deriving Applicative
   deriving Monad
@@ -245,48 +202,71 @@ newtype Eval es a where
   deriving SimpleMergeable
   deriving SimpleMergeable1
   deriving SymBranching
-  deriving EvalSym via (EvalEvalSym es a)
-  deriving EvalSym1 via (EvalEvalSym es)
+  deriving EvalSym
+  deriving EvalSym1
 
--- | SymEval coercion for inner value of 'Eval' monad, useful for derivations.
-type EvalEvalSym es = ExceptT (Variant es) (UnionT (NoEval1 (Eff es)))
+instance MonadTrans RuntimeT where
+  lift = RuntimeT' . lift . lift
+
+instance Outputable (Runtime Expr) where
+  ppr = pprRuntime pprExpr id
+
+pattern Runtime :: Union (Either Variant a) -> Runtime a
+pattern Runtime m <- (coerce -> m)
+  where
+    Runtime = coerce
+
+runRuntime ::Runtime a -> Union (Either Variant a)
+runRuntime = coerce
+
+pattern RuntimeT :: m (Union (Either Variant a)) -> RuntimeT m a
+pattern RuntimeT m <- (coerce -> m)
+  where
+    RuntimeT = coerce
+
+runRuntimeT :: RuntimeT m a -> m (Union (Either Variant a))
+runRuntimeT = coerce
 
 -- TODO: I'm not sure if I like this name. Perhaps we can think about what other
 -- options these have. Unlike the other error types, these ones don't need a
 -- stack trace, as they're actually just valid values. In fact, I **really**
--- want these to merge! Perhaps something like NominalExcept/Error?
-data Variant es where
-  UB :: Variant es
-  Unreachable :: Variant es
+-- want these to merge! Perhaps something like NominalExcept/Error? Otherwise,
+-- RuntimeAlt?
+data Variant where
+  UB :: Variant
+  Unreachable :: Variant
   -- TODO: Should this not contain an Expr or EvalExpr? In any case, we haven't
   -- really implemented errors yet, so we should just look into this still.
   --
   -- Future reference, we have implemented raise# using the EvalExpr for now.
   -- I guess we'll have to see if this actually makes sense, but we don't do
   -- much with errors anyway still.
-  Raise :: EvalExpr es -> Variant es
+  Raise :: Spine -> Variant
   deriving Generic
-  deriving Mergeable via Default (Variant es)
-  deriving EvalSym via Default (Variant es)
+  deriving Mergeable via Default Variant
+  deriving EvalSym via Default Variant
 
 -- TODO: I feel like a comment on this one is due: this is pretty much the main
 -- data structure of the evaluator (together with Eval)!
-data Expr es where
+data Expr where
   Lit
     :: Literal
-    -> Expr es
+    -> Expr
+  Con
+    :: Constructor
+    -> Expr
   Type
     :: Type
-    -> Expr es
+    -> Expr
   Coercion
     :: Coercion
-    -> Expr es
+    -> Expr
   Lam
     :: Type
     -- ^ Expression type
-    -> (Arg es -> EvalExpr es)
+    -> (Arg -> Spine)
     -- ^ Closure
-    -> Expr es
+    -> Expr
   -- TODO: I guess the only time App is used is for DataCon. Maybe having it
   -- in here is too general and it should just be part of DataCon? I guess
   -- technically a Cast might also be at the root no? Whilst we do fold casts
@@ -295,27 +275,46 @@ data Expr es where
   --
   -- I guess if the cast is not a FunCo or ForAllCo, at some point the execution
   -- will halt anyway once we want to pattern match on it though. Maybe indeed,
-  -- only DataCon needs arguments.
+  -- only DataCon needs arguments. We do actually push over TyConAppCo. This is
+  -- handle by pushCoArg.
+  --
+  -- VERDICT: I don't see a reason to keep the App node.
   App
-    :: Expr es
-    -> Thunk es
-    -> Expr es
+    :: Expr
+    -> Thunk
+    -> Expr
   Cast
-    :: Union (Expr es)
+    :: Union Expr
     -> CoercionR
-    -> Expr es
+    -> Expr
   deriving Generic
-  deriving Mergeable via Default (Expr es)
+  deriving Mergeable via Default Expr
+
+instance EvalSym Expr where
+  evalSym fill model = \case
+    Lit lit -> Lit $ evalSym' lit
+    Con con -> Con $ evalSym' con
+    Type ty -> Type ty
+    Coercion co -> Coercion co
+    Lam ty closure -> Lam ty $ evalSym' . closure
+    App fun arg -> App (evalSym' fun) (evalSym' arg)
+    Cast body co -> Cast (evalSym' body) co
+    where
+      evalSym' :: EvalSym a => a -> a
+      evalSym' = evalSym fill model
+
+instance Outputable Expr where
+  ppr = pprExpr id
 
 -- | Expressions within the evaluation context. You may also think of these as
 -- thunks. It is expected that the spine of this expression is never a 'Type' or
 -- 'Coercion'.
-type EvalExpr es = Eval es (Expr es)
+type Spine = Runtime Expr
 
 -- | Like 'EvalExpr', this may be considered a thunk. Unlike 'EvalExpr', this is
 -- an expression that may appear in the argument position. This entails that
 -- it may be a 'Type' or 'Coercion' in the spine.
-type Arg es = EvalExpr es
+type Arg = Runtime Expr
 
 -- TODO: For now, I've made this Thunk so data constructors with different
 -- existentials applications do not merge. I'm not sure whether perhaps it is
@@ -363,211 +362,135 @@ type Arg es = EvalExpr es
 -- field is of type TyCoVar. Still, this is correct. Coercions should simply be
 -- wrapped via the use of mkCoercionTy. It took me a long time to figure this
 -- out, so I wrote it down here!
-data Thunk es where
-  Thunked :: Arg es -> Thunk es
-  Forced :: Either Type Coercion -> Thunk es
+data Thunk where
+  Thunked :: Arg -> Thunk
+  Forced :: Either Type Coercion -> Thunk
   deriving Generic
-  deriving Mergeable via Default (Thunk es)
+  deriving Mergeable via Default Thunk
 
--- TODO: Since we have this whole user-axiom/interpretation scheme now, we
--- really don't need to track types for primitive literals (i.e. the
--- non-constructor ones). That is, there should only be one type for each of
--- these as even Haskell primitives should just go through the user-axioms at
--- this point. As such, we should change this at some point! The first step
--- would be to remove the built-in support for Haskell primitives. From there,
--- it is probably relatively simple the get rid of the types!
-data Literal where
-  -- TODO: I think it makes sense to place the universal type arguments of a
-  -- DataCon inside of the literal.
-  -- TODO: Does it not make sense to seperate enumeration DataCon from normal
-  -- DataCon? I.e. we can have the following two cases:
-  -- DataCon :: DataCon -> Literal
-  -- EnumCon :: KnownNat n => SymIntN n -> TyCon -> Literal
-  --
-  -- If we do it this way, we don't need a manual implementation of Mergeable.
-  -- (Actually, I guess we still do because of the existential on the bitvector)
-  -- Also, there are many edge-cases right now in the code for when it is, or is
-  -- not an EnumCon. In this way, the distinction is a little bit more explicit!
-  -- I think we should change this!
-  --
-  -- TODO: Changing to the above EnumCon/DataCon split, does it make sense to
-  -- split constructors from the other literals. They're used in a lot of
-  -- different positions and sometimes it just makes sense to not want to reason
-  -- about the possibility of primitive values. Perhaps we could just add a
-  -- 'Con' field to 'Expr'? In this case, perhaps we want to also just attach
-  -- their applications to them as well since we don't actually use App for
-  -- anything else anyway?
-  DataCon
-    :: DataCon
-    -> Literal
-  EnumCon
-    :: KnownNat n
-    => IntN S n
-    -> TyCon
-    -> Literal
-  -- TODO: Does it make sense to differentiate between IntN and WordN? I think
-  -- the solver just has a single bitvector. This just seems like it adds
-  -- maintanence burden without actually adding anything...
-  -- We should make a single BitVector field!
-  -- I also think we should switch back to the grisette WordN with this. I say
-  -- this because it eases up the constraints when trying to fit these into an
-  -- Array. That is, the SMT only allows bitvectors with a bitsize larger than
-  -- 0. Any user that want to support zero-sized bitvectors should just
-  -- implement the bitvector at the frontend in the way we now did for the
-  -- backend.
-  Int
-    :: KnownNat n
-    => IntN S n
-    -> Type
-    -> Literal
-  Word
-    :: KnownNat n
-    => WordN S n
-    -> Type
-    -> Literal
-  Integer
-    :: SymInteger
-    -> Type
-    -> Literal
-  Bool
-    :: SymBool
-    -> Type
-    -> Literal
-  Array ::
-     ( SupportedNonFuncSymPrim k
-     , SupportedNonFuncSymPrim v
-     , Typeable k
-     , Typeable v
-     )
-    => SymArray k v
-    -> Type
-    -> Literal
-
--- TODO: I guess I should move this thing somewhere. I only have this as I need
--- use it in a 'Dict' once. Still, I don't like it particularly. Also, I think
--- Grisette doesn't expose SupportedNonFuncPrim. It is only visible in an
--- internal module and other users (like SymGeneralFun) actually have it stored
--- locally. To be fair though, that's honestly just bad practise.
-class
-  ( SupportedNonFuncPrim (ConType a)
-  , LinkedRep (ConType a) a
-  ) => SupportedNonFuncSymPrim a
-instance
-  ( SupportedNonFuncPrim (ConType a)
-  , LinkedRep (ConType a) a
-  ) => SupportedNonFuncSymPrim a
-
-instance Mergeable Literal where
-  rootStrategy = SortedStrategy
-    (\case
-      DataCon {} -> 0 :: Int
-      EnumCon {} -> 1
-      Int {} -> 2
-      Word {} -> 3
-      Integer {} -> 4
-      Bool {} -> 5
-      Array {} -> 6)
-    \case
-      0 -> wrapStrategy
-        rootStrategy
-        DataCon
-        \case DataCon dc -> dc ; _ -> impossible
-
-      1 -> wrapStrategy
-        rootStrategy
-        (\case (SomeBV tag, tc) -> EnumCon tag tc)
-        \case EnumCon tag tc -> (SomeBV tag, tc) ; _ -> impossible
-
-      2 -> wrapStrategy
-        rootStrategy
-        (\case (SomeBV value, ty) -> Int value ty)
-        \case Int value ty -> (SomeBV value, ty) ; _ -> impossible
-
-      3 -> wrapStrategy
-        rootStrategy
-        (\case (SomeBV value, ty) -> Word value ty)
-        \case Word value ty -> (SomeBV value, ty) ; _ -> impossible
-
-      4 -> wrapStrategy
-        rootStrategy
-        (\case (value, ty) -> Integer value ty)
-        \case Integer value ty -> (value, ty) ; _ -> impossible
-
-      5 -> wrapStrategy
-        rootStrategy
-        (\case (value, ty) -> Bool value ty)
-        \case Bool value ty -> (value, ty) ; _ -> impossible
-
-      6 -> SortedStrategy
-        (\case
-          Array @k @v _ _ -> do
-            let idxK = DynIdx @k @SupportedNonFuncSymPrim
-            let idxV = DynIdx @v @SupportedNonFuncSymPrim
-            (idxK, idxV)
-          _ -> impossible)
-        \(DynIdx @k, DynIdx @v) -> wrapStrategy @(SymArray k v, Type)
-          rootStrategy
-          (\case (value, ty) -> Array value ty)
-          \case
-            Array @k' @v' value ty
-              | Just Refl <- eqT @k @k'
-              , Just Refl <- eqT @v @v' -> (value, ty)
-            _ -> impossible
-
-      _ -> impossible
-
-instance EvalSym (Expr es) where
-  evalSym fill model = \case
-    Lit lit -> Lit $ evalSym' lit
-    Type ty -> Type ty
-    Coercion co -> Coercion co
-    Lam ty closure -> Lam ty \arg -> evalSym' (closure arg)
-    App fun arg -> App (evalSym' fun) (evalSym' arg)
-    Cast body co -> Cast (evalSym' body) co
-    where
-      evalSym' :: EvalSym a => a -> a
-      evalSym' = evalSym fill model
-
-instance EvalSym Literal where
-  evalSym fill model = \case
-    DataCon dc -> DataCon dc
-    EnumCon tag tc -> EnumCon (evalSym' tag) tc
-    Int value ty -> Int (evalSym' value) ty
-    Word value ty -> Word (evalSym' value) ty
-    Integer value ty -> Integer (evalSym' value) ty
-    Bool value ty -> Bool (evalSym' value) ty
-    Array value ty -> Array (evalSym' value) ty
-    where
-      evalSym' :: EvalSym a => a -> a
-      evalSym' = evalSym fill model
-
-instance EvalSym (Thunk es) where
+instance EvalSym Thunk where
   evalSym fill model = \case
     Thunked value -> Thunked $ evalSym fill model value
     Forced value -> Forced value
 
+data Constructor where
+  DataCon
+    :: DataCon
+    -> Constructor
+  EnumCon
+    :: KnownPos n
+    => SymBitVec n
+    -> TyCon
+    -> Constructor
+
+instance Outputable Constructor where
+  ppr = \case
+    -- TODO: This should output the tag directly if concrete. If not and this is
+    -- an enumeration TyCon, we should emit a tagToEnum# apply to the value. If
+    -- this is not an enumeration TyCon, then the tag is invalid. We should
+    -- probably print some sort of error message in that case.
+    DataCon dc -> ppr dc
+    EnumCon @n tag tc
+      | Just tag' <- toCon @_ @(BitVec n) tag
+      , Just dc <- tyConDataCons tc !? fromIntegral tag' -> ppr dc
+      -- TODO: Technically this print is wrong as the type application should be
+      -- the whole type, not just the TyCon.
+      | otherwise -> "tagToEnum#" <+> "@" GHC.<> ppr tc <+> text (show tag)
+
+instance Mergeable Constructor where
+  rootStrategy = SortedStrategy
+    (\case
+      DataCon {} -> True
+      EnumCon {} -> False)
+    \case
+      True -> wrapStrategy
+        rootStrategy
+        DataCon
+        \case DataCon dc -> dc ; _ -> impossible
+
+      False -> wrapStrategy
+        rootStrategy
+        (\(SomeBitVec tag, tc) -> EnumCon tag tc)
+        \case EnumCon tag tc -> (SomeBitVec tag, tc) ; _ -> impossible
+
+instance EvalSym Constructor where
+  evalSym fill model = \case
+    DataCon dc -> DataCon dc
+    EnumCon tag tc -> EnumCon (evalSym fill model tag) tc
+
+mkDataCon
+  :: forall n
+   . KnownPos n
+  => DataCon
+  -> Constructor
+mkDataCon dc = if
+  | let tc = dataConTyCon dc
+  , isEnumerationTyCon tc -> do
+    let tag = fromIntegral . dataConTagZ $ dc
+    EnumCon @n tag tc
+  | otherwise -> DataCon dc
+
+-- TODO: Since we don't check bounds on creation anymore, this function seems
+-- a bit more complex than it needs to be. That is, we can also just construct
+-- it without the whole type.
+mkEnumCon
+  :: forall n es
+   . KnownPos n
+  => Deferrable es
+  => Error () :> es
+  => Context Reader BuiltInTyCon :> es
+  => SymBitVec n
+  -> Type
+  -> Eval es Expr
+mkEnumCon tag ty = do
+  -- Ensure we have an enumeration type.
+  (tc, targs) <- failWithE () $ splitTyConApp_maybe ty
+  unless (isEnumerationTyCon tc) do
+    throwE ()
+
+  -- Construct the data constructor and its type arguments.
+  let dc = mkCon $ EnumCon tag tc
+  let targs' = pure . mkType <$> targs
+  mkApps dc targs'
+
+-- | Get the 'TyCon' of a constructor.
+constructorTyCon :: Constructor -> TyCon
+constructorTyCon = \case
+  DataCon dc -> dataConTyCon dc
+  EnumCon _tag tc -> tc
+
+-- | Get the 'Type' of a constructor.
+constructorType
+  :: Error () :> es
+  => Constructor
+  -> Eff es Type
+constructorType con = do
+  dc <- case con of
+    DataCon dc -> pure dc
+    EnumCon _tag tc
+      | dc : _ <- tyConDataCons tc -> pure dc
+      | otherwise -> throwError ()
+  pure $ varType (dataConWorkId dc)
+
 pprExpr
   :: (SDoc -> SDoc)
-  -> Expr es
-  -> Eff es SDoc
+  -> Expr
+  -> SDoc
 pprExpr addParens = \case
-  Lit lit -> pure $ ppr lit
-  Type ty -> pure $ "@" GHC.<> ppr ty
-  Coercion co -> pure $ "@~" GHC.<> ppr co
+  Lit lit -> ppr lit
+  Con con -> ppr con
+  Type ty -> "@" GHC.<> ppr ty
+  Coercion co -> "@~" GHC.<> ppr co
   Cast expr co -> do
-    expr' <- pprUnion expr parens pprExpr
-    pure . addParens $ sep
+    let expr' = pprUnion pprExpr parens expr
+    addParens $ sep
       [ expr'
       , "`cast`" <+> pprOptCo co
       ]
   -- TODO: This one is a bit more difficult. Really the only way to print a
   -- lambda is to provide it with fresh arguments. The problem is that we need
   -- a lot more context for printing in that way.
-  --
-  -- Since we actually changed the underyling monad in Eval to allow for more
-  -- effects, we could actually implement this now. :) The only annoying thing
-  -- is the dependency on the fresh variable generation here...
-  Lam {} -> pure "TODO lambda"
+  Lam {} -> "TODO lambda"
     -- (result, args) <- saturateLam @64 $ mkExpr expr
     -- let bndrs = fst <$> args
     -- let bndr = "\\" <+> sep (ppr <$> bndrs) <+> GHC.arrow
@@ -575,40 +498,39 @@ pprExpr addParens = \case
     -- pure . addParens $ hang bndr 2 body
   expr@App {} -> do
     let (fun, args) = collectArgs expr
-    header <- pprExpr parens fun
-    args' <- for args $ pprArg parens
+    let header = pprExpr parens fun
+    let args' = pprArg parens <$> args
     let body = sep args'
-    pure . addParens $ hang header 2 body
+    addParens $ hang header 2 body
 
 pprArg
   :: (SDoc -> SDoc)
-  -> Arg es
-  -> Eff es SDoc
-pprArg addParens = pprEval addParens pprExpr
+  -> Arg
+  -> SDoc
+pprArg = pprRuntime pprExpr
 
-pprEval
-  :: forall a es
+pprRuntime
+  :: forall a
    . Mergeable a
-  => (SDoc -> SDoc)
-  -> ((SDoc -> SDoc) -> a -> Eff es SDoc)
-  -> Eval es a
-  -> Eff es SDoc
-pprEval addParens f m = do
-  value :: Union (Either (Variant es) a) <- coerce m
-  pprUnion value addParens \p -> \case
+  => ((SDoc -> SDoc) -> a -> SDoc)
+  -> (SDoc -> SDoc)
+  -> Runtime a
+  -> SDoc
+pprRuntime inner = do
+  coerce $ pprUnion \addParens -> \case
     Left alt -> case alt of
-      UB -> pure "UB"
-      Unreachable -> pure "Unreachable"
-      Raise expr -> ("raise#" <+>) <$> pprArg p expr
-    Right expr -> f p expr
+      UB -> "UB"
+      Unreachable -> "Unreachable"
+      Raise expr -> "raise#" <+> pprArg addParens expr
+    Right value -> inner addParens value
 
 pprUnion
   :: Mergeable a
-  => Union a
+  => ((SDoc -> SDoc) -> a -> SDoc)
   -> (SDoc -> SDoc)
-  -> ((SDoc -> SDoc) -> a -> Eff es SDoc)
-  -> Eff es SDoc
-pprUnion union addParens inner = case union of
+  -> Union a
+  -> SDoc
+pprUnion inner addParens = \case
   Single value -> inner addParens value
   If scrut true false -> do
     -- Vertically concatenate using ($+$).
@@ -618,192 +540,142 @@ pprUnion union addParens inner = case union of
     let hang' d1 n d2 = vcat' [d1, nest n d2]
 
     -- Pretty print branches.
-    true' <- pprUnion true parens inner
-    false' <- pprUnion false parens inner
+    let true' = pprUnion inner parens true
+    let false' = pprUnion inner parens false
 
     -- Hange the branches below an if-then-else.
-    pure . addParens . hang' "ite" 2 $ vcat'
+    addParens . hang' "ite" 2 $ vcat'
       [ text $ show scrut
       , true'
       , false'
       ]
 
-instance Outputable Literal where
-  ppr = \case
-    -- TODO: This should output the tag directly if concrete. If not and this is
-    -- an enumeration TyCon, we should emit a tagToEnum# apply to the value. If
-    -- this is not an enumeration TyCon, then the tag is invalid. We should
-    -- probably print some sort of error message in that case.
-    DataCon dc -> ppr dc
-    EnumCon @n tag tc
-      | Just tag' <- toCon @_ @(IntN C n) tag 
-      , Just dc <- tyConDataCons tc !? fromIntegral tag' -> ppr dc
-      -- TODO: Technically this print is wrong as the type application should be
-      -- the whole type, not just the TyCon.
-      | otherwise -> "tagToEnum#" <+> "@" GHC.<> ppr tc <+> ppr (SomeBV tag)
-    -- TODO: We are printing the grisette primitives using show which is
-    -- oblivious to indentation. We should make an actual pretty printer for
-    -- symbolic variables. Ideally, the variable names get the pretty printing
-    -- that is similar to how their naming works in the fresh variable
-    -- generation.
-    Int value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
-    Word value ty -> ppr (SomeBV value) <+> "::" <+> ppr ty
-    Integer value ty -> text (show value) <+> "::" <+> ppr ty
-    Bool value ty -> text (show value) <+> "::" <+> ppr ty
-    Array value ty -> text (show value) <+> "::" <+> ppr ty
-
-mkLit
-  :: Literal
-  -> Expr es
-mkLit = Lit
-
-mkDataCon
-  :: forall n
-   . KnownNat n
-  => DataCon
+-- TODO: I feel like these mkX for literals should create an Expr. Otherwise,
+-- one would just use the literal constructor no? Especially since they're
+-- patterns anyway, so any additional code required in their construction can
+-- just be placed in there.
+mkBitVec
+  :: KnownPos n
+  => SymBitVec n
   -> Literal
-mkDataCon dc = if
-  | let tc = dataConTyCon dc
-  , isEnumerationTyCon tc -> do
-    let tag = fromIntegral . dataConTagZ $ dc
-    EnumCon @n tag tc
-  | otherwise -> DataCon dc
-
-mkEnumCon
-  :: forall n es
-   . KnownNat n
-  => Error () :> es
-  => IntN S n
-  -> Type
-  -> EvalExpr es
-mkEnumCon tag ty = do
-  -- Ensure we have an enumeration type.
-  (tc, targs) <- failWithE () $ splitTyConApp_maybe ty
-  unless (isEnumerationTyCon tc) do
-    throwE ()
-
-  -- TODO: I don't think it makes sense to put this check here. Really, we only
-  -- get UB if we actually try to use the tag for a pattern match. Already, we
-  -- use UB in case expressions, so I think this could just be removed.
-  --
-  -- If we do, do make sure to adjust exprToBool accordingly: we actually do
-  -- need to assert no UB occurred!
-  -- Check to ensure we have a proper tag.
-  let upper = fromIntegral $ tyConFamilySize tc
-  let inBounds = 0 .<= tag .&& tag .< upper
-
-  -- Construct the data constructor and its type arguments.
-  let dc = mkLit $ EnumCon tag tc
-  let targs' = pure . mkType <$> targs
-  let expr = mkApps dc targs'
-
-  -- The expression is UB if it the tag is not within bounds.
-  mrgIf inBounds expr mkUB
-
-mkIntN
-  :: KnownNat n
-  => IntN S n
-  -> Type
-  -> Literal
-mkIntN = Int
-
-mkWordN
-  :: KnownNat n
-  => WordN S n
-  -> Type
-  -> Literal
-mkWordN = Word
+mkBitVec = BitVec
 
 mkInteger
   :: SymInteger
-  -> Type
   -> Literal
 mkInteger = Integer
 
 mkBool
   :: SymBool
-  -> Type
   -> Literal
 mkBool = Bool
 
+mkArray
+  :: LiteralTypeable k
+  => LiteralTypeable v
+  => SymArray k v
+  -> Literal
+mkArray = Array
+
+mkCon
+  :: Constructor
+  -> Expr
+mkCon = Con
+
+mkLit
+  :: Literal
+  -> Expr
+mkLit = Lit
+
 mkType
   :: Type
-  -> Expr es
+  -> Expr
 mkType = Type
 
 mkCoercion
   :: Coercion
-  -> Expr es
+  -> Expr
 mkCoercion = Coercion
 
 mkLam
-  :: Type
-  -> (Arg es -> EvalExpr es)
-  -> Expr es
-mkLam = Lam
+  :: Deferrable es
+  => Type
+  -> (Arg -> Eval es Expr)
+  -> Eval es Expr
+mkLam ty closure = Lam ty <$> deferE closure
 
 mkApp
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
-  => Expr es
-  -> Arg es
-  -> EvalExpr es
+  => Context Reader BuiltInTyCon :> es
+  => Expr
+  -> Arg
+  -> Eval es Expr
 mkApp fun arg = case fun of
   Cast body co -> do
-    (arg', rco) <- pushCoArg co arg
+    (arg', rco) <- liftEff $ pushCoArg co arg
     body' <- liftUnion body
     expr <- mkApp body' arg'
     mkCastMCo expr rco
-  Lam _ty closure -> closure arg
-  _ -> do
-    ty <- liftEff $ exprType fun
+  Lam _ty closure -> hoistEff $ closure arg
+  _ -> liftEff do
+    ty <- exprType fun
     if
       | isFunTy ty -> pure $ App fun (Thunked arg)
       | isForAllTy ty -> do
-        forced <- liftEff $ forceTyCo arg
+        forced <- forceTyCo arg
         pure $ App fun (Forced forced)
-      | otherwise -> throwE ()
+      | otherwise -> throwError ()
 
 pushCoArg
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
+  => Context Reader BuiltInTyCon :> es
   => CoercionR
-  -> Arg es
-  -> Eval es (Arg es, MCoercionR)
+  -> Arg
+  -> Eff es (Arg, MCoercionR)
 pushCoArg co arg = if
   | tyL <- coercionLKind co
   , isForAllTy_ty tyL -> do
     -- The argument needs to be a type. As such, we can force it.
-    ty <- liftEff $ forceTy arg
+    ty <- forceTy arg
 
     -- Attempt to push the coercion into the type argument.
-    (ty', rco) <- failWithE () $ pushCoTyArg co ty
+    (ty', rco) <- failWith () $ pushCoTyArg co ty
 
     -- Return the type argument and result coercion.
     pure (pure $ mkType ty', rco)
 
   | otherwise -> do
     -- Attempt to split the coercion into an argument and result coercion.
-    (aco, rco) <- failWithE () $ pushCoValArg co
+    (aco, rco) <- failWith () $ pushCoValArg co
 
     -- Cast the argument and return the result coercion.
-    let arg' = arg >>= flip mkCastMCo aco
+    arg' <- defer do
+      arg' <- hoistEff arg
+      mkCastMCo arg' aco
+
     pure (arg', rco)
 
 mkApps
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
-  => Expr es
-  -> [Arg es]
-  -> EvalExpr es
+  => Context Reader BuiltInTyCon :> es
+  => Expr
+  -> [Arg]
+  -> Eval es Expr
 mkApps = foldM mkApp
 
 mkCastMCo
   :: HasCallStack
   => Error () :> es
-  => Expr es
+  => Context Reader BuiltInTyCon :> es
+  => Expr
   -> MCoercionR
-  -> EvalExpr es
+  -> Eval es Expr
 mkCastMCo expr = \case
   MRefl -> pure expr
   MCo co -> mkCast expr co
@@ -811,9 +683,10 @@ mkCastMCo expr = \case
 mkCast
   :: HasCallStack
   => Error () :> es
-  => Expr es
+  => Context Reader BuiltInTyCon :> es
+  => Expr
   -> CoercionR
-  -> EvalExpr es
+  -> Eval es Expr
 mkCast expr co = do
   -- Ensure the coercion has role representational.
   unless (coercionRole co == Representational) do
@@ -827,14 +700,11 @@ mkCast expr co = do
     throwE ()
 
   case expr of
-    -- A reflexive cast is a no-op and thus may be removed immediately.
-    _ | isReflexiveCo co -> pure expr
-
-    -- TODO: This is a recursive call of HasCallStack, I should capture it in a
-    -- closure as to not blow it up instead!
     Cast body co' -> do
-      body' <- liftUnion body
-      mkCast body' $ mkTransCo co' co
+      let coT = mkTransCo co' co
+      if
+        | isReflexiveCo coT -> liftUnion body
+        | otherwise -> pure $ Cast body coT
 
     -- NOTE: This comment was written originally inside of GHC 'mkCast'. I'm
     -- unsure what 'g' refers to (it's not in the original code either), but
@@ -844,13 +714,18 @@ mkCast expr co = do
     -- The guard here checks that g has a (~#) on both sides, otherwise
     -- 'decomposeCo' fails. Can in principle happen with unsafeCoerce.
     -- ```
-    Coercion co' | isCoVarType $ coercionRKind co -> do
+    Coercion co' | isEqPrimPred $ coercionRKind co -> do
       pure $ mkCoercion (mkCoCast co' co)
 
-    _ -> pure $ Cast (pure expr) co
+    -- TODO: Even with this improvement, we still do reflexivity check (and
+    -- the above sanity type-check) once for each body. Perhaps we should take
+    -- an 'Arg' here?
+    _
+      | isReflexiveCo co -> pure expr
+      | otherwise -> pure $ Cast (pure expr) co
 
-mkVariant :: Variant es -> Eval es a
-mkVariant = Eval . ExceptT . pure . Left
+mkVariant :: Variant -> Eval es a
+mkVariant = RuntimeT . pure . pure . Left
 
 mkUnreachable :: Eval es a
 mkUnreachable = mkVariant Unreachable
@@ -858,7 +733,7 @@ mkUnreachable = mkVariant Unreachable
 mkUB :: Eval es a
 mkUB = mkVariant UB
 
-mkRaise :: EvalExpr es -> Eval es a
+mkRaise :: Runtime Expr -> Eval es a
 mkRaise = mkVariant . Raise
 
 -- | Force an expression into a type or coercion.
@@ -872,26 +747,22 @@ forceTyCo
   :: forall es
    . HasCallStack
   => Error () :> es
-  => Arg es
+  => Arg
   -> Eff es (Either Type Coercion)
-forceTyCo arg = do
-  -- Simply pass an already existing error, if possible.
-  arg' :: Union (Either (Variant es) (Expr es)) <- coerce arg
+forceTyCo = runRuntime >>> \case
+  -- Attempt to get a single 'Type' or 'Coercion'.
+  Single (Right value)
+    | Type ty <- value -> pure $ Left ty
+    | Coercion co <- value -> pure $ Right co
 
-  case arg' of
-    -- Attempt to get a single 'Type' or 'Coercion'.
-    Single (Right value)
-      | Type ty <- value -> pure $ Left ty
-      | Coercion co <- value -> pure $ Right co
-
-    -- The expression was not in the expected shape.
-    _ -> throwError ()
+  -- The expression was not in the expected shape.
+  _ -> throwError ()
 
 -- | Force an expression into a type using 'forceTyCo'.
 forceTy
   :: HasCallStack
   => Error () :> es
-  => Arg es
+  => Arg
   -> Eff es Type
 forceTy = forceTyCo >=> either pure (const $ throwError ())
 
@@ -899,59 +770,25 @@ forceTy = forceTyCo >=> either pure (const $ throwError ())
 forceCo
   :: HasCallStack
   => Error () :> es
-  => Arg es
+  => Arg
   -> Eff es Coercion
 forceCo = forceTyCo >=> either (const $ throwError ()) pure
 
--- | Convert an expression of type Bool to a symbolic boolean.
-exprToBool
-  :: HasCallStack
-  => Error () :> es
-  => Expr es
-  -> Eval es SymBool
-exprToBool = \case
-  Lit (EnumCon tag tc) | tc == boolTyCon -> do
-    -- DataCon are checked at creation for correctness. Hence, we can simply
-    -- cast the bit value.
-    -- TODO: This above statement might not be true at some point. Really, we
-    -- should check at usage site as it doesn't make sense to check at creation:
-    -- creating a bad dataconstructor doesn't result in UB if we don't branch
-    -- on it!
-    -- TODO: I noticed that Grisette has trouble with reasoning about bit-casts
-    -- when compared to just If statements. With this in mind, I think it makes
-    -- more sense to just do the if statement here!
-    --
-    -- Okay, did it now, but it really looks ugly. Maybe deserves some clean-up.
-    let eqCon dc = tag .== fromIntegral (dataConTagZ dc)
-    mrgIf (eqCon trueDataCon)
-      (pure Grisette.true)
-      (mrgIf (eqCon falseDataCon)
-        (pure Grisette.false)
-        mkUB)
-
-  _ -> throwE ()
-
--- | Equivalence between literals.
+-- | Equivalence between constructors.
 --
--- NOTE: This only handles cases that may occur in a case expression.
-eqLit
+-- Will throw an error if the types do not match.
+eqCon
   :: HasCallStack
   => Error () :> es
-  => Literal
-  -> Literal
+  => Constructor
+  -> Constructor
   -> Eff es SymBool
-eqLit = \cases
+eqCon = \cases
   (DataCon ldc) (DataCon rdc)
     | dataConTyCon ldc == dataConTyCon rdc -> pure $ toSym (ldc == rdc)
   (EnumCon @l ltag ltc) (EnumCon @r rtag rtc)
     | ltc == rtc
     , Just Refl <- eqT @l @r -> pure $ ltag .== rtag
-  (Int @l lval lty) (Int @r rval rty) 
-    | eqType lty rty
-    , Just Refl <- eqT @l @r -> pure $ lval .== rval
-  (Word @l lval lty) (Word @r rval rty) 
-    | eqType lty rty
-    , Just Refl <- eqT @l @r -> pure $ lval .== rval
   _ _ -> throwError ()
 
 -- TODO: This function deserves some clean-up! My syntax highlighter is even
@@ -959,10 +796,12 @@ eqLit = \cases
 exprType
   :: HasCallStack
   => Error () :> es
-  => Expr fs
+  => Context Reader BuiltInTyCon :> es
+  => Expr
   -> Eff es Type
 exprType = \case
-  Lit lit -> litType lit
+  Lit lit -> embedLitTyOf lit
+  Con con -> constructorType con
   Type _ -> throwError ()
   Coercion co -> pure $ coercionType co
   Lam ty _ -> pure ty
@@ -984,31 +823,16 @@ exprType = \case
       | otherwise -> throwError ()
   Cast _ co -> pure $ coercionRKind co
 
-litType
-  :: Error () :> es
-  => Literal
-  -> Eff es Type
-litType = \case
-  DataCon dc -> pure $ dataConRepType dc
-  EnumCon _ tc -> do
-    (dc, _) <- failWith () $ uncons (tyConDataCons tc)
-    pure $ dataConRepType dc
-  Int _ ty -> pure ty
-  Word _ ty -> pure ty
-  Integer _ ty -> pure ty
-  Bool _ ty -> pure ty
-  Array _ ty -> pure ty
-
 -- | Collect the arguments of an application.
 collectArgs
-  :: Expr es
-  -> (Expr es, [Arg es])
+  :: Expr
+  -> (Expr, [Arg])
 collectArgs = second (fmap unthunk) . collectThunks
 
 -- | Collect the thunks of an application.
 collectThunks
-  :: Expr es
-  -> (Expr es, [Thunk es])
+  :: Expr
+  -> (Expr, [Thunk])
 collectThunks = go []
   where
     go args = \case
@@ -1019,14 +843,23 @@ collectThunks = go []
 --
 -- Really, args are just always thunks. This will put forced values into thunks.
 unthunk
-  :: Thunk es
-  -> Arg es
+  :: Thunk
+  -> Arg
 unthunk = \case
   Thunked value -> value
   Forced value -> case value of
     Right co -> pure $ mkCoercion co
     Left ty -> pure $ mkType ty
 
+-- TODO: I wonder if it doesn't make more sense to just make this a
+-- 'collectCon'? The part about collecting literals feels like it should not
+-- live here, as it is specific to the bindings with Haskell. The Coercion part
+-- feels also a bit misplaced.
+--
+-- Actually, we changed it now because as it turns out, you can also scrutinise
+-- other stuff. For example, a function can be scrutinised. Not that you can
+-- actually pattern match it, but it is valid to match 'DEFAULT' on it and just
+-- use it to force the value!
 -- | Collect the arguments of a scrutinee.
 --
 -- This will drop any universal type applications as these are not necessary for
@@ -1034,9 +867,11 @@ unthunk = \case
 -- arguments of a DataCon if possible.
 collectScrut
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
-  => Expr es
-  -> Eval es (Either Coercion Literal, [Arg es])
+  => Context Reader BuiltInTyCon :> es
+  => Expr
+  -> Eval es (Either Expr Constructor, [Arg])
 collectScrut = \case
   -- On a cast, we may attempt to push a TyConAppCo into the arguments of
   -- a DataCon literal.
@@ -1047,7 +882,7 @@ collectScrut = \case
     -- Collect the spine and arguments.
     let (spine, args) = collectThunks body'
     spine' <- case spine of
-      Lit lit -> pure lit
+      Con lit -> pure lit
       _ -> throwE ()
 
     -- Only a DataCon spine may have its arguments pushed.
@@ -1068,25 +903,11 @@ collectScrut = \case
     -- Gather the spine and its arguments.
     let (spine, args) = collectArgs expr
 
-    -- Gathers the number of universal arguments of a literal.
-    let nUnivLit = \case
-          DataCon dc -> tyConArity $ dataConTyCon dc
-          EnumCon _ tc -> tyConArity tc
-          -- TODO: Use or pattern once we bump the GHC version.
-          Int {} -> 0
-          Word {} -> 0
-          Integer {} -> 0
-          Bool {} -> 0
-          -- TODO: I'm not sure if this 2 is actually correct. I'll have to
-          -- double check!
-          Array {} -> 2
-
-    -- Gather the spine as either a literal or coercion and the number of
+    -- Gather the spine as either a constructor or coercion and the number of
     -- universal arguments.
     (spine', nUniv) <- case spine of
-      Lit lit -> pure (Right lit, nUnivLit lit)
-      Coercion co -> pure (Left co, 0)
-      _ -> throwE ()
+      Con con -> pure (Right con, tyConArity $ constructorTyCon con)
+      _ -> pure (Left spine, 0)
 
     -- Drop the universal arguments and return.
     let args' = drop nUniv args
@@ -1095,11 +916,13 @@ collectScrut = \case
 -- | Push a TyConAppCo into the arguments of a DataCon.
 pushCoDataCon
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
+  => Context Reader BuiltInTyCon :> es
   => DataCon
-  -> [Thunk es]
+  -> [Thunk]
   -> Coercion
-  -> Eff es ([Type], [Thunk es])
+  -> Eff es ([Type], [Thunk])
 pushCoDataCon dc args co = do
   -- Check whether the outer type is a TyConAppCo.
   let tyR = coercionRKind co
@@ -1128,22 +951,38 @@ pushCoDataCon dc args co = do
 
   -- Create the new existential type arguments and the type substitution for
   -- the argument casts.
-  let (psiSubst, exTys')
-        = liftCoSubstWithEx Representational dcUnivVars univCo dcExVars exTys
+  let (psiSubst, exTys') = do
+        liftCoSubstWithEx Representational dcUnivVars univCo dcExVars exTys
 
   -- Cast all the value arguments using the substitution.
   let argTys = scaledThing <$> dataConRepArgTys dc
-  let castArg arg ty = arg >>= flip mkCast (psiSubst ty)
-  let valArgs' = Thunked <$> zipWith castArg valArgs argTys
+  valArgs' <- for (zip valArgs argTys) \(val, ty) -> Thunked <$> defer do
+    arg <- hoistEff val
+    mkCast arg $ psiSubst ty
 
   -- Wrap the existential type arguments back into thunks.
   let exArgs = Forced . Left <$> exTys'
 
   pure (univArgsR, exArgs ++ valArgs')
 
+-- TODO: We should probably just make this a typeclass and move it to Util.
 -- | Lift a result into the evaluation context.
 liftEff :: Eff es a -> Eval es a
-liftEff = Eval . lift . lift
+liftEff = lift
+
+-- TODO: We can probably kill this one after we swap away from 'Eval'.
+hoistEff :: Runtime a -> Eval es a
+hoistEff = RuntimeT . pure . runRuntime
+
+-- TODO: Remove this once we get rid of 'Eval'.
+instance Deferrable es => Defer es (Eval es a) where
+  type Deferred (Eval es a) = Runtime a
+
+  defer' = Runtime . unsafeDupablePerformIO .: unEff . runRuntimeT
+
+-- TODO: Remove this once we get rid of 'Eval'.
+deferE :: Defer es a => a -> Eval es (Deferred a)
+deferE = lift . defer
 
 -- | Throw an error within the 'Eval' monadic context.
 throwE

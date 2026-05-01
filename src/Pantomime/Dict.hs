@@ -1,42 +1,31 @@
--- TODO: We redefine Dict here, but there is the 'constraints' package which has
--- utils for manipulating it. I guess it's better to just import that!
-
+{-# LANGUAGE PolyKinds #-}
 module Pantomime.Dict
   ( Dict (..)
-  , unsafeDict
+  , unsafeEq
   , eqNat
   , leqNat
   , posNat
   , cmpNat'
   , geqToLeq
-  , normNumLitTy
-  , someTyNat
   , SomeNat' (..)
   , typeSub
   , typeAdd
-  , withSize
   ) where
 
-import GHC.Plugins hiding (empty)
 import GHC.TypeNats
 
-import Data.Type.Ord
+import Data.Constraint (Dict (..))
+import Data.Constraint.Unsafe (unsafeAxiom)
 import Data.Data (Proxy(..))
+import Data.Type.Ord
 
 import Control.Applicative (Alternative (..))
-import Control.Monad (guard)
 import Control.Monad.Identity (runIdentity)
 
 import Unsafe.Coerce (unsafeCoerce)
-import GHC.Builtin.Types.Literals
 
--- TODO: This file is a bit all over the place. I think we should just import
--- the small library that exposes Dict instead of redefining it.
-data Dict c where
-  Dict :: c => Dict c
-
-unsafeDict :: Dict c
-unsafeDict = unsafeCoerce $ Dict @()
+unsafeEq :: forall {k} (a :: k) (b :: k). Dict (a ~ b)
+unsafeEq = unsafeCoerce $ Dict @(() ~ ())
 
 eqNat
   :: forall l r
@@ -71,36 +60,19 @@ cmpNat'
 cmpNat' = cmpNat @l @r Proxy Proxy
 
 geqToLeq :: forall (n :: Nat) m. n >= m => Dict (m <= n)
---We only match on the dictionary such that the constraint 'n >= m' does not
+-- We only match on the dictionary such that the constraint 'n >= m' does not
 -- give a warning about being unused.
-geqToLeq = case Dict @(n >= m) of Dict -> unsafeDict
-
-normNumLitTy :: Type -> Maybe Integer
-normNumLitTy ty = if
-  | Just value <- isNumLitTy ty -> pure value
-
-  | Just (tyCon, [lhs, rhs]) <- splitTyConApp_maybe ty -> do
-    op <- if
-      | tyCon == typeNatAddTyCon -> pure (+)
-      | tyCon == typeNatSubTyCon -> pure (*)
-      | tyCon == typeNatMulTyCon -> pure (-)
-      | otherwise -> empty
-
-    lhs' <- normNumLitTy lhs
-    rhs' <- normNumLitTy rhs
-
-    pure $ op lhs' rhs'
-
-  | otherwise -> empty
-
-someTyNat :: Type -> Maybe SomeNat
-someTyNat ty = do
-  num <- normNumLitTy ty
-  guard $ num >= 0
-  pure $ someNatVal (fromInteger num)
+geqToLeq = case Dict @(n >= m) of Dict -> unsafeAxiom
 
 -- TODO: This one feels a bit obsolote no? Can't we just split any usage of this
--- into a normal SomeNat and a Dict?
+-- into a normal SomeNat and a Dict? Maybe not, but this solution feels very
+-- dirty in any case. We should consider looking into a more clean approach.
+--
+-- Actually, we can just use SNat and provide a %+ and %- operation on those.
+-- This works much better!
+--
+-- Also, this stuff should just be moved into Pantomime.Util at that point. It's
+-- barely stuff about 'Dict' in this module...
 data SomeNat' eq where
   SomeNat' :: forall n eq. (KnownNat n, n ~ eq) => SomeNat' eq
 
@@ -110,8 +82,8 @@ typeSub = runIdentity do
   let lhs' = natVal $ Proxy @lhs
   let rhs' = natVal $ Proxy @rhs
   SomeNat @n _ <- pure . someNatVal $ lhs' - rhs'
-  Dict <- pure $ unsafeDict @(lhs - rhs ~ n)
-  pure $ SomeNat' @n @(lhs - rhs)
+  Dict <- pure $ unsafeEq @(lhs - rhs) @n
+  pure $ SomeNat' @(lhs - rhs)
 
 -- | Type-level subtraction.
 typeAdd :: forall lhs rhs. KnownNat lhs => KnownNat rhs => SomeNat' (lhs + rhs)
@@ -119,13 +91,5 @@ typeAdd = runIdentity do
   let lhs' = natVal $ Proxy @lhs
   let rhs' = natVal $ Proxy @rhs
   SomeNat @n _ <- pure . someNatVal $ lhs' + rhs'
-  Dict <- pure $ unsafeDict @(lhs + rhs ~ n)
-  pure $ SomeNat' @n @(lhs + rhs)
-
--- TODO: Move this thing to Pantomime.Grisette.BitVector
-withSize :: forall n r. KnownNat n => (n ~ 0 => r) -> (1 <= n => r) -> r
-withSize con sym = case natVal $ Proxy @n of
-  0 -> case unsafeDict @(n ~ 0) of
-    Dict -> con
-  _ -> case unsafeDict @(1 <= n) of
-    Dict -> sym
+  Dict <- pure $ unsafeEq @(lhs + rhs) @n
+  pure $ SomeNat' @(lhs + rhs)

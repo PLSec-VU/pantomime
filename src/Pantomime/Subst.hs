@@ -40,16 +40,16 @@ import Effectful.Error.Static
 --
 -- Note, it is strickingly similar to the GHC Substitution. The main difference
 -- is the lookup for identifiers, which will look up a symbolic expression.
-data Subst es where
+data Subst where
   Subst ::
     { scSubst :: InScopeSet
-    , idSubst :: IdEnv (EvalExpr es)
+    , idSubst :: IdEnv (Runtime Expr)
     , tvSubst :: TvSubstEnv
     , cvSubst :: CvSubstEnv
-    } -> Subst es
+    } -> Subst
 
 -- | An empty substitution map.
-mkEmptySubst :: Subst es
+mkEmptySubst :: Subst
 mkEmptySubst = Subst
   { scSubst = emptyInScopeSet
   , idSubst = emptyVarEnv
@@ -61,10 +61,10 @@ mkEmptySubst = Subst
 extendSubst
   :: HasCallStack
   => Error () :> es
-  => Subst es
+  => Subst
   -> Var
-  -> Arg es
-  -> Eff es (Subst es)
+  -> Arg
+  -> Eff es Subst
 extendSubst subst var arg = if
   | isTyVar var -> do
     -- Ensure that the variables are only types. Note that we force the
@@ -94,19 +94,19 @@ extendSubstMany
   :: HasCallStack
   => Error () :> es
   => Foldable f
-  => Subst es
-  -> f (Var, Arg es)
-  -> Eff es (Subst es)
+  => Subst
+  -> f (Var, Arg)
+  -> Eff es Subst
 extendSubstMany = foldM $ uncurry . extendSubst
 
 -- | Extend the identifier substitution with the given mapping.
 extendIdSubst
   :: HasCallStack
   => Error () :> es
-  => Subst fs
+  => Subst
   -> Id
-  -> EvalExpr fs
-  -> Eff es (Subst fs)
+  -> Spine
+  -> Eff es Subst
 extendIdSubst subst var arg = if
   | isId var -> do
     -- Extend the identifier substitution.
@@ -119,21 +119,21 @@ extendIdSubstMany
   :: HasCallStack
   => Error () :> es
   => Foldable f
-  => Subst fs
-  -> f (Id, EvalExpr fs)
-  -> Eff es (Subst fs)
+  => Subst
+  -> f (Id, Spine)
+  -> Eff es Subst
 extendIdSubstMany = foldM $ uncurry . extendIdSubst
 
 -- | Lookup a variable in the current substitution environment.
 lookupIdSubst
-  :: Subst es
+  :: Subst
   -> Id
-  -> Maybe (EvalExpr es)
+  -> Maybe Spine
 lookupIdSubst = lookupVarEnv . idSubst
 
 -- | Substitute a Type.
 substTy
-  :: Subst es
+  :: Subst
   -> Type
   -> Type
 substTy subst ty = do
@@ -142,7 +142,7 @@ substTy subst ty = do
 
 -- | Substitute a TyVar.
 substTyVar
-  :: Subst es
+  :: Subst
   -> TyVar
   -> Type
 substTyVar subst tv = do
@@ -151,7 +151,7 @@ substTyVar subst tv = do
 
 -- | Substitute a Coercion.
 substCo
-  :: Subst es
+  :: Subst
   -> Coercion
   -> Coercion
 substCo subst ty = do
@@ -159,5 +159,5 @@ substCo subst ty = do
   GHC.substCo subst' ty
 
 -- | Get a GHC Substitution than can be used for type and coercion substitution.
-tyCoSubst :: Subst es -> GHC.Subst
+tyCoSubst :: Subst -> GHC.Subst
 tyCoSubst Subst { .. } = GHC.Subst scSubst emptyVarEnv tvSubst cvSubst

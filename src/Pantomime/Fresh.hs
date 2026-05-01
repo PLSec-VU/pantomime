@@ -5,23 +5,13 @@ module Pantomime.Fresh
   , freshArgs
   ) where
 
-import GHC.Core.Reduction (Reduction(..), mkReduction, homogeniseHetRedn)
+import GHC.Builtin.Types.Prim (eqPrimTyCon, eqReprPrimTyCon)
+import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe, FamInstEnvs)
+import GHC.Core.Reduction (Reduction (..), mkReduction, homogeniseHetRedn)
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
-import GHC.Builtin.Types.Prim
-  ( intPrimTy
-  , int8PrimTy
-  , int16PrimTy
-  , int32PrimTy
-  , int64PrimTy
-  , wordPrimTy
-  , word8PrimTy
-  , word16PrimTy
-  , word32PrimTy
-  , word64PrimTy
-  )
-import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe, normaliseType)
-import GHC.Types.Unique (Uniquable(..), getKey)
 import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
+import GHC.Core.Unify (tcUnifyTysFG, alwaysBindFun, UnifyResultM (..))
+import GHC.Types.Unique (Uniquable (..), getKey)
 import GHC.Utils.Outputable (Outputable (..))
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
@@ -36,7 +26,6 @@ import GHC.Plugins
   , isUnboxedTupleTyCon
   , isUnboxedSumTyCon
   , isEnumerationTyCon
-  , isNumLitTy
   , tyConDataCons_maybe
   , dataConInstArgTys
   , splitForAllTyVars
@@ -48,26 +37,20 @@ import GHC.Plugins
   , mkUnivCo
   , mkAppCos
   , mkReflCo
-  , mkTyConAppCo
   , mkSymCo
+  , mkSubCo
   , coreFullView
-  , coercionLKind
   , coercionRKind
   , instNewTyCon_maybe
   , getOccFS
   , bytesFS
   )
 
-import GHC.TypeLits (someNatVal)
-import GHC.TypeNats (SomeNat (..))
-
-import Grisette.Unified (EvalModeTag (..))
 import Grisette
   ( Symbol
   , Solvable (..)
   , ConRep (..)
   , SExpr (..)
-  , LogicalOp (..)
   , SymOrd (..)
   , SimpleMergeable (..)
   , simple
@@ -75,25 +58,31 @@ import Grisette
   , mrgIf
   )
 
-import Data.Functor ((<&>))
+import Data.Constraint (Dict (..))
 import Data.Text.Encoding (decodeUtf8)
+import Data.Traversable (for)
 
-import Pantomime.Grisette.BitVector (IntN)
+import Pantomime.Axiom (TypeAxiomsR)
+import Pantomime.Defer (Deferrable, defer)
 import Pantomime.Expr
-import Pantomime.Primitive.GHC qualified as Primitive
-import Pantomime.Util (freshIds, freshTyVars, foldlBy)
+import Pantomime.Literal
+  ( BuiltInTyCon
+  , SomeLiteralType (..)
+  , HasDict (..)
+  , projectLitTy
+  )
+import Pantomime.Util (freshIds, freshTyVars, foldlBy, SymBitVec)
 
 import Effectful
 import Effectful.Error.Static
-import Effectful.GHC.External
+import Effectful.Context (Context, ContextMode (..), get)
 
 data FreshInstEnv where
   FreshInstEnv ::
     { fieUser :: TyConEnv TyCon
-    , fiePrim :: Primitive.Types
     } -> FreshInstEnv
 
-data Variable es where
+data Variable where
   Variable ::
     { varName :: Name
     -- ^ Root name.
@@ -101,9 +90,9 @@ data Variable es where
     -- ^ Accessor path, note that the first entry is accessed last.
     , varType :: Type
     -- ^ Type of this variable.
-    , varArgs :: [Arg es]
+    , varArgs :: [Arg]
     -- ^ Arguments which the variable depends on.
-    } -> Variable es
+    } -> Variable
 
 data Accessor where
   Accessor
@@ -120,8 +109,17 @@ data VarType where
   Select :: DataCon -> VarType
   -- ^ Select a specific DataCon.
 
+-- TODO: This is not a great way to build identifiers for the tree. That is, the
+-- identifiers grow with the size of the tree. We just want them to be a small
+-- word ideally. Of course, this is better for id readability, but I think it
+-- likely hurts performance. I'm not sure how Grisette implements this though.
+-- I.e. whether they actually compare the full identifier. An alternative for
+-- example would be to generate identifiers impurely with just a counter
+-- (pure identifiers would have dependencies and thus would not work). For now,
+-- this is better for debugging. I'll have to profile to see if this is actually
+-- that bad. :)
 varToSymbol
-  :: Variable es
+  :: Variable
   -> VarType
   -> Symbol
 varToSymbol var dst = do
@@ -141,7 +139,7 @@ varToSymbol var dst = do
 
 symbolicVar
   :: Solvable (ConType s) s
-  => Variable es
+  => Variable
   -> VarType
   -> s
 symbolicVar var dst = case varArgs var of
@@ -153,21 +151,26 @@ symbolicVar var dst = case varArgs var of
   -- method of creation is the same it should work.
   _ -> error "Not implemented yet :("
 
+-- TODO: I wonder if we could not push this creation to the front-end of
+-- Pantomime. That is, we expose some functions to create fresh primitives.
+-- Then we could probably use a Data instance to create remaining expression.
 -- TODO: This name isn't great. We really are making a symbolic expression here.
 -- The freshness hinges on the freshness of the Var.
 freshExpr
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
-  => HasFamInstEnvs :> es
-  => FreshInstEnv
+  => Context Reader FamInstEnvs :> es
+  => Context Reader BuiltInTyCon :> es
+  => TyConEnv TyCon
   -> Var
-  -> EvalExpr es
-freshExpr FreshInstEnv { .. } root = do
+  -> Eval es Expr
+freshExpr axioms root = do
   -- TODO: Is it better to this lookup once? Whilst it is a reader-like effect,
   -- it is implemented through IO, so I'm a bit wary of running it in a hot loop
   -- like this one. The only way to know is just to profile I guess, but for now
   -- I'll put it outside.
-  fam <- liftEff getFamInstEnvs
+  fam <- liftEff $ get @FamInstEnvs
   -- TODO: Add note on callstack and recursion
   -- TODO: I don't like the nesting this gives. Maybe we should move these
   -- definitions inwards somehow. Perhaps just a standalone helper definition?
@@ -175,6 +178,8 @@ freshExpr FreshInstEnv { .. } root = do
   let go var = do
         let ty = coreFullView $ varType var
 
+        -- TODO: We can probably move the definition of this thing inwards once
+        -- we remove the haskell primitives.
         let symbolic :: Solvable (ConType s) s => s
             symbolic = symbolicVar var Field
 
@@ -184,59 +189,42 @@ freshExpr FreshInstEnv { .. } root = do
               inner <- go var'
               mkCast inner co
 
-        if
-          -- Haskell Primitive:
-          ---------------------
-          -- FIXME: Generate proper platform size.
-          | ty `eqType` intPrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-          | ty `eqType` int8PrimTy -> pure $ mkLit (mkIntN @8 symbolic ty)
-          | ty `eqType` int16PrimTy -> pure $ mkLit (mkIntN @16 symbolic ty)
-          | ty `eqType` int32PrimTy -> pure $ mkLit (mkIntN @32 symbolic ty)
-          | ty `eqType` int64PrimTy -> pure $ mkLit (mkIntN @64 symbolic ty)
-          -- FIXME: Generate proper platform size.
-          | ty `eqType` wordPrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
-          | ty `eqType` word8PrimTy -> pure $ mkLit (mkWordN @8 symbolic ty)
-          | ty `eqType` word16PrimTy -> pure $ mkLit (mkWordN @16 symbolic ty)
-          | ty `eqType` word32PrimTy -> pure $ mkLit (mkWordN @32 symbolic ty)
-          | ty `eqType` word64PrimTy -> pure $ mkLit (mkWordN @64 symbolic ty)
-          -- | ty `eqType` floatPrimTy -> undefined
-          -- | ty `eqType` doublePrimTy -> undefined
+        -- TODO: Wouldn't it make more sense to have all the options be run by
+        -- some sort of 'asum' like operation? Actually, NonDet from 'effectful'
+        -- would be perfect! We should move the code that deals with
+        -- reifyLitType adjecent to its call once we do this!
+        result <- liftEff . runErrorNoCallStack @() $ projectLitTy ty
 
+        let isEqPred' ty' = do
+              (tc, args) <- splitTyConApp_maybe ty'
+              role <- if
+                | tc == eqPrimTyCon -> Just Nominal
+                | tc == eqReprPrimTyCon -> Just Representational
+                | otherwise -> Nothing
+
+              (tyL, tyR) <- case args of
+                [_, _, tyL, tyR] -> Just (tyL, tyR)
+                _ -> Nothing
+
+              pure (role, tyL, tyR)
+
+        if
           -- Pantomime Primitive:
           -----------------------
-          -- Integer:
-          | ty `eqType` mkTyConTy (Primitive.tcInteger fiePrim) -> do
-            let value = mkInteger symbolic ty
-            pure $ mkLit value
-
-          -- BitVector:
-          | Just (tc, [narg]) <- splitTyConApp_maybe ty
-          , tc == Primitive.tcBitVector fiePrim
-          , let Reduction nco nty = normaliseType fam Nominal narg
-          , Just (SomeNat @n _) <- isNumLitTy nty >>= someNatVal -> do
-            -- Coercion on the entire value for the type-level natural.
-            let co = mkTyConAppCo Representational tc [mkSymCo nco]
-
-            -- Construct the inner value and cast it.
-            let inner = mkLit $ mkWordN @n symbolic (coercionLKind co)
-            mkCast inner co
-
-          -- Bool:
-          | ty `eqType` mkTyConTy (Primitive.tcBool fiePrim) -> do
-            let value = mkBool symbolic ty
-            pure $ mkLit value
-
-          -- TODO: Add remaining primitives
+          | Right (co, SomeLiteralType ty') <- result -> do
+            Dict <- pure $ evidence ty'
+            let value = Literal ty' symbolic
+            mkCast (mkLit value) $ mkSubCo co
 
           -- User Interpretation:
           -----------------------
           | Just (tc, args) <- splitTyConApp_maybe ty
-          , Just tc' <- lookupTyConEnv fieUser tc -> do
+          , Just tc' <- lookupTyConEnv axioms tc -> do
             -- Construct the plugin coercion
             let prov = PluginProv "pantomime user-defined"
             let tyL = mkTyConTy tc
             let tyR = mkTyConTy tc'
-            let univ = mkUnivCo prov Representational tyL tyR
+            let univ = mkUnivCo prov [] Representational tyL tyR
             let co = mkAppCos univ $ mkReflCo Nominal <$> args
 
             -- Create the final expression.
@@ -262,7 +250,7 @@ freshExpr FreshInstEnv { .. } root = do
           -- Algebraic Data Type:
           -----------------------
           | Just (tc, args) <- splitTyConApp_maybe ty
-          , or $ fmap ($ tc)
+          , any ($ tc)
             [ isDataTyCon
             , isUnboxedTupleTyCon
             , isUnboxedSumTyCon
@@ -271,14 +259,16 @@ freshExpr FreshInstEnv { .. } root = do
             -- TODO: I really, really hate this level of indentation!
             | isEnumerationTyCon tc -> do
               -- FIXME: This should get the proper platform size.
-              let tag = symbolicVar @(IntN S 64) var Tag
+              let tag = symbolicVar @(SymBitVec 64) var Tag
 
-              -- Tag is within bounds.
+              -- Tag is within bounds. Note that we only need to check the
+              -- upper bound, as the lower bound 0 is already captured by the
+              -- fact that the tag is unsigned.
               let upper = fromIntegral $ tyConFamilySize tc
-              let inBounds = 0 .<= tag .&& tag .< upper
+              let inBounds = tag .< upper
 
               -- Construct the data constructor and its type arguments.
-              let dc = pure $ mkLit (EnumCon tag tc)
+              let dc = pure $ mkCon (EnumCon tag tc)
               mrgIf inBounds dc mkUnreachable
 
             -- Create cascading if for all possible cases. Note, we avoid
@@ -287,12 +277,21 @@ freshExpr FreshInstEnv { .. } root = do
             | (dcN : dcs) <- reverse dataCons -> do
               let goDataCon dc = do
                     let fieldTys = scaledThing <$> dataConInstArgTys dc args
-                    let valArgs = zip [0..] fieldTys <&> \(idx, ty') -> go var
-                          { varType = ty'
-                          , varAccessor = Accessor dc idx : varAccessor var
-                          }
+                    valArgs <- for (zip [0..] fieldTys) \(idx, ty') -> if
+                      -- If the types are surely apart, we can never reach the
+                      -- construction of this value.
+                      -- TODO: As 'Coercion' cannot be 'Unreachable', we have
+                      -- to push this to the root of the DataCon. Hence, it is
+                      -- clunkily put here for now. Maybe we can improve this...
+                      | Just (Nominal, tyL, tyR) <- isEqPred' ty'
+                      , SurelyApart <- tcUnifyTysFG alwaysBindFun [tyL] [tyR] -> do
+                        mkUnreachable
+                      | otherwise -> deferE $ go var
+                        { varType = ty'
+                        , varAccessor = Accessor dc idx : varAccessor var
+                        }
 
-                    let dc' = mkLit $ DataCon dc
+                    let dc' = mkCon $ DataCon dc
                     let tyArgs = pure . mkType <$> args
                     mkApps dc' $ tyArgs <> valArgs
 
@@ -303,6 +302,16 @@ freshExpr FreshInstEnv { .. } root = do
 
             -- Unreachable otherwise.
             | otherwise -> mkUnreachable
+
+          -- TODO: This is really not great, but it works for my purposes for
+          -- now...
+          -- | Coercion:
+          --------------
+          -- We can always construct a reflexive coercion.
+          | Just (role, tyL, tyR) <- isEqPred' ty
+          , eqType tyL tyR -> do
+            let co = mkReflCo role tyL
+            pure $ mkCoercion co
 
             -- NOTE: I'll leave this todo here for now, because I think the stuff
             -- in here should become a detailed comment at some point in the
@@ -388,13 +397,15 @@ freshExpr FreshInstEnv { .. } root = do
 
 freshArgs
   :: HasCallStack
+  => Deferrable es
   => Error () :> es
-  => HasFamInstEnvs :> es
-  => FreshInstEnv
+  => Context Reader BuiltInTyCon :> es
+  => Context Reader FamInstEnvs :> es
+  => TypeAxiomsR
   -> Type
   -> InScopeSet
-  -> ([(Var, Arg es)], InScopeSet)
-freshArgs freshEnv ty scope0 = do
+  -> Eff es ([(Var, Arg)], InScopeSet)
+freshArgs axioms ty scope0 = do
   -- Gather the argument types.
   let (tyVars, funTy) = splitForAllTyVars ty
   let (argTys, _resTy) = splitFunTys funTy
@@ -416,10 +427,10 @@ freshArgs freshEnv ty scope0 = do
   let args = tyArgs <> valArgs
 
   -- Create symbolic instance of the arguments.
-  let symbolic = freshExpr freshEnv <$> args
+  symbolic <- for args $ defer . freshExpr axioms
 
   -- Zip the binders together with their symbolic instance.
   let binders = zip args symbolic
 
   -- Return the binders and the new scope.
-  (binders, scope2)
+  pure (binders, scope2)

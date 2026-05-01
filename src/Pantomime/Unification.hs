@@ -10,15 +10,16 @@ module Pantomime.Unification
   , unifyExprs
   , resolveInstances
   , resolveInstancesWith
+  , subsumeExpr
   ) where
 
 import Prelude hiding (break)
 
 import GHC.Plugins hiding ((<>))
 import GHC.Core.Class (Class)
-import GHC.Core.Unify (tcUnifyTys, alwaysBindFun)
+import GHC.Core.Unify (tcUnifyTys, alwaysBindFun, tcMatchTy)
 import GHC.Core.Map.Type (TypeMap)
-import GHC.Core.Predicate (isDictId)
+import GHC.Core.Predicate (isEvVar)
 import GHC.Core.InstEnv (instanceDFunId)
 import GHC.Core.TyCo.Rep (Type (..), Scaled (..), scaledThing)
 import GHC.Data.TrieMap (TrieMap (..), insertTM)
@@ -48,7 +49,7 @@ import Effectful.GHC.External (HasInstEnvs, lookupUniqueInst)
 -- Note that there may actually exists a unification for all the parts
 -- individually. However, there doesn't exists a single mapping to unify all
 -- type pairs.
-data UnificationError = UnificationError [(Type, Type)]
+newtype UnificationError = UnificationError [(Type, Type)]
 
 instance Outputable UnificationError where
   ppr (UnificationError pairs) = do
@@ -229,7 +230,7 @@ freeDictIds
 freeDictIds = do
   unif <- get @Unification
   let select = \case
-        Var var | isDictId var && isLocalId var -> (var :)
+        Var var | isEvVar var && isLocalId var -> (var :)
         _ -> id
   pure $ foldTM select (unif ^. dictionaries) []
 
@@ -269,10 +270,10 @@ unifyTypes
 unifyTypes tys = do
   let err = UnificationError tys
   let (lhs, rhs) = unzip tys
-  subst <- whyFail err $ tcUnifyTys alwaysBindFun lhs rhs
+  subst <- failWith err $ tcUnifyTys alwaysBindFun lhs rhs
   pure $ Unification subst emptyTM emptyDVarSet
 
--- | Applies the unification map the the expression.
+-- | Applies the unification map to the expression.
 --
 -- This will apply the type variables from the substitution to the expression.
 -- Additionally, it will apply dictionary variables. They are tracked in the
@@ -382,6 +383,41 @@ unifyExprs lhs rhs = do
     rhs'' <- closeExpr rhs'
     pure (lhs'', rhs'')
 
+-- TODO: Using 'TypeMap CoreExpr' for instances is extremely fragile. It would
+-- be a lot better to use InstEnv to resolve typeclasses. This goes for other
+-- functions in this module as well!
+subsumeExpr
+  :: HasCallStack
+  => Error () :> es
+  => TypeMap CoreExpr
+  -> CoreExpr
+  -> Type
+  -> Eff es CoreExpr
+subsumeExpr dicts expr ty = do
+  -- Get the unifiable part of the type.
+  let (curTv, curEv, curTy) = splitExprTy expr
+  let (reqTv, reqEv, reqTy) = tcSplitSigmaTy ty
+
+  -- Match the types and add all dictionaries we care about.
+  let err = () -- TODO: This should be a better error.
+  subst <- failWith err $ tcMatchTy curTy reqTy
+
+  -- Make evidence variables.
+  let names = ("dict", ) . unrestricted <$> reqEv
+  let (lamEv, _) = freshIds names $ mkInScopeSetList reqTv
+
+  -- Construct the arguments to supply to the expression to unify.
+  let argsTv = substTy subst . mkTyVarTy <$> curTv
+  let dicts' = foldlBy dicts lamEv \acc ev -> do
+        insertTM (varType ev) (Var ev) acc
+  let curEv' = substTy subst <$> curEv
+  argsEv <- for curEv' \ev -> do
+    failWith () $ lookupTM ev dicts'
+
+  -- Construct the new expression.
+  let open = mkApps expr $ fmap Type argsTv <> argsEv
+  pure $ mkLams (reqTv <> lamEv) open
+
 -- | Lookup a class instance in the instantiation environment.
 --
 -- This will return a dictionary instance as core expression.
@@ -393,16 +429,16 @@ lookupClassInst
   => Type
   -> Eff es CoreExpr
 lookupClassInst ty = do
-  let whyFail' :: Maybe a -> Eff es a
-      whyFail' = whyFail $ LookupError ty
+  let failWith' :: Maybe a -> Eff es a
+      failWith' = failWith $ LookupError ty
 
   -- Get the typeclass constructor of this type, if possible.
-  (tyCon, tyArgs) <- whyFail' $ splitTyConApp_maybe ty
-  tyClass <- whyFail' $ tyConClass_maybe tyCon
+  (tyCon, tyArgs) <- failWith' $ splitTyConApp_maybe ty
+  tyClass <- failWith' $ tyConClass_maybe tyCon
 
   -- Get the instance for this typeclass with supplied types, if possible.
   let adjustError = runErrorWith @(LookupError (Class, [Type])) \_ _ -> do
-        throwError_ (LookupError ty)
+        throwError_ $ LookupError ty
   (clsInst, tys) <- adjustError $ lookupUniqueInst tyClass tyArgs
 
   -- Create an expression for the instance.
@@ -437,6 +473,7 @@ resolveInstances expr = do
 
 resolveInstancesWith
   :: TypeMap CoreExpr
+  -- ^ Mapping from dictionary types to their instance.
   -> CoreExpr
   -> CoreExpr
 resolveInstancesWith dicts expr = do

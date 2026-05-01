@@ -1,5 +1,4 @@
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
@@ -12,13 +11,11 @@ module Effectful.GHC.Display
   , debugS
   ) where
 
+import Data.Composition ((.:))
 import Effectful
 import Effectful.Dispatch.Dynamic (send)
-
 import GHC.Utils.Outputable (Outputable (..), SDoc, text)
 import GHC.Types.Error (MessageClass (..))
-
-import Data.Composition ((.:))
 
 -- | Effect to get display 'SDoc'.
 data Display :: Effect where

@@ -10,8 +10,8 @@ description:    Please see the README on GitHub at <https://github.com/PLSec-VU/
 homepage:       https://github.com/PLSec-VU/pantomime#readme
 bug-reports:    https://github.com/PLSec-VU/pantomime/issues
 author:         Robin Webbers
-maintainer:     example@example.com
-copyright:      2024 Author name here
+maintainer:     robin_webbers_1@hotmail.com
+copyright:      2026 Robin Webbers
 license:        BSD-3-Clause
 license-file:   LICENSE
 build-type:     Simple
@@ -28,8 +28,6 @@ library
       Control.Error
       Effectful.Break
       Effectful.Context
-      Effectful.Context.Dynamic
-      Effectful.Context.Static.Local
       Effectful.GHC.Annotations
       Effectful.GHC.CoreE
       Effectful.GHC.Display
@@ -42,25 +40,20 @@ library
       Pantomime
       Pantomime.Annotation
       Pantomime.Axiom
-      Pantomime.Base
-      Pantomime.Clash
+      Pantomime.Binding
+      Pantomime.BuiltIn
+      Pantomime.Defer
       Pantomime.Dict
+      Pantomime.Embed
       Pantomime.Expr
       Pantomime.Fresh
-      Pantomime.Grisette.BitVector
       Pantomime.Grisette.Mergeable
-      Pantomime.Grisette.SizedBV
-      Pantomime.Grisette.SomeBV
       Pantomime.Grisette.UnionT
+      Pantomime.Literal
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes
-      Pantomime.Primitive.Array
-      Pantomime.Primitive.BitVector
-      Pantomime.Primitive.Bool
-      Pantomime.Primitive.GHC
-      Pantomime.Primitive.Operation
-      Pantomime.Primitive.Reify
+      Pantomime.PrimOps
       Pantomime.Solve
       Pantomime.Subst
       Pantomime.Symbolise
@@ -100,84 +93,17 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module
   build-depends:
       base >=4.7 && <5
-    , clash-prelude
     , composition
     , constraints >=0.14.2
     , containers
+    , deepseq
     , effectful-core >=2.5.1.0
-    , ghc >=9.6.4
-    , ghc-prim
+    , ghc >=9.12.2
     , grisette >=0.13.0.0
+    , hashable
     , microlens
     , mtl
-    , template-haskell
-    , text
-    , transformers
-    , unordered-containers
-  default-language: Haskell2010
-
-executable pantomime-exe
-  main-is: Main.hs
-  other-modules:
-      ClassInline
-      Core
-      Core2
-      LocalClass
-      Processor
-      ProcessorControl
-      ProcessorControlModular
-      ProcessorModular
-      RW
-      ThreeAdder
-      Two2Adders
-      TwoAdders
-      TwoAddersStall
-      TwoAddersStallPrecise
-      Paths_pantomime
-  autogen-modules:
-      Paths_pantomime
-  hs-source-dirs:
-      app
-  default-extensions:
-      AllowAmbiguousTypes
-      BlockArguments
-      ConstraintKinds
-      DataKinds
-      DeriveDataTypeable
-      DeriveTraversable
-      FlexibleContexts
-      FlexibleInstances
-      GADTs
-      ImportQualifiedPost
-      KindSignatures
-      LambdaCase
-      MultiParamTypeClasses
-      MultiWayIf
-      NamedFieldPuns
-      RankNTypes
-      RecordWildCards
-      ScopedTypeVariables
-      TemplateHaskell
-      TupleSections
-      TypeAbstractions
-      TypeApplications
-      TypeFamilies
-      TypeOperators
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module -threaded -rtsopts -with-rtsopts=-N -fplugin Pantomime -fexpose-all-unfoldings
-  build-depends:
-      QuickCheck
-    , base >=4.7 && <5
-    , clash-prelude
-    , composition
-    , constraints >=0.14.2
-    , containers
-    , effectful-core >=2.5.1.0
-    , ghc >=9.6.4
-    , ghc-prim
-    , grisette >=0.13.0.0
-    , microlens
-    , mtl
-    , pantomime
+    , primitive
     , template-haskell
     , text
     , transformers
@@ -222,23 +148,12 @@ test-suite pantomime-test
   build-depends:
       HUnit
     , base >=4.7 && <5
-    , clash-prelude
-    , composition
     , constraints >=0.14.2
-    , containers
     , directory
-    , effectful-core >=2.5.1.0
-    , ghc >=9.6.4
     , ghc-paths
-    , ghc-prim
     , grisette >=0.13.0.0
     , hspec
-    , microlens
     , mtl
     , pantomime
     , silently
-    , template-haskell
-    , text
-    , transformers
-    , unordered-containers
   default-language: Haskell2010

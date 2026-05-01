@@ -1,11 +1,16 @@
 {-# LANGUAGE PatternSynonyms #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE DerivingVia #-}
 
 module Pantomime.Grisette.UnionT
   ( UnionT (..)
   , runUnionT
   ) where
+
+import Control.Monad (join)
+import Control.Monad.Trans (MonadTrans (..))
+
+import Data.Coerce (coerce)
+import Data.Traversable (for)
 
 import Grisette
   ( Union
@@ -24,13 +29,7 @@ import Grisette
   , pattern Con
   )
 
-import Data.Coerce (coerce)
-import Data.Traversable (for)
-
-import Control.Monad (join, liftM)
-
 import Pantomime.Orphan.Grisette ()
-import Control.Monad.Trans (MonadTrans (..))
 
 -- | Union monad transformer.
 --
@@ -86,10 +85,10 @@ instance Monad m => Monad (UnionT m) where
       go :: UnionTC m a -> (a -> UnionTC m b) -> UnionTC m b
       go m f = do
         union <- m
-        fmap join $ for union f
+        join <$> for union f
 
 instance MonadTrans UnionT where
-  lift = UnionT . liftM pure
+  lift = UnionT . fmap pure
 
 instance Functor m => TryMerge (UnionT m) where
   tryMergeWithStrategy @a = coerce $ fmap @m . tryMergeWithStrategy @Union @a

@@ -5,14 +5,6 @@ module Pantomime
 
   , Theory (..)
   , PluginAxioms (..)
-  , Circuit
-
-  , Pantomime (..)
-  , pantomime
-
-  , NonInterference (..)
-  , tickStateCorrespondence
-  , projectionCoherence
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
