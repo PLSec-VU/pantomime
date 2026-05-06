@@ -40,7 +40,15 @@ import GHC.Plugins
   , coercibleDataCon
   )
 import GHC.Tc.Utils.TcType (eqType)
-import GHC.Utils.Outputable (Outputable (..), IsDoc (..), hang)
+import GHC.Utils.Outputable
+  ( Outputable (..)
+  , IsDoc (..)
+  , IsLine (fsep, (<+>), text)
+  , hang
+  , punctuate
+  , comma
+  , brackets
+  )
 
 import GHC.Exts (IsList (..))
 
@@ -151,6 +159,15 @@ data PluginAxioms where
     -- definitions are considered an error.
     } -> PluginAxioms
   deriving (Show, Data)
+
+instance Outputable PluginAxioms where
+  ppr PluginAxioms { .. } = do
+    let pprKV (key, value) = text (show key) <+> ":->" <+> text (show value)
+    let pprKVList pairs = brackets $ fsep $ punctuate comma $ pprKV <$> pairs
+    hang "PluginAxioms" 2 $ vcat
+      [ hang "Type Axioms:" 2 $ pprKVList (toList typeAxioms)
+      , hang "Term Axioms:" 2 $ pprKVList termAxioms
+      ]
 
 instance Semigroup PluginAxioms where
   (<>) l r = PluginAxioms

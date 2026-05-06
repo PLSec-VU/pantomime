@@ -58,7 +58,6 @@ import GHC.Plugins
   , SrcSpan
   , SimplCount
   , DumpFlag (..)
-  , ModGuts
   , zeroSimplCount
   , plusSimplCount
   , addSimplCount
@@ -271,10 +270,9 @@ runThNameToGhcName = interpret_ \(THNameToGHCName name) -> do
 runHasAnnotations
   :: IOE :> es
   => CoreE :> es
-  => ModGuts
-  -> Eff (HasAnnotations : es) a
+  => Eff (HasAnnotations : es) a
   -> Eff es a
-runHasAnnotations guts = interpret_ \(GetAnnotations deserialise) -> do
+runHasAnnotations = interpret_ \(GetAnnotations deserialise guts) -> do
   liftCore $ getAnnotations deserialise guts
 
 -- | Run the 'HasUnique' effect through the 'CoreE' effect.

@@ -71,7 +71,7 @@ annBindsPass
   -> Eff es ModGuts
 annBindsPass pass guts = do
   -- TODO: We should probably run every annotation!
-  (_, anns) <- getFirstAnnotations @a deserializeWithData
+  (_, anns) <- getFirstAnnotations @a deserializeWithData guts
 
   binds <- for (mg_binds guts) \case
     NonRec x e | Just ann <- lookupUFM anns $ varName x -> do
@@ -129,7 +129,7 @@ runSymbolic guts
   . runContextReader (mg_binds guts)
   . runHasThings
   . runThNameToGhcName
-  . runHasAnnotations guts
+  . runHasAnnotations
   . runProvider_ (const $ runSolver solver)
   . runErrorWith @() propagateErrorShow
   . runErrorWith @SolverError propagateErrorShow

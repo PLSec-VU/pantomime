@@ -9,6 +9,7 @@ import GHC.Plugins hiding (getAnnotations, getFirstAnnotations)
 import Effectful
 import Effectful.Dispatch.Dynamic
 
+import Data.Composition ((.:))
 import Data.Word (Word8)
 import Data.Maybe (listToMaybe)
 import Data.Bifunctor (Bifunctor(..))
@@ -21,6 +22,7 @@ data HasAnnotations :: Effect where
      . Typeable a
     => ([Word8] -> a)
     -- ^ Deserialisation function.
+    -> ModGuts
     -> HasAnnotations m (ModuleEnv [a], NameEnv [a])
 
 type instance DispatchOf HasAnnotations = Dynamic
@@ -39,8 +41,9 @@ getAnnotations
   => Typeable a
   => ([Word8] -> a)
   -- ^ Deserialisation function.
+  -> ModGuts
   -> Eff es (ModuleEnv [a], NameEnv [a])
-getAnnotations = send . GetAnnotations
+getAnnotations = send .: GetAnnotations
 
 -- | Get at most one annotation of a given type per annotatable item.
 getFirstAnnotations
@@ -49,8 +52,9 @@ getFirstAnnotations
   => Typeable a
   => ([Word8] -> a)
   -- ^ Deserialisation function.
+  -> ModGuts
   -> Eff es (ModuleEnv a, NameEnv a)
-getFirstAnnotations deserialise = do
-  let mod' = mapMaybeModuleEnv (const listToMaybe)
+getFirstAnnotations deserialise guts = do
+  let mod' = mapMaybeModuleEnv $ const listToMaybe
   let name = mapMaybeNameEnv listToMaybe
-  bimap mod' name <$> getAnnotations deserialise
+  bimap mod' name <$> getAnnotations deserialise guts
