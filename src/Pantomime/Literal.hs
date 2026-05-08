@@ -71,8 +71,7 @@ import Grisette
 import Grisette.Internal.SymPrim.Prim.Term (SupportedNonFuncPrim)
 import Grisette.Internal.SymPrim.SymArray (SymArray)
 
-import Pantomime.Dict (posNat)
-import Pantomime.Util (KnownPos, SymBitVec, failWith)
+import Pantomime.Util (KnownPos, SymBitVec, failWith, posNat)
 import Pantomime.Grisette.Mergeable (impossible)
 
 class

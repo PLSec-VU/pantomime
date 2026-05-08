@@ -43,7 +43,6 @@ library
       Pantomime.Binding
       Pantomime.BuiltIn
       Pantomime.Defer
-      Pantomime.Dict
       Pantomime.Embed
       Pantomime.Expr
       Pantomime.Fresh

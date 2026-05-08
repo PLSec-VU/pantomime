@@ -1,3 +1,4 @@
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ImplicitParams #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
@@ -24,13 +25,30 @@ module Pantomime.Util
   , freshIds
   , freshTyVar
   , freshTyVars
+
+  , unsafeEq
+  , eqNat
+  , leqNat
+  , posNat
+  , cmpNat'
+  , (%+)
+  , (%-)
   ) where
 
 import GHC.Plugins hiding (empty)
 import GHC.Core.Multiplicity (Scaled(..))
 import GHC.Stack (withFrozenCallStack)
-import GHC.TypeLits (KnownNat, SomeNat (..), type (<=))
-
+import GHC.TypeLits
+  ( KnownNat
+  , SomeNat (..)
+  , SNat
+  , OrderingI (..)
+  , type (<=)
+  , type (+)
+  , type (-)
+  , cmpNat
+  )
+import GHC.TypeNats (fromSNat)
 import Grisette
   ( SymWordN
   , WordN
@@ -40,12 +58,13 @@ import Grisette
   , wrapStrategy
   )
 
-import Data.Constraint (Dict(..))
-import Data.Constraint.Unsafe (unsafeAxiom)
-import Data.Data (Proxy(..))
+import Data.Constraint (Dict (..))
+import Data.Constraint.Unsafe (unsafeAxiom, unsafeSNat)
+import Data.Data (Proxy (..))
 import Data.Foldable (foldrM)
-import Data.Typeable (type (:~:)(..), eqT)
+import Data.Typeable (type (:~:) (..), eqT)
 
+import Control.Applicative (Alternative (..))
 import Control.Monad (foldM, foldM_)
 import Control.Monad.State (state, runState)
 
@@ -56,6 +75,8 @@ import Effectful.Error.Static (Error, CallStack, throwError_)
 import Effectful.Dispatch.Static (unsafeEff_)
 
 import Pantomime.Grisette.Mergeable (impossible)
+
+import Unsafe.Coerce (unsafeCoerce)
 
 -- | Type alias for known naturals that are positive.
 type KnownPos n = (KnownNat n, 1 <= n)
@@ -94,7 +115,7 @@ instance
 --
 -- > res <- foldM' start xs \acc x -> do
 -- >   ...
-foldM' :: (Foldable t, Monad m) => b -> t a -> (b -> a -> m b) -> m b
+foldM' :: Foldable t => Monad m => b -> t a -> (b -> a -> m b) -> m b
 foldM' acc xs f = foldM f acc xs
 
 -- | The usual 'foldM_', but with its arguments switched.
@@ -104,7 +125,7 @@ foldM' acc xs f = foldM f acc xs
 --
 -- > foldM'_ start xs $ \acc x -> do
 -- >   ...
-foldM_' :: (Foldable t, Monad m) => b -> t a -> (b -> a -> m b) -> m ()
+foldM_' :: Foldable t => Monad m => b -> t a -> (b -> a -> m b) -> m ()
 foldM_' acc xs f = foldM_ f acc xs
 
 -- | The usual 'foldrM', but with its arguments switched.
@@ -222,3 +243,50 @@ freshTyVars
   -> InScopeSet
   -> (f TyVar, InScopeSet)
 freshTyVars = accumL $ uncurry freshTyVar
+
+unsafeEq :: forall {k} (a :: k) (b :: k). Dict (a ~ b)
+unsafeEq = unsafeCoerce $ Dict @(() ~ ())
+
+eqNat
+  :: forall l r
+   . KnownNat l
+  => KnownNat r
+  => Maybe (Dict (l ~ r))
+eqNat = case cmpNat' @l @r of
+  EQI -> pure Dict
+  _ -> empty
+
+leqNat
+  :: forall l r
+   . KnownNat l
+  => KnownNat r
+  => Maybe (Dict (l <= r))
+leqNat = case cmpNat' @l @r of
+  LTI -> pure Dict
+  EQI -> pure Dict
+  _ -> empty
+
+posNat
+  :: forall n
+   . KnownNat n
+  => Maybe (Dict (1 <= n))
+posNat = leqNat @1 @n
+
+cmpNat'
+  :: forall l r
+   . KnownNat l
+  => KnownNat r
+  => OrderingI l r
+cmpNat' = cmpNat @l @r Proxy Proxy
+
+infixl 6 %+
+(%+) :: forall l r. SNat l -> SNat r -> SNat (l + r)
+(%+) lhs rhs = unsafeSNat @(l + r) $ fromSNat lhs + fromSNat rhs
+
+infixl 6 %-
+(%-) :: forall l r.  r <= l => SNat l -> SNat r -> SNat (l - r)
+(%-) lhs rhs = do
+  -- NOTE: The dictionary ensures it is safe to perform this subtraction. We use
+  -- it here to avoid a redundant constraint warning.
+  let _ = Dict @(r <= l)
+  unsafeSNat @(l - r) $ fromSNat lhs - fromSNat rhs

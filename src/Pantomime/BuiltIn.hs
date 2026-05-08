@@ -29,20 +29,32 @@ module Pantomime.BuiltIn
 
   -- | Built-in literal conversion functions.
   --
-  -- WARNING: These functions should not be called directly. Their purpose is
-  -- to receive an interpretation such that the symbolic engine knows how to
-  -- construct these literals from GHC Core.
+  -- We need these functions for the conversion between symbolic primitives and
+  -- Haskell primitives. It is expected that an embedding will tell the symbolic
+  -- evaluator what to do if it encounters these functions.
   , PlatformWordSize
   , toInt#
   , toInt8#
   , toInt16#
   , toInt32#
   , toInt64#
+  , fromInt#
+  , fromInt8#
+  , fromInt16#
+  , fromInt32#
+  , fromInt64#
   , toWord#
   , toWord8#
   , toWord16#
   , toWord32#
   , toWord64#
+  , fromWord#
+  , fromWord8#
+  , fromWord16#
+  , fromWord32#
+  , fromWord64#
+  , toInteger
+  , fromInteger
   , eqInt#
   , eqInt8#
   , eqInt16#
@@ -53,8 +65,6 @@ module Pantomime.BuiltIn
   , eqWord16#
   , eqWord32#
   , eqWord64#
-  , hsi2i
-  , i2hsi
 
   -- | Operations on type-level natural numbers.
   --
@@ -62,7 +72,9 @@ module Pantomime.BuiltIn
   -- being the builtin 'Integer' of the symbolic executor.
   , KnownNat (..)
   , natVal
-  , SNat (SNat)
+  -- TODO: Why is this an ambigous import without the fully qualified path this?
+  -- The other SNat pattern synonym is a qualified import...
+  , SNat (Pantomime.BuiltIn.SNat)
   , (%+)
   , (%-)
   , SomeNat (..)
@@ -94,6 +106,7 @@ module Pantomime.BuiltIn
   , implies
   , xor
   , iff
+  , boolean
 
   -- | Integer operations.
   , Integer
@@ -152,7 +165,7 @@ module Pantomime.BuiltIn
 import Control.Monad.Identity (Identity (..))
 import Data.Bits qualified as Prelude (Bits (..))
 import Data.Coerce (coerce)
-import Data.Constraint (HasDict (..))
+import Data.Constraint (Dict (..), HasDict (..))
 import Data.Constraint.Unsafe qualified as Prelude (unsafeSNat)
 import Data.Composition ((.:))
 import Data.Constraint.Unsafe (unsafeAxiom)
@@ -175,13 +188,27 @@ import GHC.Base
   , WithDict (..)
   , noinline
   )
+import GHC.Int
+  ( Int (..)
+  , Int8 (..)
+  , Int16 (..)
+  , Int32 (..)
+  , Int64 (..)
+  )
 import GHC.TypeLits qualified as Prelude (natVal)
 import GHC.TypeNats (Nat, type (+), type (-), type (<=))
-import GHC.TypeNats qualified as Prelude (KnownNat)
+import GHC.TypeNats qualified as Prelude (KnownNat, pattern SNat)
+import GHC.Word
+  ( Word (..)
+  , Word8 (..)
+  , Word16 (..)
+  , Word32 (..)
+  , Word64 (..)
+  )
 import Grisette (SymShift(..), SizedBV (..), IntN, SignConversion (..))
 import Grisette.Internal.SymPrim.Array qualified as Grisette
-import Pantomime.Dict (Dict (..), SomeNat' (..), typeAdd, unsafeEq)
-import Pantomime.Util qualified as Util (BitVec)
+import Pantomime.Util (unsafeEq)
+import Pantomime.Util qualified as Util (BitVec, (%+))
 import Prelude qualified
 import Prelude (Applicative (..), Ordering (..), ($), (.))
 
@@ -246,43 +273,98 @@ type PlatformWordSize = 64
 -- plan on actually using these primitives for some check.
 {-# OPAQUE toInt# #-}
 toInt# :: BitVec PlatformWordSize -> Int#
-toInt# = noinline toInt#
+toInt# (BitVec bv) = let !(I# i#) = Prelude.fromIntegral bv in i#
 
 {-# OPAQUE toInt8# #-}
 toInt8# :: BitVec 8 -> Int8#
-toInt8# = noinline toInt8#
+toInt8# (BitVec bv) = let !(I8# i#) = Prelude.fromIntegral bv in i#
 
 {-# OPAQUE toInt16# #-}
 toInt16# :: BitVec 16 -> Int16#
-toInt16# = noinline toInt16#
+toInt16# (BitVec bv) = let !(I16# i#) = Prelude.fromIntegral bv in i#
 
 {-# OPAQUE toInt32# #-}
 toInt32# :: BitVec 32 -> Int32#
-toInt32# = noinline toInt32#
+toInt32# (BitVec bv) = let !(I32# i#) = Prelude.fromIntegral bv in i#
 
 {-# OPAQUE toInt64# #-}
 toInt64# :: BitVec 64 -> Int64#
-toInt64# = noinline toInt64#
+toInt64# (BitVec bv) = let !(I64# i#) = Prelude.fromIntegral bv in i#
+
+{-# OPAQUE fromInt# #-}
+fromInt# :: Int# -> BitVec PlatformWordSize
+fromInt# i# = Prelude.fromIntegral $ I# i#
+
+{-# OPAQUE fromInt8# #-}
+fromInt8# :: Int8# -> BitVec 8
+fromInt8# i# = Prelude.fromIntegral $ I8# i#
+
+{-# OPAQUE fromInt16# #-}
+fromInt16# :: Int16# -> BitVec 16
+fromInt16# i# = Prelude.fromIntegral $ I16# i#
+
+{-# OPAQUE fromInt32# #-}
+fromInt32# :: Int32# -> BitVec 32
+fromInt32# i# = Prelude.fromIntegral $ I32# i#
+
+{-# OPAQUE fromInt64# #-}
+fromInt64# :: Int64# -> BitVec 64
+fromInt64# i# = Prelude.fromIntegral $ I64# i#
 
 {-# OPAQUE toWord# #-}
 toWord# :: BitVec PlatformWordSize -> Word#
-toWord# = noinline toWord#
+toWord# (BitVec bv) = let !(W# w#) = Prelude.fromIntegral bv in w#
 
 {-# OPAQUE toWord8# #-}
 toWord8# :: BitVec 8 -> Word8#
-toWord8# = noinline toWord8#
+toWord8# (BitVec bv) = let !(W8# w#) = Prelude.fromIntegral bv in w#
 
 {-# OPAQUE toWord16# #-}
 toWord16# :: BitVec 16 -> Word16#
-toWord16# = noinline toWord16#
+toWord16# (BitVec bv) = let !(W16# w#) = Prelude.fromIntegral bv in w#
 
 {-# OPAQUE toWord32# #-}
 toWord32# :: BitVec 32 -> Word32#
-toWord32# = noinline toWord32#
+toWord32# (BitVec bv) = let !(W32# w#) = Prelude.fromIntegral bv in w#
 
 {-# OPAQUE toWord64# #-}
 toWord64# :: BitVec 64 -> Word64#
-toWord64# = noinline toWord64#
+toWord64# (BitVec bv) = let !(W64# w#) = Prelude.fromIntegral bv in w#
+
+{-# OPAQUE fromWord# #-}
+fromWord# :: Word# -> BitVec PlatformWordSize
+fromWord# w# = Prelude.fromIntegral $ W# w#
+
+{-# OPAQUE fromWord8# #-}
+fromWord8# :: Word8# -> BitVec 8
+fromWord8# w# = Prelude.fromIntegral $ W8# w#
+
+{-# OPAQUE fromWord16# #-}
+fromWord16# :: Word16# -> BitVec 16
+fromWord16# w# = Prelude.fromIntegral $ W16# w#
+
+{-# OPAQUE fromWord32# #-}
+fromWord32# :: Word32# -> BitVec 32
+fromWord32# w# = Prelude.fromIntegral $ W32# w#
+
+{-# OPAQUE fromWord64# #-}
+fromWord64# :: Word64# -> BitVec 64
+fromWord64# w# = Prelude.fromIntegral $ W64# w#
+
+{-# OPAQUE toInteger #-}
+toInteger :: Integer -> Prelude.Integer
+toInteger = coerce
+
+-- | Convert a Haskell 'Integer' to a pantomime 'Integer'.
+--
+-- This function will be used to implement the 'Num' typeclass 'fromInteger'
+-- for pantomime 'Integer', and as such will allow one to write their literals.
+--
+-- As the conversion depends on the interpretation of haskell 'Integer', we can
+-- only ask a user to provide an instance for this.
+{-# OPAQUE fromInteger #-}
+fromInteger :: Prelude.Integer -> Integer
+fromInteger = coerce
 
 {-# OPAQUE eqInt# #-}
 eqInt# :: Int# -> Int# -> Bool
@@ -324,21 +406,6 @@ eqWord32# = noinline eqWord32#
 eqWord64# :: Word64# -> Word64# -> Bool
 eqWord64# = noinline eqWord64#
 
--- TODO: Not sure I like this name.
--- | Convert a Haskell 'Integer' to a pantomime 'Integer'.
---
--- This function will be used to implement 'fromInteger' for pantomime
--- 'Integer', and as such will allow one to write their literals. As the
--- conversion depends on the interpretation of haskell 'Integer', we can only
--- ask a user to provide an instance for this.
-{-# OPAQUE hsi2i #-}
-hsi2i :: Prelude.Integer -> Integer
-hsi2i = coerce
-
-{-# OPAQUE i2hsi #-}
-i2hsi :: Integer -> Prelude.Integer
-i2hsi = coerce
-
 -- | 'KnownNat' constraint using Pantomime primitive 'Integer'.
 class KnownNat (n :: Nat) where
   natSing :: SNat n
@@ -346,7 +413,7 @@ class KnownNat (n :: Nat) where
 instance Prelude.KnownNat n => KnownNat n where
   natSing = do
     let i = Prelude.natVal @n Proxy
-    UnsafeSNat @n $ hsi2i i
+    UnsafeSNat @n $ fromInteger i
 
 instance HasDict (KnownNat n) (SNat n) where
   evidence nat = withDict @(KnownNat n) nat Dict
@@ -367,12 +434,12 @@ pattern SNat <- (knownNatInstance -> KnownNatInstance)
     SNat = natSing
 {-# COMPLETE SNat #-}
 
--- An internal data type that is only used for defining the SNat pattern
+-- | An internal data type that is only used for defining the SNat pattern
 -- synonym.
 data KnownNatInstance (n :: Nat) where
   KnownNatInstance :: KnownNat n => KnownNatInstance n
 
--- An internal function that is only used for defining the SNat pattern
+-- | An internal function that is only used for defining the SNat pattern
 -- synonym.
 knownNatInstance :: forall n. SNat n -> KnownNatInstance n
 knownNatInstance nat = withDict @(KnownNat n) nat KnownNatInstance
@@ -506,7 +573,7 @@ tagToEnum = noinline tagToEnum
 dataToTag :: forall l (a :: TYPE (BoxedRep l)). a -> BitVec PlatformWordSize
 dataToTag = noinline dataToTag
 
--- | Raise a error in the Haskell runtime.
+-- | Raise an error in the Haskell runtime.
 {-# OPAQUE raise #-}
 raise :: forall {l} {r} (a :: TYPE (BoxedRep l)) (b :: TYPE r). a -> b
 raise = noinline raise
@@ -569,6 +636,12 @@ pattern False <- (convert -> Prelude.False)
 
 {-# COMPLETE True, False #-}
 
+-- | Convert the standard Haskell Boolean to a symbolic Boolean.
+boolean :: Prelude.Bool -> Bool
+boolean = \case
+  Prelude.True -> True
+  Prelude.False -> False
+
 -- TODO: I dislike this name. Not sure what a better alternative is.
 -- | Convert a symbolic Boolean to the standard Haskell Boolean.
 convert :: Bool -> Prelude.Bool
@@ -593,7 +666,7 @@ instance Prelude.Num Integer where
   abs = iabs
   signum x = ite (ieq 0 x) 0 $ ite (ilt 0 x) (-1) 1
   negate = ineg
-  fromInteger = hsi2i
+  fromInteger = fromInteger
 
 {-# OPAQUE i2bv #-}
 i2bv :: forall n. KnownNat n => 1 <= n => Integer -> BitVec n
@@ -648,6 +721,10 @@ type role BitVec nominal
 instance Prelude.Eq (BitVec n) where
   (==) lhs rhs = convert $ bveq lhs rhs
 
+instance Prelude.Ord (BitVec n) where
+  (<=) = convert .: bvule
+  (<) = convert .: bvult
+
 -- FIXME: This instance is super wrong. It uses the internal representation
 -- without any opaque stuff.
 instance Hashable (BitVec n) where
@@ -658,8 +735,34 @@ instance (KnownNat n, 1 <= n) => Prelude.Num (BitVec n) where
   (*) = bvmul
   abs = Prelude.id
   signum value = ite (bveq value 0) 0 1
-  fromInteger = i2bv . hsi2i
+  fromInteger = i2bv . fromInteger
   negate = bvneg
+
+instance (KnownNat n, 1 <= n) => Prelude.Bits (BitVec n) where
+  (.&.) = bvand
+  (.|.) = bvor
+  xor = bvxor
+  complement = bvnot
+  -- TODO: I guess it would be better not to go through Prelude.Integer for this
+  -- conversion...
+  shiftL value (I# idx#) = do
+    let idx = fromInt# idx#
+    bvshl value $ bvsresize idx
+  shiftR value (I# idx#) = do
+    let idx = fromInt# idx#
+    bvlshr value $ bvsresize idx
+  rotateL = Prelude.undefined
+  rotateR = Prelude.undefined
+  zeroBits = Prelude.undefined
+  bit = Prelude.undefined
+  setBit = Prelude.undefined
+  clearBit = Prelude.undefined
+  complementBit = Prelude.undefined
+  testBit = Prelude.undefined
+  bitSizeMaybe = Prelude.undefined
+  bitSize = Prelude.undefined
+  isSigned _ = Prelude.False
+  popCount = Prelude.undefined
 
 bvunary
   :: (Prelude.KnownNat n => 1 <= n => Util.BitVec n -> Util.BitVec n)
@@ -809,7 +912,7 @@ bvslt = bvcompare $ signedCmp (Prelude.<)
 {-# OPAQUE bvconcat #-}
 bvconcat :: forall l r. BitVec l -> BitVec r -> BitVec (l + r)
 bvconcat (BitVec lhs) (BitVec rhs) = runIdentity do
-  SomeNat' @sum <- pure $ typeAdd @l @r
+  Prelude.SNat @sum <- pure $ Prelude.SNat @l Util.%+ Prelude.SNat @r
   -- SAFETY: Sum of two positives is also positive.
   Dict <- pure $ unsafeAxiom @(1 <= sum)
   pure $ BitVec (sizedBVConcat lhs rhs)

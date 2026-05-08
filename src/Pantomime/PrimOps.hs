@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Pantomime.PrimOps
   -- | System Fc operations.
   ( PrimOp
@@ -67,6 +69,7 @@ module Pantomime.PrimOps
 
 import Data.Bits (Bits((.&.), (.|.), complement))
 import Data.Bits qualified as Bits (xor)
+import Data.Constraint (Dict (..))
 import Data.Constraint.Unsafe (unsafeAxiom)
 import Data.Typeable (type (:~:) (..), eqT, Proxy (..))
 
@@ -77,7 +80,7 @@ import Effectful.Error.Static (HasCallStack, Error)
 import GHC.Core.FamInstEnv (FamInstEnvs)
 import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
 import GHC.Plugins (Role (..), emptySubst, dataConTagZ, mkUnivCo)
-import GHC.TypeLits (type (<=), SomeNat (..), natVal)
+import GHC.TypeLits (type (<=), SomeNat (..), natVal, pattern SNat)
 
 import Grisette
   ( SymIntN
@@ -118,8 +121,14 @@ import Pantomime.Literal
   , HasDict (..)
   , eqLiteralType
   )
-import Pantomime.Util (SomeBitVec(..), KnownPos, SymBitVec)
-import Pantomime.Dict
+import Pantomime.Util
+  ( SomeBitVec (..)
+  , KnownPos
+  , SymBitVec
+  , posNat
+  , leqNat
+  , (%+)
+  )
 import Pantomime.Defer (Deferrable, Defer (..))
 import Prelude
   ( Applicative (..)
@@ -554,7 +563,7 @@ bvconcat :: PrimOp es
 bvconcat = embed2 @ConcatBitVecOp \_ _ lhs rhs -> hoistEff do
   SomeBitVec @nl lhs' <- lhs
   SomeBitVec @nr rhs' <- rhs
-  SomeNat' @n <- pure $ typeAdd @nl @nr
+  SNat @n <- pure $ SNat @nl %+ SNat @nr
   -- SAFETY: Both bitvectors already have a positive bitwidth, thus their
   -- concatenation also has a positive bitwidth.
   Dict <- pure $ unsafeAxiom @(1 <= n)
@@ -616,7 +625,7 @@ bvselect = embed2 @SelectBitVecOp \_ _ _ idx width _ _  bv -> do
   SomeNat @width _ <- hoistEff width
   SomeBitVec @n bv' <- hoistEff bv
   Dict <- failWithE () $ posNat @width
-  SomeNat' @sum <- pure $ typeAdd @idx @width
+  SNat @sum <- pure $ SNat @idx %+ SNat @width
   Dict <- failWithE () $ leqNat @sum @n
   pure $ SomeBitVec (sizedBVSelect (Proxy @idx) (Proxy @width) bv')
 
