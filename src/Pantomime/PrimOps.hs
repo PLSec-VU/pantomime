@@ -34,7 +34,7 @@ module Pantomime.PrimOps
 
   -- | Bitvector primitive operations.
   , bv2i
-  , bvsize
+  , bvsize'
   , bvnot
   , bvneg
   , bvand
@@ -390,8 +390,8 @@ bv2i = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
   SomeBitVec bv' <- bv
   pure $ symFromIntegral bv'
 
-bvsize :: PrimOp es
-bvsize = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
+bvsize' :: PrimOp es
+bvsize' = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
   SomeBitVec @n _ <- bv
   pure $ fromInteger (natVal @n Proxy)
 
@@ -660,14 +660,12 @@ aconst = embed2 @ArrayConstOp \_ _ pk _ valE -> do
 type ArraySelectOp
   =   Forall 0 TypeKind
   :.  Forall 1 TypeKind
-  :.  PrimitiveTy (TyVar 0 TypeKind)
-  :-> PrimitiveTy (TyVar 1 TypeKind)
-  :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
+  :.  ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
   :-> TyVar 0 TypeKind
   :-> TyVar 1 TypeKind
 
 aselect :: PrimOp es
-aselect = embed2 @ArraySelectOp \_ _ _ _ arrE keyE -> do
+aselect = embed2 @ArraySelectOp \_ _ arrE keyE -> do
   -- Get the inner array.
   SomeArray @k @v arr <- hoistEff arrE
 
@@ -687,15 +685,13 @@ aselect = embed2 @ArraySelectOp \_ _ _ _ arrE keyE -> do
 type ArrayStoreOp
   =   Forall 0 TypeKind
   :.  Forall 1 TypeKind
-  :.  PrimitiveTy (TyVar 0 TypeKind)
-  :-> PrimitiveTy (TyVar 1 TypeKind)
-  :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
+  :.  ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
   :-> TyVar 0 TypeKind
   :-> TyVar 1 TypeKind
   :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
 
 astore :: PrimOp es
-astore = embed2 @ArrayStoreOp \_ _ _ _ arrE keyE valE -> do
+astore = embed2 @ArrayStoreOp \_ _ arrE keyE valE -> do
   -- Get the inner array.
   SomeArray @k @v arr <- hoistEff arrE
 
@@ -720,14 +716,12 @@ astore = embed2 @ArrayStoreOp \_ _ _ _ arrE keyE valE -> do
 type ArrayEqOp
   =   Forall 0 TypeKind
   :.  Forall 1 TypeKind
-  :.  PrimitiveTy (TyVar 0 TypeKind)
-  :-> PrimitiveTy (TyVar 1 TypeKind)
-  :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
+  :.  ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
   :-> ArrayTy (TyVar 0 TypeKind) (TyVar 1 TypeKind)
   :-> BoolTy
 
 aeq :: PrimOp es
-aeq = embed2 @ArrayEqOp \_ _ _ _ arrL arrR -> do
+aeq = embed2 @ArrayEqOp \_ _ arrL arrR -> do
   SomeArray @kL @vL arrL' <- hoistEff arrL
   SomeArray @kR @vR arrR' <- hoistEff arrR
 

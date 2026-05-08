@@ -25,7 +25,8 @@ module Pantomime.BuiltIn
   ( Embeddable (..)
 
   -- | Typeclass to differentiate primitive types.
-  , Primitive
+  , Primitive (..)
+  , PrimitiveType (..)
 
   -- | Built-in literal conversion functions.
   --
@@ -77,6 +78,7 @@ module Pantomime.BuiltIn
   , SNat (Pantomime.BuiltIn.SNat)
   , (%+)
   , (%-)
+  , cmpNat
   , SomeNat (..)
   , someNatVal
 
@@ -125,8 +127,8 @@ module Pantomime.BuiltIn
   -- | Bit-vector operations.
   , BitVec
   , bv2i
+  , bvsize'
   , bvsize
-  , bvnat
   , bvnot
   , bvneg
   , bvand
@@ -171,6 +173,7 @@ import Data.Composition ((.:))
 import Data.Constraint.Unsafe (unsafeAxiom)
 import Data.Data (Proxy (..))
 import Data.Hashable (Hashable (..))
+import Data.Type.Ord (Compare)
 import GHC.Base
   ( TYPE
   , RuntimeRep (..)
@@ -195,6 +198,7 @@ import GHC.Int
   , Int32 (..)
   , Int64 (..)
   )
+import GHC.TypeLits (OrderingI (..))
 import GHC.TypeLits qualified as Prelude (natVal)
 import GHC.TypeNats (Nat, type (+), type (-), type (<=))
 import GHC.TypeNats qualified as Prelude (KnownNat, pattern SNat)
@@ -210,7 +214,7 @@ import Grisette.Internal.SymPrim.Array qualified as Grisette
 import Pantomime.Util (unsafeEq)
 import Pantomime.Util qualified as Util (BitVec, (%+))
 import Prelude qualified
-import Prelude (Applicative (..), Ordering (..), ($), (.))
+import Prelude (Applicative (..), Ordering (..), Maybe (..), ($), (.))
 
 -- TODO: I guess we could also make this a typeclass without variables?
 class Private a
@@ -231,30 +235,6 @@ class (Private a, Private b) => Embeddable (a :: TYPE r1) (b :: TYPE r2) where
 --   => a
 --   -> b
 -- embed = embed
-
--- FIXME: I think calling Hashable on the primitives will now break stuff, as it
--- uses the actual underlying representation...
---
--- The reason to have this for now is to be able to use the array primitives.
--- Ideally though, we have a way of getting the hashable on the inner values
--- without exposing the typeclass to the outside. If we do find a way, make sure
--- to remove all the 'Hashable' instances on the primitive types!
-class (Private a, Hashable a) => Primitive a
-
-instance Primitive Bool
-
-instance Primitive Integer
-
-instance (1 <= n) => Primitive (BitVec n)
-
-instance (Primitive k, Primitive v) => Primitive (Array k v)
-
--- type family Primitive a :: Constraint where
---   Primitive Bool = ()
---   Primitive Integer = ()
---   Primitive (BitVec n) = 1 <= n
---   Primitive (Array k v) = (Primitive k, Primitive v)
---   Primitive x = TypeError ('Text "'" :<>: ShowType x :<>: 'Text "' is not a primitive type")
 
 -- TODO: For now, we'll just have the platform sized as 64-bit. Not sure how
 -- we would handle this correctly? Maybe with a pragma?
@@ -456,13 +436,19 @@ infixl 6 %-
   let _ = Dict @(r <= l)
   coerce $ (Prelude.-) @Integer
 
+cmpNat :: forall l r. SNat l -> SNat r -> OrderingI l r
+cmpNat SNat SNat = case Prelude.compare (natVal @l) (natVal @r) of
+  LT | Dict <- unsafeEq @(Compare l r) @'LT -> LTI @l @r
+  EQ | Dict <- unsafeEq @l @r -> EQI @l
+  GT | Dict <- unsafeEq @(Compare l r) @'GT -> GTI @l @r
+
 data SomeNat where
   SomeNat :: KnownNat n => SomeNat
 
-someNatVal :: Integer -> Prelude.Maybe SomeNat
+someNatVal :: Integer -> Maybe SomeNat
 someNatVal i = case ilt i 0 of
-  True -> Prelude.Nothing
-  False -> Prelude.Just case UnsafeSNat i of
+  True -> Nothing
+  False -> Just case UnsafeSNat i of
     nat@(UnsafeSNat @n _) -> withDict @(KnownNat n) nat $ SomeNat @n
 
 -- | Helper function to get the Haskell 'KnownNat' constraint.
@@ -586,7 +572,6 @@ raise = noinline raise
 -- | Pantomime primitive Boolean.
 newtype Bool where
   Bool :: Prelude.Bool -> Bool
-  deriving Hashable
 
 instance Prelude.Eq Bool where
   (==) = convert .: iff
@@ -650,7 +635,6 @@ convert value = ite value Prelude.True Prelude.False
 -- | Pantomime primitive integer.
 newtype Integer where
   Integer :: Prelude.Integer -> Integer
-  deriving Hashable
 
 instance Prelude.Eq Integer where
   (==) = convert .: ieq
@@ -724,11 +708,6 @@ instance Prelude.Eq (BitVec n) where
 instance Prelude.Ord (BitVec n) where
   (<=) = convert .: bvule
   (<) = convert .: bvult
-
--- FIXME: This instance is super wrong. It uses the internal representation
--- without any opaque stuff.
-instance Hashable (BitVec n) where
-  hashWithSalt i (BitVec x) = hashWithSalt i x
 
 instance (KnownNat n, 1 <= n) => Prelude.Num (BitVec n) where
   (+) = bvadd
@@ -815,19 +794,14 @@ signedCmp f lhs rhs = do
 bv2i :: forall n. BitVec n -> Integer
 bv2i (BitVec x) = Integer $ Prelude.toInteger x
 
-{-# OPAQUE bvsize #-}
-bvsize :: forall n. BitVec n -> Integer
-bvsize BitVec {} = Integer $ Prelude.natVal @n Proxy
+{-# OPAQUE bvsize' #-}
+bvsize' :: forall n. BitVec n -> Integer
+bvsize' BitVec {} = Integer $ Prelude.natVal @n Proxy
 
--- TODO: I guess 'bvnat' should just be called 'bvsize' and then 'bvsize' should
--- get an uglier name.
--- TODO: Somehow it makes more sense to me to return 'SNat n'. I think for this
--- one btw, we might be able to just construct it within Pantomime. I.e. then we
--- don't need the ugly 'bvsize' trick.
-bvnat :: forall n. BitVec n -> Dict (KnownNat n)
-bvnat bv = do
-  let nat = UnsafeSNat @n $ bvsize bv
-  withDict @(KnownNat n) nat Dict
+-- TODO: I think we can actually just implement this one directly in Pantomime.
+-- I guess it is perhaps prettier than exposing the current bvsize'.
+bvsize :: forall n. BitVec n -> SNat n
+bvsize bv = UnsafeSNat @n $ bvsize' bv
 
 {-# OPAQUE bvnot #-}
 bvnot :: forall n. BitVec n -> BitVec n
@@ -950,13 +924,11 @@ bvresize
   => (l <= r => BitVec l -> BitVec r)
   -> BitVec l
   -> BitVec r
-bvresize f x = do
-  let l = bvsize x
-  let r = natVal @r
-  case Prelude.compare l r of
-    LT | Dict <- unsafeAxiom @(l <= r) -> f x
-    EQ | Dict <- unsafeEq @l @r -> x
-    GT | Dict <- unsafeAxiom @(r <= l) -> bvselect @0 @r x
+bvresize f x = case cmpNat (bvsize x) (SNat @r) of
+  LTI -> f x
+  EQI -> x
+  -- SAFETY: We have l > r, so r <= l also holds!
+  GTI | Dict <- unsafeAxiom @(r <= l) -> bvselect @0 @r x
 
 bvzresize
   :: forall l r
@@ -974,43 +946,131 @@ bvsresize
   -> BitVec r
 bvsresize = bvresize bvsext
 
-newtype Array (k :: Type) (v :: Type) where
-  Array :: Grisette.Array k v -> Array k v
-  -- FIXME: The derive on these is super wrong. Any usage of it will break...
-  -- Check out 'Primitive' in order to see why.
-  deriving (Prelude.Eq, Hashable)
+-- | The type of supported primitives, which allows you to pattern match on the
+-- type of such any primitive value.
+--
+-- I.e. this is like 'TypeRep' but closed for symbolic primitives.
+data PrimitiveType a where
+  BoolType
+    :: PrimitiveType Bool
+  IntegerType
+    :: PrimitiveType Integer
+  BitVecType
+    :: (KnownNat n, 1 <= n)
+    => PrimitiveType (BitVec n)
+  ArrayType
+    :: PrimitiveType k
+    -> PrimitiveType v
+    -> PrimitiveType (Array k v)
 
--- TODO: I think we kind of need this? I'm not sure...
+instance HasDict (Primitive a) (PrimitiveType a) where
+  evidence = \case
+    BoolType -> Dict
+    IntegerType -> Dict
+    BitVecType -> Dict
+    ArrayType keyTy valTy -> runIdentity do
+      Dict <- pure $ evidence keyTy
+      Dict <- pure $ evidence valTy
+      pure Dict
+
+-- | Primitive typeclass, which allows you to reify the type of a primitive.
+--
+-- I.e. this is like 'Typeable' but closed for symbolic primitives.
+class Primitive a where
+  primitiveType :: PrimitiveType a
+
+instance Primitive Bool where
+  primitiveType = BoolType
+
+instance Primitive Integer where
+  primitiveType = IntegerType
+
+instance (KnownNat n, 1 <= n) => Primitive (BitVec n) where
+  primitiveType = BitVecType
+
+instance (Primitive k, Primitive v) => Primitive (Array k v) where
+  primitiveType = ArrayType primitiveType primitiveType
+
+-- | Type family that captures the inner value that is wrapper in the
+-- primitives types.
+type family Inner a where
+  Inner Bool = Prelude.Bool
+  Inner Integer = Prelude.Integer
+  Inner (BitVec n) = Util.BitVec n
+  Inner (Array k v) = Grisette.Array (Inner k) (Inner v)
+
+-- | Get a 'Hashable' constraint on the inner type of primitives.
+evidenceI :: forall a. Primitive a => Dict (Hashable (Inner a))
+evidenceI = case primitiveType @a of
+  BoolType -> Dict
+  IntegerType -> Dict
+  BitVecType -> Dict
+  ArrayType @k @v k v -> runIdentity do
+    Dict <- pure $ evidence k
+    Dict <- pure $ evidenceI @k
+    Dict <- pure $ evidence v
+    Dict <- pure $ evidenceI @v
+    pure Dict
+
+-- | Unwrap the inner value of a primitive.
+unwrap :: forall a. Primitive a => a -> Inner a
+unwrap value = case primitiveType @a of
+  BoolType -> let Bool inner = value in inner
+  IntegerType -> let Integer inner = value in inner
+  BitVecType -> let BitVec inner = value in inner
+  ArrayType _ _ -> let Array inner = value in inner
+
+-- | Wrap an inner value into a primitive.
+wrap :: forall a. Primitive a => Inner a -> a
+wrap inner = case primitiveType @a of
+  BoolType -> Bool inner
+  IntegerType -> Integer inner
+  BitVecType @n -> withKnownNat @n $ BitVec inner
+  ArrayType kTy vTy -> runIdentity do
+    Dict <- pure $ evidence kTy
+    Dict <- pure $ evidence vTy
+    pure $ Array inner
+
+-- | Symbolic array primitive.
+data Array (k :: Type) (v :: Type) where
+  Array
+    :: (Primitive k, Primitive v)
+    => Grisette.Array (Inner k) (Inner v)
+    -> Array k v
+
+-- We need nominal roles for correctness of the evaluator. Interestingly, we
+-- actually cannot have representational roles here due to the underlying
+-- implementation: they are already forced to be nominal. In case anything
+-- changes there, we just keep these roles explicit here!
 type role Array nominal nominal
 
--- TODO: Maybe it makes more sense to let 'Primitive' be carried inside of
--- 'Array'. I think this reflects a bit better the array primitive under the
--- hood?
+instance Prelude.Eq (Array k v) where
+  (==) = convert .: aeq
+
 {-# OPAQUE aconst #-}
 aconst :: forall k v. Primitive k => Primitive v => v -> Array k v
-aconst = coerce $ Grisette.const @k @v
+aconst value = do
+  let inner = unwrap value
+  Array @k @v $ Grisette.const inner
 
 {-# OPAQUE aselect #-}
-aselect :: forall k v. Primitive k => Primitive v => Array k v -> k -> v
-aselect = coerce $ Grisette.select @k @v
+aselect :: forall k v. Array k v -> k -> v
+aselect (Array array) key = runIdentity do
+  Dict <- pure $ evidenceI @k
+  let value = Grisette.select array $ unwrap key
+  pure $ wrap value
 
 {-# OPAQUE astore #-}
-astore
-  :: forall k v
-   . Primitive k
-  => Primitive v
-  => Array k v
-  -> k
-  -> v
-  -> Array k v
-astore = coerce $ Grisette.store @k @v
+astore :: forall k v. Array k v -> k -> v -> Array k v
+astore (Array array) key value = runIdentity do
+  Dict <- pure $ evidenceI @k
+  let array' = Grisette.store array (unwrap key) (unwrap value)
+  pure $ Array array'
 
 {-# OPAQUE aeq #-}
-aeq
-  :: forall k v
-   . Primitive k
-  => Primitive v
-  => Array k v
-  -> Array k v
-  -> Bool
-aeq = coerce $ (Prelude.==) @(Grisette.Array k v)
+aeq :: forall k v. Array k v -> Array k v -> Bool
+aeq (Array lhs) (Array rhs) = runIdentity do
+  Dict <- pure $ evidenceI @k
+  Dict <- pure $ evidenceI @v
+  let eq = lhs Prelude.== rhs
+  pure $ boolean eq
