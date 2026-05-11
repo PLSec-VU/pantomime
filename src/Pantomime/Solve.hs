@@ -99,7 +99,7 @@ runBuiltInTypes eff = do
   runContextReader fam . runContextReader ids . runContextReader tys $ eff
 
 type SymboliseEff =
- '[ Context Reader BuiltInTyCon
+  [ Context Reader BuiltInTyCon
   , Context Reader InterfaceThings
   , Context Reader FamInstEnvs
   , Error ()
@@ -214,7 +214,7 @@ checkValid axioms expr = runBuiltInTypes do
   -- don't think in practise we care about this one.
   --
   -- In fact, if the user doesn't force it, it is indeed not the case that these
-  -- functions are equivalent (even though I guess for this input, they are).
+  -- functions are equivalent.
   case solution of
     Satisfiable model -> do
       -- TODO: I should probably check whether the arguments are recursive

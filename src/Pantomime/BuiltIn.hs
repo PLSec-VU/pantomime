@@ -1,5 +1,4 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE PolyKinds #-}
@@ -56,6 +55,14 @@ module Pantomime.BuiltIn
   , fromWord64#
   , toInteger
   , fromInteger
+
+  -- TODO: I guess we don't really want to expose these to users, as they are
+  -- more of an implementation detail? Perhaps we could have a different module
+  -- (of which we don't expect users to import it) that exports these!
+  -- | Built-in comparison function of Haskell primitives.
+  --
+  -- These are used to implement case-splits on primitives and utilise 'fromX#'
+  -- conversions in their implementation.
   , eqInt#
   , eqInt8#
   , eqInt16#
@@ -346,45 +353,35 @@ toInteger = coerce
 fromInteger :: Prelude.Integer -> Integer
 fromInteger = coerce
 
-{-# OPAQUE eqInt# #-}
 eqInt# :: Int# -> Int# -> Bool
-eqInt# = noinline eqInt#
+eqInt# lhs rhs = bveq (fromInt# lhs) (fromInt# rhs)
 
-{-# OPAQUE eqInt8# #-}
 eqInt8# :: Int8# -> Int8# -> Bool
-eqInt8# = noinline eqInt8#
+eqInt8# lhs rhs = bveq (fromInt8# lhs) (fromInt8# rhs)
 
-{-# OPAQUE eqInt16# #-}
 eqInt16# :: Int16# -> Int16# -> Bool
-eqInt16# = noinline eqInt16#
+eqInt16# lhs rhs = bveq (fromInt16# lhs) (fromInt16# rhs)
 
-{-# OPAQUE eqInt32# #-}
 eqInt32# :: Int32# -> Int32# -> Bool
-eqInt32# = noinline eqInt32#
+eqInt32# lhs rhs = bveq (fromInt32# lhs) (fromInt32# rhs)
 
-{-# OPAQUE eqInt64# #-}
 eqInt64# :: Int64# -> Int64# -> Bool
-eqInt64# = noinline eqInt64#
+eqInt64# lhs rhs = bveq (fromInt64# lhs) (fromInt64# rhs)
 
-{-# OPAQUE eqWord# #-}
 eqWord# :: Word# -> Word# -> Bool
-eqWord# = noinline eqWord#
+eqWord# lhs rhs = bveq (fromWord# lhs) (fromWord# rhs)
 
-{-# OPAQUE eqWord8# #-}
 eqWord8# :: Word8# -> Word8# -> Bool
-eqWord8# = noinline eqWord8#
+eqWord8# lhs rhs = bveq (fromWord8# lhs) (fromWord8# rhs)
 
-{-# OPAQUE eqWord16# #-}
 eqWord16# :: Word16# -> Word16# -> Bool
-eqWord16# = noinline eqWord16#
+eqWord16# lhs rhs = bveq (fromWord16# lhs) (fromWord16# rhs)
 
-{-# OPAQUE eqWord32# #-}
 eqWord32# :: Word32# -> Word32# -> Bool
-eqWord32# = noinline eqWord32#
+eqWord32# lhs rhs = bveq (fromWord32# lhs) (fromWord32# rhs)
 
-{-# OPAQUE eqWord64# #-}
 eqWord64# :: Word64# -> Word64# -> Bool
-eqWord64# = noinline eqWord64#
+eqWord64# lhs rhs = bveq (fromWord64# lhs) (fromWord64# rhs)
 
 -- | 'KnownNat' constraint using Pantomime primitive 'Integer'.
 class KnownNat (n :: Nat) where
