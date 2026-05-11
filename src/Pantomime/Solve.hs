@@ -25,10 +25,11 @@ import GHC.Plugins
   , Name
   , CoreExpr
   , Bind (..)
+  , Var
   , exprType
   , varType
   , vcat
-  , emptyInScopeSet, Var
+  , emptyInScopeSet
   )
 import GHC.Types.Id.Make (nospecId)
 import GHC.Utils.Outputable
@@ -66,7 +67,7 @@ import Pantomime.Axiom (PluginAxiomsR (..))
 import Pantomime.PrimOps (PrimOp)
 import Pantomime.Defer (defer, withDeferrable)
 import Pantomime.Binding
-  ( InterfaceThings
+  ( InterfaceThings (..)
   , getInterfaceThings
   , getBuiltinTyCon
   , bindingsGHC
@@ -131,11 +132,13 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
     rhs' <- defer rhs
     pure (bndr, rhs')
 
-  -- Create the final substitution.
+  -- Add the primitive operations to the substitution.
   subst0 <- extendIdSubstMany mkEmptySubst prim'
 
+  -- Add the term bindings to the substitution.
   let termAxiomsR' = uncurry NonRec <$> termAxiomsR
   subst1 <- symboliseBindMany subst0 termAxiomsR'
+
   -- TODO: I think there is an ordering problem here between user
   -- mappings and program definitions. I guess user mappings should
   -- go first? The problem is that we don't want local definitions to

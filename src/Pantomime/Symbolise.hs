@@ -1,4 +1,5 @@
 {-# LANGUAGE RecursiveDo #-}
+
 module Pantomime.Symbolise
   ( symbolise
   , symboliseBind
@@ -319,8 +320,8 @@ symboliseEqLit subst lhs rhs = do
     _ -> throwE ()
 
   -- Lookup the equality function.
-  eq <- failWithE () $ lookupIdSubst subst eqId
-  eq' <- hoistEff eq
+  eq <- failWithE () $ GHC.maybeUnfoldingTemplate (GHC.realIdUnfolding eqId)
+  eq' <- symbolise subst eq
 
   lit <- deferE $ symboliseLit subst rhs
 
