@@ -133,7 +133,8 @@ module Pantomime.BuiltIn
 
   -- | Bit-vector operations.
   , BitVec
-  , bv2i
+  , bvu2i
+  , bvs2i
   , bvsize'
   , bvsize
   , bvnot
@@ -216,7 +217,13 @@ import GHC.Word
   , Word32 (..)
   , Word64 (..)
   )
-import Grisette (SymShift(..), SizedBV (..), IntN, SignConversion (..))
+import Grisette
+  ( SymShift(..)
+  , SizedBV (..)
+  , SignConversion (..)
+  , BitCast (..)
+  , IntN
+  )
 import Grisette.Internal.SymPrim.Array qualified as Grisette
 import Pantomime.Util (unsafeEq)
 import Pantomime.Util qualified as Util (BitVec, (%+))
@@ -787,9 +794,13 @@ signedCmp f lhs rhs = do
   let rhs' = toSigned rhs
   f lhs' rhs'
 
-{-# OPAQUE bv2i #-}
-bv2i :: forall n. BitVec n -> Integer
-bv2i (BitVec x) = Integer $ Prelude.toInteger x
+{-# OPAQUE bvu2i #-}
+bvu2i :: forall n. BitVec n -> Integer
+bvu2i (BitVec x) = Integer $ Prelude.toInteger x
+
+{-# OPAQUE bvs2i #-}
+bvs2i :: forall n. BitVec n -> Integer
+bvs2i (BitVec x) = Integer $ Prelude.toInteger (bitCast @_ @(IntN n) x)
 
 {-# OPAQUE bvsize' #-}
 bvsize' :: forall n. BitVec n -> Integer

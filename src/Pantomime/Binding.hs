@@ -139,7 +139,8 @@ bindingsTH =
 
   -- Bitvector bindings.
   ----------------------
-  , ('Builtin.bv2i, PrimOps.bv2i)
+  , ('Builtin.bvu2i, PrimOps.bvu2i)
+  , ('Builtin.bvs2i, PrimOps.bvs2i)
   , ('Builtin.bvsize', PrimOps.bvsize')
   , ('Builtin.bvnot, PrimOps.bvnot)
   , ('Builtin.bvneg, PrimOps.bvneg)

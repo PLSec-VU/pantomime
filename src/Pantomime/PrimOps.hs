@@ -33,7 +33,8 @@ module Pantomime.PrimOps
   , ilt
 
   -- | Bitvector primitive operations.
-  , bv2i
+  , bvu2i
+  , bvs2i
   , bvsize'
   , bvnot
   , bvneg
@@ -94,6 +95,7 @@ import Grisette
   , SymFromIntegral (..)
   , LogicalOp (symNot, symImplies, (.&&), (.||))
   , SimpleMergeable (..)
+  , BitCast (..)
   )
 import Grisette qualified (LogicalOp (true, false))
 import Grisette.Internal.SymPrim.SymArray qualified as Array
@@ -385,10 +387,15 @@ type BitVecIntegerOp
   :.  BitVecTy (TyVar 0 NaturalTy)
   :-> IntegerTy
 
-bv2i :: PrimOp es
-bv2i = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
+bvu2i :: PrimOp es
+bvu2i = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
   SomeBitVec bv' <- bv
   pure $ symFromIntegral bv'
+
+bvs2i :: PrimOp es
+bvs2i = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
+  SomeBitVec @n bv' <- bv
+  pure $ symFromIntegral (bitCast @_ @(SymIntN n) bv')
 
 bvsize' :: PrimOp es
 bvsize' = embed2 @BitVecIntegerOp \_n bv -> hoistEff do
