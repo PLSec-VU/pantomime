@@ -13,6 +13,7 @@ module Pantomime.Util
   , foldM_'
   , foldrM'
   , foldlBy
+  , findWith
 
   , failWith
   , withCallStack
@@ -138,7 +139,7 @@ foldM_' acc xs f = foldM_ f acc xs
 foldrM' :: (Foldable t, Monad m) => b -> t a -> (a -> b -> m b) -> m b
 foldrM' acc xs f = foldrM f acc xs
 
--- | The usual 'foldl'', but with its argumetns switched.
+-- | The usual 'foldl'', but with its arguments switched.
 --
 -- The use for this is that one may use this to write an expression in the
 -- following shape:
@@ -147,6 +148,13 @@ foldrM' acc xs f = foldrM f acc xs
 -- >   ...
 foldlBy :: Foldable t => b -> t a -> (b -> a -> b) -> b
 foldlBy acc xs f = foldl' f acc xs
+
+-- | Return the first element for which the given function returns 'Just'.
+-- Returns 'Nothing' if no such element exists.
+findWith :: Foldable f => f a -> (a -> Maybe b) -> Maybe b
+findWith m f = foldlBy Nothing m \cases
+  Nothing current -> f current
+  found@(Just _) _ -> found
 
 -- | Annotate why there was no result.
 failWith :: HasCallStack => Error e :> es => e -> Maybe a -> Eff es a

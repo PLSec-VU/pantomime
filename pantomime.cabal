@@ -27,6 +27,7 @@ library
   exposed-modules:
       Control.Error
       Effectful.Break
+      Effectful.Cache
       Effectful.Context
       Effectful.GHC.Annotations
       Effectful.GHC.CoreE
