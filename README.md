@@ -4,21 +4,17 @@
 
 ```haskell
 {-# OPTIONS_GHC "-fplugin Pantomime" #-}
-{-# LANGUAGE DataKinds #-}
 
 module Example.Module (example) where
 
-import Data.Bits (Bits (..))
 import Pantomime (Theory (..))
-import qualified Pantomime.BuiltIn as Pantomime
 
 {-# ANN example (Theory mempty) #-}
-example :: Pantomime.BitVec 32 -> Pantomime.BitVec 32 -> Pantomime.Bool
-example x y = Pantomime.boolean $
-  complement x .&. complement y == complement $ x .|. y
+example :: Bool -> Bool -> Pantomime.Bool
+example x y = Pantomime.boolean $ not x && not y == not (x || y)
 ```
 
-In this case, `Pantomime` shows validity of the statement, quantified over all pairs of bitvectors of size 32.
+In this case, `Pantomime` shows validity of the statement, quantified over all Boolean inputs.
 
 **NOTE**: The value supplied to `Theory` is extremely important in most real-world scenarios. An explanation can be found in section [Embeddings](#embeddings).
 
