@@ -14,7 +14,7 @@ In the future, we aim to make it configurable which solver is used.
 
 ## Stack or Cabal build
 
-This guide explains how to use either [Stack](https://docs.haskellstack.org/en/stable/) or [Cabal](https://www.haskell.org/cabal/) to build `Pantomime`. If you don't already have either of these installed yet, we recommend managing them through [`GHCup`](https://www.haskell.org/ghcup/). Throughout the guide, we will also have collapsed fields like the ones below that help you with commands for your respective build tool of choise:
+This guide explains how to use either [`Stack`](https://docs.haskellstack.org/en/stable/) or [`Cabal`](https://www.haskell.org/cabal/) to build `Pantomime`. If you don't already have either of these installed yet, we recommend managing them through [`GHCup`](https://www.haskell.org/ghcup/). Throughout the guide, we will also have collapsed fields like the ones below that help you with commands for your respective build tool of choise:
 
 <details>
 <summary><code>Stack</code> setup</summary>
