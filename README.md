@@ -24,7 +24,7 @@ In this case, `Pantomime` shows validity of the statement, quantified over all p
 
 ## Getting Started
 
-See the [installation instructions](./INSTALL.md) on how to install `Pantomime` and its dependencies.
+See the [installation guide](./INSTALL.md) on how to install `Pantomime` and its dependencies.
 
 ## Documentation
 
@@ -77,10 +77,7 @@ axioms = PluginAxioms
 example :: ... -> Pantomime.Bool
 ```
 
-For a reasonable mapping of `base`, check out
-[`pantomime-base`](https://github.com/PLSec-VU/pantomime-base). We also provide
-a mapping for `CLaSH` types and functions in
-[`pantomime-clash`](https://github.com/PLSec-VU/pantomime-clash).
+For a reasonable mapping of `base`, check out [`pantomime-base`](https://github.com/PLSec-VU/pantomime-base). We also provide a mapping for `CLaSH` types and functions in [`pantomime-clash`](https://github.com/PLSec-VU/pantomime-clash).
 
 ```haskell
 {-# ANN example (Theory Pantomime.Base.axioms) #-}
