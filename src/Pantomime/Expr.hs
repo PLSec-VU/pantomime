@@ -9,6 +9,7 @@
 module Pantomime.Expr
   ( Runtime
   , Variant (..)
+  , Term (..)
   , Expr
   , Arg
   , Literal (..)
@@ -35,6 +36,7 @@ module Pantomime.Expr
   , mkApps
   , mkCastMCo
   , mkCast
+  , mkIte
 
   , mkUnreachable
   , mkUB
@@ -135,6 +137,7 @@ import Grisette
   , pattern Single
   , pattern If
   )
+import Grisette qualified (pattern Con)
 -- TODO: Change import once we fully integrate SymArray into grisette! Right
 -- now, we still need to touch these internal things...
 import Grisette.Internal.SymPrim.SymArray (SymArray)
@@ -236,12 +239,10 @@ type Runtime es = ExceptT (Variant es) Union
 
 type Expr es = Runtime es (Term es)
 
-type Arg es = Expr es
-
 -- | An effectful computation that produces an expression.
 --
 -- The expectation is that the result is shared via the 'Cache' effect.
-type Thunk es = Eff es (Expr es)
+type Arg es = Eff es (Expr es)
 
 -- TODO: I feel like a comment on this one is due: this is pretty much the main
 -- data structure of the evaluator (together with Eval)!
@@ -256,7 +257,7 @@ data Term es where
     -- ^ Universal type applications.
     -> [Type]
     -- ^ Existential type applications.
-    -> [Thunk es]
+    -> [Arg es]
     -- ^ Term applications; these are lazily evaluated.
     -> Term es
   Type
@@ -268,7 +269,7 @@ data Term es where
   Lam
     :: Type
     -- ^ Type of this term.
-    -> (Thunk es -> Eff es (Expr es))
+    -> (Arg es -> Eff es (Expr es))
     -- ^ Closure
     -> Term es
   Cast
@@ -525,17 +526,20 @@ mkCoercion = pure . Coercion
 
 mkLam
   :: Type
-  -> (Thunk es -> Eff es (Expr es))
+  -> (Arg es -> Eff es (Expr es))
   -> Expr es
 mkLam = pure .: Lam
 
+-- TODO: I think it makes sense to use Cache only on 'mkApp'? I'm wondering what
+-- is the best boundary. Somehow my guess would be only when you pass it to
+-- a closure? Not sure, but this requires some consideration!
 mkApp
   :: HasCallStack
   => Cache :> es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Expr es
-  -> Thunk es
+  -> Arg es
   -> Eff es (Expr es)
 mkApp fun arg = join <$> for fun \case
   Cast body co -> do
@@ -562,8 +566,8 @@ pushCoArg
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => CoercionR
-  -> Thunk es
-  -> Eff es (Thunk es, MCoercionR)
+  -> Arg es
+  -> Eff es (Arg es, MCoercionR)
 pushCoArg co arg = if
   | let tyL = coercionLKind co
   , isForAllTy_ty tyL -> do
@@ -593,7 +597,7 @@ mkApps
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Expr es
-  -> [Thunk es]
+  -> [Arg es]
   -> Eff es (Expr es)
 mkApps = foldM mkApp
 
@@ -659,6 +663,24 @@ mkCast expr co = runBreak do
 
     term -> pure $ Cast (pure term) co
 
+-- | Make a branch between two effectful expressions.
+--
+-- NOTE: It is important to not force these values up front: this would hinder
+-- lazy evaluation in cases where we can exclude the evaluation of one of its
+-- branches.
+-- TODO: Actually, we might be able to conclude unreachability due to path
+-- conditions. We might want to work on this! Probably, the ite would be over
+-- type `Runtime es (Eff es (Expr es))`. Then we would first prune and only then
+-- merge whenever we force the value (i.e. as scrutinee of case expressions).
+-- First step is probably to disentangle Eff from Runtime (and thus remove Eval
+-- once and for all). Afterwards, we can try to see if this would work!
+mkIte :: SymBool -> Eff es (Expr es) -> Eff es (Expr es) -> Eff es (Expr es)
+mkIte scrut true false = case scrut of
+  Grisette.Con scrut'
+    | scrut' -> true
+    | otherwise -> false
+  _ -> liftA2 (mrgIte scrut) true false
+
 mkVariant :: Variant es -> Expr es
 mkVariant = ExceptT . pure . Left
 
@@ -682,7 +704,7 @@ forceTyCo
   :: forall es
    . HasCallStack
   => Error () :> es
-  => Thunk es
+  => Arg es
   -> Eff es (Either Type Coercion)
 forceTyCo arg = do
   arg' <- arg
@@ -699,7 +721,7 @@ forceTyCo arg = do
 forceTy
   :: HasCallStack
   => Error () :> es
-  => Thunk es
+  => Arg es
   -> Eff es Type
 forceTy = forceTyCo >=> either pure (const $ throwError ())
 
@@ -707,7 +729,7 @@ forceTy = forceTyCo >=> either pure (const $ throwError ())
 forceCo
   :: HasCallStack
   => Error () :> es
-  => Thunk es
+  => Arg es
   -> Eff es Coercion
 forceCo = forceTyCo >=> either (const $ throwError ()) pure
 
@@ -878,10 +900,10 @@ pushCoDataCon
   => DataCon
   -> [Type]
   -- ^ Existential type arguments.
-  -> [Thunk es]
+  -> [Arg es]
   -- ^ Term arguments.
   -> CoercionR
-  -> Eff es ([Type], [Eff es (Arg es)])
+  -> Eff es ([Type], [Arg es])
 pushCoDataCon dc exis args co = do
   -- Check whether the outer type is a TyConAppCo.
   let tyR = coercionRKind co

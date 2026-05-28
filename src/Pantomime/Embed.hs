@@ -19,7 +19,7 @@ import Data.Data (Proxy (..))
 import Data.Void (Void, absurd)
 
 import Effectful
-import Effectful.Error.Static (Error, HasCallStack)
+import Effectful.Error.Static (Error, HasCallStack, throwError)
 import Effectful.Context
 
 import GHC.Builtin.Types.Literals (typeNatAddTyCon)
@@ -73,13 +73,11 @@ import GHC.TypeLits
 import Grisette (SymInteger, SymBool, ToCon (..))
 import Grisette.Internal.SymPrim.SymArray (SymArray)
 
-import Pantomime.Defer (Deferrable)
 import Pantomime.Expr
-  ( Expr (..)
+  ( Expr
+  , Term (..)
   , Literal (..)
-  , Eval
   , Runtime
-  , mkLit
   , mkCon
   , mkDataCon
   , mkBool
@@ -92,14 +90,9 @@ import Pantomime.Expr
   , mkType
   , mkCoercion
   , mkCast
-  , collectArgs
+  -- , collectArgs
   , forceTy
   , forceCo
-  , liftEff
-  , throwE
-  , failWithE
-  , hoistEff
-  , deferE
   )
 import Pantomime.Literal
   ( BuiltInTyCon (..)
@@ -107,7 +100,10 @@ import Pantomime.Literal
   , SomeLiteralType
   , projectLitTy
   )
-import Pantomime.Util (SomeBitVec (..), SymBitVec)
+import Pantomime.Util (SomeBitVec (..), SymBitVec, failWith)
+import Effectful.Cache
+import Data.Traversable (for)
+import Control.Monad (join)
 
 -- TODO: We could think about making this slightly more structured? Maybe
 -- introduce a language similar to a GHC Type? Really, the only reason we are
@@ -221,30 +217,30 @@ instance Reflect Lifted where
 instance (Reflect k, Reflect a, Reflect b) => Reflect (UnsafeEqualityTy k a b) where
   reflect = SUnsafeEqualityTy reflect reflect reflect
 
-type family Repr a where
-  Repr BoolTy = SymBool
-  Repr IntegerTy = SymInteger
-  Repr (BitVecTy _) = SomeBitVec SymBitVec
-  Repr (ArrayTy _ _) = SomeArray
-  Repr (PrimitiveTy _) = (CoercionN, SomeLiteralType)
-  Repr (a :-> b) = Runtime (Repr a) -> Runtime (Repr b)
+type family Repr es a where
+  Repr _ BoolTy = SymBool
+  Repr _ IntegerTy = SymInteger
+  Repr _ (BitVecTy _) = SomeBitVec SymBitVec
+  Repr _ (ArrayTy _ _) = SomeArray
+  Repr _ (PrimitiveTy _) = (CoercionN, SomeLiteralType)
+  Repr es (a :-> b) = Eff es (Runtime es (Repr es a)) -> Eff es (Runtime es (Repr es b))
   -- Whilst we could technically extract the 'Repr' of the forall argument, it
   -- would be very cumbersome as it is a type and not a term. Instead, we just
   -- leave it abstractly as a 'Type' for now. Note that we don't need to wrap
   -- it in 'Runtime' as forcing a 'Type' should always be possible.
-  Repr (_ :. b) = Type -> Runtime (Repr b)
-  Repr ('TyVar _ _) = Expr
-  Repr NaturalTy = Void
-  Repr (Natural _) = Void
-  Repr (_ :+ _) = Void
-  Repr (_ :<= _) = ()
-  Repr (KnownNatTy _) = SomeNat
-  Repr (TYPE _) = Void
-  Repr RuntimeRepTy = Void
-  Repr (BoxedRep _) = Void
-  Repr LevityTy = Void
-  Repr Lifted = Void
-  Repr (UnsafeEqualityTy _ _ _) = CoercionN
+  Repr es (_ :. b) = Type -> Eff es (Runtime es (Repr es b))
+  Repr es ('TyVar _ _) = Term es
+  Repr _ NaturalTy = Void
+  Repr _ (Natural _) = Void
+  Repr _ (_ :+ _) = Void
+  Repr _ (_ :<= _) = ()
+  Repr _ (KnownNatTy _) = SomeNat
+  Repr _ (TYPE _) = Void
+  Repr _ RuntimeRepTy = Void
+  Repr _ (BoxedRep _) = Void
+  Repr _ LevityTy = Void
+  Repr _ Lifted = Void
+  Repr _ (UnsafeEqualityTy _ _ _) = CoercionN
 
 -- TODO: I guess having the whole type thing is a bit overkill. Really, we could
 -- just remove it and place the 'Repr' typeclass inside of the rhs of 'STy'
@@ -273,102 +269,100 @@ data STy a where
 embed
   :: forall a es
    . HasCallStack
-  => Deferrable es
+  => Cache :> es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Reflect a
   => Subst
-  -> Runtime (Repr a)
-  -> Eval es Expr
+  -> Runtime es (Repr es a)
+  -> Eff es (Expr es)
 embed subst = embed' subst $ reflect @a
 
 project
   :: forall a es
    . HasCallStack
-  => Deferrable es
+  => Cache :> es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Reflect a
   => Subst
-  -> Runtime Expr
-  -> Eval es (Repr a)
+  -> Expr es
+  -> Eff es (Runtime es (Repr es a))
 project subst = project' subst $ reflect @a
 
 -- TODO: 'embed'' and 'project'' are mutually recursive and grow the callstack.
 -- We should adjust it so this doesn't occur.
 embed'
   :: HasCallStack
-  => Deferrable es
+  => Cache :> es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Subst
   -> STy a
-  -> Runtime (Repr a)
-  -> Eval es Expr
+  -> Runtime es (Repr es a)
+  -> Eff es (Expr es)
 embed' subst sty repr = case sty of
-  SBoolTy -> hoistEff $ mkLit . mkBool <$> repr
-  SIntegerTy -> hoistEff $ mkLit . mkInteger <$> repr
+  SBoolTy -> pure $ repr >>= mkBool
+  SIntegerTy -> pure $ repr >>= mkInteger
   SBitVecTy _ -> do
-    SomeBitVec bv <- hoistEff repr
-    let lit = mkLit $ mkBitVec bv
-    Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
+    let expr = repr >>= \(SomeBitVec bv) -> mkBitVec bv
+    Reduction co _ <- normaliseSTy subst Nominal sty
     let co' = mkSymCo $ mkSubCo co
-    mkCast lit co'
+    mkCast expr co'
   SArrayTy _ _ -> do
-    SomeArray arr <- hoistEff repr
-    let lit = mkLit $ mkArray arr
-    Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
+    let expr = repr >>= \(SomeArray arr) -> mkArray arr
+    Reduction co _ <- normaliseSTy subst Nominal sty
     let co' = mkSymCo $ mkSubCo co
-    mkCast lit co'
-  SPrimitiveTy _ -> throwE ()
+    mkCast expr co'
+  SPrimitiveTy _ -> throwError ()
   SLambda aty rty -> do
     -- Gather the type for the lambda.
-    ty <- liftEff $ embedSTy subst sty
-    mkLam ty \arg -> do
-      arg' <- deferE $ project' subst aty arg
-      fun <- hoistEff repr
-      embed' subst rty $ fun arg'
+    ty <- embedSTy subst sty
+    pure $ mkLam ty \arg -> do
+      result <- join <$> for repr \fun -> do
+        let arg' = arg >>= project' subst aty
+        fun arg'
+      embed' subst rty result
   SForall @n aty rty -> do
     -- Gather the type for the lambda.
-    ty <- liftEff $ embedSTy subst sty
-    mkLam ty \arg -> do
+    ty <- embedSTy subst sty
+    pure $ mkLam ty \arg -> do
       -- Gather the function and argument.
-      fun <- hoistEff repr
-      arg' <- liftEff $ forceTy arg
+      arg' <- forceTy arg
+      result <- join <$> for repr \fun -> fun arg'
 
       -- Extend the substition.
-      tv <- liftEff $ mkTemplateTyVar' @n aty
+      tv <- mkTemplateTyVar' @n aty
       let subst' = extendTvSubst subst tv arg'
 
       -- Construct the final expression.
-      embed' subst' rty $ fun arg'
+      embed' subst' rty result
   STyVar _kind -> do
-    expr <- hoistEff repr
-    Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
+    Reduction co _ <- normaliseSTy subst Nominal sty
     let co' = mkSymCo $ mkSubCo co
-    mkCast expr co'
-  SNaturalTy -> hoistEff repr >>= absurd
-  SNatural -> hoistEff repr >>= absurd
-  SAddTy _ _ -> hoistEff repr >>= absurd
-  SLEqTy _ _ -> throwE ()
-  SKnownNatTy _n -> throwE ()
-  STYPE _ -> absurd <$> hoistEff repr
-  SRuntimeRepTy -> absurd <$> hoistEff repr
-  SBoxedRep _ -> absurd <$> hoistEff repr
-  SLevityTy -> absurd <$> hoistEff repr
-  SLifted -> absurd <$> hoistEff repr
+    mkCast repr co'
+  SNaturalTy -> pure $ repr >>= absurd
+  SNatural -> pure $ repr >>= absurd
+  SAddTy _ _ -> pure $ repr >>= absurd
+  SLEqTy _ _ -> throwError ()
+  SKnownNatTy _n -> throwError ()
+  STYPE _ -> pure $ repr >>= absurd
+  SRuntimeRepTy -> pure $ repr >>= absurd
+  SBoxedRep _ -> pure $ repr >>= absurd
+  SLevityTy -> pure $ repr >>= absurd
+  SLifted -> pure $ repr >>= absurd
   SUnsafeEqualityTy {} -> do
     -- Get the type of the expression.
-    ty <- liftEff $ embedSTy subst sty
-    (tc, args) <- failWithE () $ splitTyConApp_maybe ty
+    ty <- embedSTy subst sty
+    (tc, args) <- failWith () $ splitTyConApp_maybe ty
 
     -- Fetch the 'UnsafeRefl' DataCon.
     dc <- case tyConDataCons_maybe tc of
       Just [dc] -> pure dc
-      _ -> throwE ()
+      _ -> throwError ()
 
     -- Construct the spine.
     let spine = mkCon $ mkDataCon @64 dc
@@ -376,49 +370,47 @@ embed' subst sty repr = case sty of
     -- Fetch the type arguments directly.
     (kind, tyL, tyR) <- case args of
       [kind, tyL, tyR] -> pure (kind, tyL, tyR)
-      _ -> throwE ()
+      _ -> throwError ()
 
     -- Force the coercion.
-    co <- hoistEff repr
+    let co = repr >>= mkCoercion
 
     -- Construct the final expressionexpression
-    mkApps spine $ pure <$> [mkType kind, mkType tyL, mkType tyR, mkCoercion co]
+    mkApps spine $ pure <$> [mkType kind, mkType tyL, mkType tyR, co]
 
 project'
   :: HasCallStack
-  => Deferrable es
+  => Cache :> es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Subst
   -> STy a
-  -> Runtime Expr
-  -> Eval es (Repr a)
+  -> Expr es
+  -> Eff es (Runtime es (Repr es a))
 project' subst sty expr = case sty of
-  SBoolTy -> hoistEff expr >>= \case
+  SBoolTy -> for expr \case
     Lit (Bool b) -> pure b
-    _ -> throwE ()
-  SIntegerTy -> hoistEff expr >>= \case
+    _ -> throwError ()
+  SIntegerTy -> for expr \case
     Lit (Integer i) -> pure i
-    _ -> throwE ()
+    _ -> throwError ()
   SBitVecTy _n -> do
-    Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    inner <- hoistEff expr
-    expr' <- mkCast inner $ mkSubCo co
-    case expr' of
+    Reduction co _ <- normaliseSTy subst Nominal sty
+    expr' <- mkCast expr $ mkSubCo co
+    for expr' \case
       Lit (BitVec bv) -> pure $ SomeBitVec bv
-      _ -> throwE ()
+      _ -> throwError ()
   SArrayTy _ _ -> do
-    Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
-    inner <- hoistEff expr
-    expr' <- mkCast inner $ mkSubCo co
-    case expr' of
+    Reduction co _ <- normaliseSTy subst Nominal sty
+    expr' <- mkCast expr $ mkSubCo co
+    for expr' \case
       Lit (Array bv) -> pure $ SomeArray bv
-      _ -> throwE ()
+      _ -> throwError ()
   SPrimitiveTy pty -> do
-    _ <- hoistEff expr
-    pty' <- liftEff $ embedSTy subst pty
-    liftEff $ projectLitTy pty'
+    pty' <- embedSTy subst pty
+    result <- projectLitTy pty'
+    pure $ pure result
   SLambda aty rty -> deferE \arg -> do
     fun <- hoistEff expr
     arg' <- deferE $ embed' subst aty arg

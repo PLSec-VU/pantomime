@@ -52,10 +52,8 @@ import Grisette
   , ConRep (..)
   , SExpr (..)
   , SymOrd (..)
-  , SimpleMergeable (..)
   , simple
   , withMetadata
-  , mrgIf
   )
 
 import Data.Constraint (Dict (..))
@@ -63,7 +61,6 @@ import Data.Text.Encoding (decodeUtf8)
 import Data.Traversable (for)
 
 import Pantomime.Axiom (TypeAxiomsR)
-import Pantomime.Defer (Deferrable, defer)
 import Pantomime.Expr
 import Pantomime.Literal
   ( BuiltInTyCon
@@ -71,18 +68,19 @@ import Pantomime.Literal
   , HasDict (..)
   , projectLitTy
   )
-import Pantomime.Util (freshIds, freshTyVars, foldlBy, SymBitVec)
+import Pantomime.Util (freshIds, freshTyVars, foldlBy, SymBitVec, dbg)
 
 import Effectful
 import Effectful.Error.Static
 import Effectful.Context (Context, ContextMode (..), get)
+import Effectful.Cache (cache, Cache)
 
 data FreshInstEnv where
   FreshInstEnv ::
     { fieUser :: TyConEnv TyCon
     } -> FreshInstEnv
 
-data Variable where
+data Variable es where
   Variable ::
     { varName :: Name
     -- ^ Root name.
@@ -90,9 +88,9 @@ data Variable where
     -- ^ Accessor path, note that the first entry is accessed last.
     , varType :: Type
     -- ^ Type of this variable.
-    , varArgs :: [Arg]
+    , varArgs :: [Arg es]
     -- ^ Arguments which the variable depends on.
-    } -> Variable
+    } -> Variable es
 
 data Accessor where
   Accessor
@@ -119,7 +117,7 @@ data VarType where
 -- this is better for debugging. I'll have to profile to see if this is actually
 -- that bad. :)
 varToSymbol
-  :: Variable
+  :: Variable es
   -> VarType
   -> Symbol
 varToSymbol var dst = do
@@ -139,7 +137,7 @@ varToSymbol var dst = do
 
 symbolicVar
   :: Solvable (ConType s) s
-  => Variable
+  => Variable es
   -> VarType
   -> s
 symbolicVar var dst = case varArgs var of
@@ -158,19 +156,19 @@ symbolicVar var dst = case varArgs var of
 -- The freshness hinges on the freshness of the Var.
 freshExpr
   :: HasCallStack
-  => Deferrable es
+  => Cache :> es
   => Error () :> es
   => Context Reader FamInstEnvs :> es
   => Context Reader BuiltInTyCon :> es
   => TyConEnv TyCon
   -> Var
-  -> Eval es Expr
+  -> Eff es (Expr es)
 freshExpr axioms root = do
   -- TODO: Is it better to this lookup once? Whilst it is a reader-like effect,
   -- it is implemented through IO, so I'm a bit wary of running it in a hot loop
   -- like this one. The only way to know is just to profile I guess, but for now
   -- I'll put it outside.
-  fam <- liftEff $ get @FamInstEnvs
+  fam <- get @FamInstEnvs
   -- TODO: Add note on callstack and recursion
   -- TODO: I don't like the nesting this gives. Maybe we should move these
   -- definitions inwards somehow. Perhaps just a standalone helper definition?
@@ -193,7 +191,7 @@ freshExpr axioms root = do
         -- some sort of 'asum' like operation? Actually, NonDet from 'effectful'
         -- would be perfect! We should move the code that deals with
         -- reifyLitType adjecent to its call once we do this!
-        result <- liftEff . runErrorNoCallStack @() $ projectLitTy ty
+        result <- runErrorNoCallStack @() $ projectLitTy ty
 
         let isEqPred' ty' = do
               (tc, args) <- splitTyConApp_maybe ty'
@@ -269,7 +267,7 @@ freshExpr axioms root = do
 
               -- Construct the data constructor and its type arguments.
               let dc = pure $ mkCon (EnumCon tag tc)
-              mrgIf inBounds dc mkUnreachable
+              mkIte inBounds dc $ pure mkUnreachable
 
             -- Create cascading if for all possible cases. Note, we avoid
             -- Unreachable at the root, as it would introduce obsolute
@@ -285,8 +283,8 @@ freshExpr axioms root = do
                       -- clunkily put here for now. Maybe we can improve this...
                       | Just (Nominal, tyL, tyR) <- isEqPred' ty'
                       , SurelyApart <- tcUnifyTysFG alwaysBindFun [tyL] [tyR] -> do
-                        mkUnreachable
-                      | otherwise -> deferE $ go var
+                        pure $ pure mkUnreachable
+                      | otherwise -> cache $ go var
                         { varType = ty'
                         , varAccessor = Accessor dc idx : varAccessor var
                         }
@@ -298,10 +296,10 @@ freshExpr axioms root = do
               foldlBy (goDataCon dcN) dcs \acc dc -> do
                 let scrut = symbolicVar var $ Select dc
                 let expr = goDataCon dc
-                mrgIte scrut expr acc
+                mkIte scrut expr acc
 
             -- Unreachable otherwise.
-            | otherwise -> mkUnreachable
+            | otherwise -> pure mkUnreachable
 
           -- TODO: This is really not great, but it works for my purposes for
           -- now...
@@ -385,8 +383,8 @@ freshExpr axioms root = do
 
           -- TODO: Throw proper error!
           | otherwise -> do
-            dbgE ["could not create fresh value for", ppr ty]
-            throwE ()
+            dbg ["could not create fresh value for", ppr ty]
+            throwError ()
 
   go Variable
     { varName = GHC.varName root
@@ -397,14 +395,14 @@ freshExpr axioms root = do
 
 freshArgs
   :: HasCallStack
-  => Deferrable es
+  => Cache :> es
   => Error () :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => TypeAxiomsR
   -> Type
   -> InScopeSet
-  -> Eff es ([(Var, Arg)], InScopeSet)
+  -> Eff es ([(Var, Arg es)], InScopeSet)
 freshArgs axioms ty scope0 = do
   -- Gather the argument types.
   let (tyVars, funTy) = splitForAllTyVars ty
@@ -427,7 +425,7 @@ freshArgs axioms ty scope0 = do
   let args = tyArgs <> valArgs
 
   -- Create symbolic instance of the arguments.
-  symbolic <- for args $ defer . freshExpr axioms
+  symbolic <- for args $ cache . freshExpr axioms
 
   -- Zip the binders together with their symbolic instance.
   let binders = zip args symbolic
