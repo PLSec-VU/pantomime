@@ -96,3 +96,5 @@ tests:
     - ghc-paths
     - directory
     - silently
+    - ghc
+    - template-haskell
