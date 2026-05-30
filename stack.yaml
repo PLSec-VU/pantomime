@@ -4,7 +4,7 @@ packages:
 - .
 
 extra-deps:
-- git: git@github.com:RobinWebbers/grisette.git
+- github: RobinWebbers/grisette
   commit: ae4d837886efb2e7838f89271f343d6fa8130388
 - sbv-13.6
 - th-abstraction-0.7.1.0

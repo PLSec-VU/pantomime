@@ -5,16 +5,16 @@
 
 packages:
 - completed:
-    commit: ae4d837886efb2e7838f89271f343d6fa8130388
-    git: git@github.com:RobinWebbers/grisette.git
     name: grisette
     pantry-tree:
       sha256: ac978bcc6a35ee65677dbe41373c2799759457dedee85c6888a2cb7b362a2068
       size: 31883
+    sha256: 46de15734b258feee28ccc47c60a36a12fd3e975077615e8c31291b9d8ca79ef
+    size: 555460
+    url: https://github.com/RobinWebbers/grisette/archive/ae4d837886efb2e7838f89271f343d6fa8130388.tar.gz
     version: 0.13.0.1
   original:
-    commit: ae4d837886efb2e7838f89271f343d6fa8130388
-    git: git@github.com:RobinWebbers/grisette.git
+    url: https://github.com/RobinWebbers/grisette/archive/ae4d837886efb2e7838f89271f343d6fa8130388.tar.gz
 - completed:
     hackage: sbv-13.6@sha256:65099c81504a2e85a49cc94a4f8bacad12c423b9171cf2ef3b6686a6a71d99ec,27240
     pantry-tree:
