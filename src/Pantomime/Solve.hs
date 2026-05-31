@@ -16,6 +16,7 @@
 module Pantomime.Solve
   ( checkValid
   , Counterexample (..)
+  , counterexampleToPairs
   ) where
 
 import GHC.Core qualified as GHC
@@ -31,6 +32,9 @@ import GHC.Plugins
   , varType
   , vcat
   , emptyInScopeSet
+  , getOccString
+  , showSDocUnsafe
+  , isId
   )
 import GHC.Types.Id.Make (nospecId)
 import GHC.Utils.Outputable
@@ -152,7 +156,7 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
 
   -- Create fresh arguments.
   let ty = exprType expr
-  (args, _scope) <- freshArgs typeAxiomsR ty emptyInScopeSet
+  (args, _scope) <- freshArgs typeAxiomsR (collectValBinders expr) ty emptyInScopeSet
 
   result <- defer do
     fun <- symbolise subst expr
@@ -173,6 +177,13 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
 data Counterexample = Counterexample
   { counterexampleBindings :: [(Var, Arg)]
   }
+
+-- | Formats a counterexample into a list of name-value string pairs.
+counterexampleToPairs :: Counterexample -> [(String, String)]
+counterexampleToPairs (Counterexample bindings) = map formatBinding bindings
+  where
+    formatBinding (bndr, arg) =
+      (getOccString bndr, showSDocUnsafe (pprArg id arg))
 
 instance Outputable Counterexample where
   ppr (Counterexample bindings) = pprBindings bindings
@@ -249,3 +260,14 @@ checkValid axioms expr = runBuiltInTypes do
     -- FIXME: I don't think this is always true. e.g. not sure about some of the
     -- floating point stuff for example.
     Unknown -> throwIO $ ErrorCall "checks are in decidable fragment"
+
+collectValBinders :: CoreExpr -> [String]
+collectValBinders expr = go expr
+  where
+    go (GHC.Lam b e)
+      | isId b    = getOccString b : go e
+      | otherwise = go e
+    go (GHC.Tick _ e) = go e
+    go (GHC.Cast e _) = go e
+    go (GHC.Let _ e)  = go e
+    go _ = []

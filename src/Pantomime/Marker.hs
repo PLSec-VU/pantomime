@@ -4,15 +4,15 @@ module Pantomime.Marker
   , pantomimeJust
   ) where
 
-pantomimeMarker :: String -> Maybe String
+pantomimeMarker :: String -> Maybe [(String, String)]
 pantomimeMarker name = error $
   "The marker function 'pantomimeMarker' for '" ++ name ++ "' was not replaced by the GHC compiler plugin pass."
 {-# NOINLINE pantomimeMarker #-}
 
-pantomimeNothing :: Maybe String
+pantomimeNothing :: Maybe [(String, String)]
 pantomimeNothing = Nothing
 {-# NOINLINE pantomimeNothing #-}
 
-pantomimeJust :: String -> Maybe String
+pantomimeJust :: [(String, String)] -> Maybe [(String, String)]
 pantomimeJust x = Just x
 {-# NOINLINE pantomimeJust #-}

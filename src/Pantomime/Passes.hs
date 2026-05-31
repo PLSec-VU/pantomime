@@ -231,9 +231,14 @@ checkValidityAndEmbed guts = do
           let replacementExpr = Var nothingId
           pure (NonRec x e, Just (varNameStr, replacementExpr))
         Just counterexample -> do
-          let counterexampleStr = showSDocUnsafe (ppr counterexample)
-          strExpr <- liftCore $ mkStringExpr counterexampleStr
-          let replacementExpr = App (Var justId) strExpr
+          let counterexamplePairs = counterexampleToPairs counterexample
+          pairExprs <- for counterexamplePairs \(nameStr, valStr) -> do
+            nameExpr <- liftCore $ mkStringExpr nameStr
+            valExpr  <- liftCore $ mkStringExpr valStr
+            pure $ mkCoreTup [nameExpr, valExpr]
+          let pairTy = mkBoxedTupleTy [stringTy, stringTy]
+          let listExpr = mkListExpr pairTy pairExprs
+          let replacementExpr = App (Var justId) listExpr
           pure (NonRec x e, Just (varNameStr, replacementExpr))
     b -> pure (b, Nothing)
 

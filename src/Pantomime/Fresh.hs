@@ -402,21 +402,20 @@ freshArgs
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => TypeAxiomsR
+  -> [String]
   -> Type
   -> InScopeSet
   -> Eff es ([(Var, Arg)], InScopeSet)
-freshArgs axioms ty scope0 = do
+freshArgs axioms valNames ty scope0 = do
   -- Gather the argument types.
   let (tyVars, funTy) = splitForAllTyVars ty
   let (argTys, _resTy) = splitFunTys funTy
 
-  -- TODO: Isn't there some infinite sequence of names that could be used
-  -- instead of this?
-  -- Names for the arguments.
-  let names = repeat "arg"
+  -- Names for the arguments as FastStrings.
+  let names = map GHC.fsLit $ valNames ++ repeat "arg"
 
   -- Create fresh type arguments.
-  let kinds = zip names $ fmap tyVarKind tyVars
+  let kinds = zip (repeat (GHC.fsLit "arg")) $ fmap tyVarKind tyVars
   let (tyArgs, scope1) = freshTyVars kinds scope0
 
   -- Create fresh value arguments.
