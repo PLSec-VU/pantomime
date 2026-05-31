@@ -15,6 +15,7 @@
 
 module Pantomime.Solve
   ( checkValid
+  , Counterexample (..)
   ) where
 
 import GHC.Core qualified as GHC
@@ -37,13 +38,13 @@ import GHC.Utils.Outputable
   , IsLine (..)
   , SDoc
   , (<+>)
+  , empty
   )
 
 import Grisette (LogicalOp (..), EvalSym (..), Union, SymBool, onUnion)
 
 import Control.DeepSeq (NFData (..))
 
-import Data.Foldable (for_)
 import Data.Traversable (for)
 
 import Language.Haskell.TH qualified as TH
@@ -169,6 +170,21 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
         Right value -> value
   pure (eq, Lie $ pure args)
 
+data Counterexample = Counterexample
+  { counterexampleBindings :: [(Var, Arg)]
+  }
+
+instance Outputable Counterexample where
+  ppr (Counterexample bindings) = pprBindings bindings
+    where
+      pprBindings [] = empty
+      pprBindings ((bndr, arg) : rest) = vcat
+        [ "==================="
+        , ppr bndr <+> "::" <+> ppr (varType bndr)
+        , pprArg id arg
+        , pprBindings rest
+        ]
+
 checkValid
   :: forall es
    . HasCallStack
@@ -183,7 +199,7 @@ checkValid
   => Provider_ Solver () :> es
   => PluginAxiomsR
   -> CoreExpr
-  -> Eff es ()
+  -> Eff es (Maybe Counterexample)
 checkValid axioms expr = runBuiltInTypes do
   -- TODO: Somehow this code doesn't read very nice. I think I should review it.
   program <- get @CoreProgram
@@ -223,18 +239,13 @@ checkValid axioms expr = runBuiltInTypes do
       -- TODO: I should probably check whether the arguments are recursive
       -- before printing? Alternatively, I could just have a maximum depth.
       args' <- inject args
-      for_ args' \(bndr, arg) -> do
-        let arg' = evalSym True model arg
-        let argdoc = pprArg id arg'
-        dbg $ vcat
-          [ "==================="
-          , ppr bndr <+> "::" <+> ppr (varType bndr)
-          , argdoc
-          ]
-      error "Expression was **not** valid!"
+      let bindings = flip map args' \(bndr, arg) ->
+            let arg' = evalSym True model arg
+            in (bndr, arg')
+      pure $ Just (Counterexample bindings)
     Unsatisfiable -> do
       dbg @SDoc "Expression was valid!"
-      pure ()
+      pure Nothing
     -- FIXME: I don't think this is always true. e.g. not sure about some of the
     -- floating point stuff for example.
     Unknown -> throwIO $ ErrorCall "checks are in decidable fragment"

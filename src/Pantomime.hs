@@ -5,6 +5,10 @@ module Pantomime
 
   , Theory (..)
   , PluginAxioms (..)
+  , pantomime
+  , pantomimeMarker
+  , pantomimeNothing
+  , pantomimeJust
   ) where
 
 import GHC.Plugins hiding (empty, (<>))
@@ -12,6 +16,9 @@ import GHC.Plugins hiding (empty, (<>))
 import Pantomime.Annotation
 import Pantomime.Axiom
 import Pantomime.Passes
+import Pantomime.TH (pantomime)
+import Pantomime.Marker
+
 
 plugin :: Plugin
 plugin = defaultPlugin

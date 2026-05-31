@@ -80,6 +80,7 @@ library:
   - text
   - hashable
   - deepseq
+  - bytestring
 
 tests:
   pantomime-test:

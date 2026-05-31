@@ -16,6 +16,9 @@ import Grisette
 
 import Data.Data (Data)
 import Data.Traversable (for)
+import Data.Maybe (catMaybes)
+import Data.ByteString.Char8 qualified as BS8
+import Pantomime.Marker
 
 import Control.Error
 
@@ -174,7 +177,7 @@ runSymbolic guts
 checkValidityPass :: CoreToDo
 checkValidityPass = do
   let name = TH.nameBase 'checkValidityPass
-  let pass guts = runSymbolic guts $ annBindsPass checkValidity guts
+  let pass guts = runSymbolic guts $ checkValidityAndEmbed guts
   CoreDoPluginPass name pass
 
 printAndLint
@@ -193,24 +196,105 @@ printAndLint bind = do
   debug res
   pure bind
 
-checkValidity
-  :: HasCallStack
-  => Error () :> es
-  => Error (LookupError Name) :> es
-  => Error (LookupError TH.Name) :> es
-  => Error SolverError :> es
-  => Context Reader CoreProgram :> es
-  => Context Reader [TyCon] :> es
-  => Provider_ Solver () :> es
-  => HasFamInstEnvs :> es
-  => HasThings :> es
-  => THNameToGHCName :> es
-  => Theory
-  -> CoreBind'
-  -> Eff es CoreBind'
--- TODO: The check itself permits recursive binders, so we should not restrict
--- the input here really!
-checkValidity (Theory axioms) (Bind' var expr) = do
-  axioms' <- resolvePluginAxioms axioms
-  checkValid axioms' expr
-  pure $ Bind' var expr
+checkValidityAndEmbed
+  :: ( HasCallStack
+     , Error () :> es
+     , Error (LookupError Name) :> es
+     , Error (LookupError TH.Name) :> es
+     , Error SolverError :> es
+     , Context Reader CoreProgram :> es
+     , Context Reader [TyCon] :> es
+     , Provider_ Solver () :> es
+     , HasFamInstEnvs :> es
+     , HasThings :> es
+     , THNameToGHCName :> es
+     , HasAnnotations :> es
+     , CoreE :> es
+     , IOE :> es
+     )
+  => ModGuts
+  -> Eff es ModGuts
+checkValidityAndEmbed guts = do
+  (_, anns) <- getFirstAnnotations @Theory deserializeWithData guts
+
+  markerId <- thNameToGhcName 'pantomimeMarker >>= lookupIdAll
+  nothingId <- thNameToGhcName 'pantomimeNothing >>= lookupIdAll
+  justId <- thNameToGhcName 'pantomimeJust >>= lookupIdAll
+
+  (binds, results) <- fmap unzip $ for (mg_binds guts) \case
+    NonRec x e | Just (Theory axioms) <- lookupUFM anns $ varName x -> do
+      axioms' <- resolvePluginAxioms axioms
+      mCounterexample <- checkValid axioms' e
+      let varNameStr = getOccString x
+      case mCounterexample of
+        Nothing -> do
+          let replacementExpr = Var nothingId
+          pure (NonRec x e, Just (varNameStr, replacementExpr))
+        Just counterexample -> do
+          let counterexampleStr = showSDocUnsafe (ppr counterexample)
+          strExpr <- liftCore $ mkStringExpr counterexampleStr
+          let replacementExpr = App (Var justId) strExpr
+          pure (NonRec x e, Just (varNameStr, replacementExpr))
+    b -> pure (b, Nothing)
+
+  let results' = catMaybes results
+  let binds' = replaceMarkerInBinds markerId results' binds
+  pure guts { mg_binds = binds' }
+
+-- | Recursively traverses all bindings in the module and replaces occurrences of
+-- the 'pantomimeMarker' call with the pre-generated proof result expressions.
+replaceMarkerInBinds
+  :: Id
+  -> [(String, CoreExpr)]
+  -> [CoreBind]
+  -> [CoreBind]
+replaceMarkerInBinds markerId results = map goBind
+  where
+    goBind (NonRec b e) = NonRec b (replaceMarker markerId results e)
+    goBind (Rec bs) = Rec (map (\(b, e) -> (b, replaceMarker markerId results e)) bs)
+
+-- | Replaces any application of the 'pantomimeMarker' with its corresponding
+-- compile-time Z3 proof result expression (either 'pantomimeNothing' or
+-- 'pantomimeJust "counterexample"').
+replaceMarker
+  :: Id
+  -> [(String, CoreExpr)]
+  -> CoreExpr
+  -> CoreExpr
+replaceMarker markerId results expr = go expr
+  where
+    go :: CoreExpr -> CoreExpr
+    go (App (Var v) argExpr)
+      | v == markerId =
+          case exprToString argExpr of
+            Just assertionName ->
+              case lookup assertionName results of
+                Just replacementExpr -> replacementExpr
+                Nothing -> App (Var v) (go argExpr)
+            Nothing -> App (Var v) (go argExpr)
+            
+    go (Var v) = Var v
+    go (Lit l) = Lit l
+    go (App f a) = App (go f) (go a)
+    go (Lam b e) = Lam b (go e)
+    go (Let (NonRec b r) e) = Let (NonRec b (go r)) (go e)
+    go (Let (Rec bs) e) = Let (Rec (map (\(b, r) -> (b, go r)) bs)) (go e)
+    go (Case e b t alts) = Case (go e) b t (map goAlt alts)
+    go (Cast e c) = Cast (go e) c
+    go (Tick t e) = Tick t (go e)
+    go (Type t) = Type t
+    go (Coercion c) = Coercion c
+
+    goAlt (Alt con binders e) = Alt con binders (go e)
+
+-- | Rxtract a Haskell 'String' value from a GHC 'CoreExpr'
+-- representing a string literal. Return Nothing if the expression is not
+-- a string literal.
+exprToString :: CoreExpr -> Maybe String
+exprToString (Tick _ e) = exprToString e
+exprToString (Cast e _) = exprToString e
+exprToString (App (Var f) (Lit (LitString bs)))
+  | getOccString f == "unpackCString#" || getOccString f == "unpackCStringUtf8#" =
+      Just (BS8.unpack bs)
+exprToString (Lit (LitString bs)) = Just (BS8.unpack bs)
+exprToString _ = Nothing
