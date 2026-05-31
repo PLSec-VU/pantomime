@@ -238,6 +238,14 @@ checkValidityAndEmbed guts = do
     b -> pure (b, Nothing)
 
   let results' = catMaybes results
+
+  let resultNames = map fst results'
+  case findMissingAnnotations markerId resultNames binds of
+    [] -> pure ()
+    (missing : _) ->
+      throwIO $ PprProgramError "checkValidityPass" $
+        text ("Symbolic check result not found for '" ++ missing ++ "'. Did you forget to add the {-# ANN " ++ missing ++ " (Theory ...) #-} annotation?")
+
   let binds' = replaceMarkerInBinds markerId results' binds
   pure guts { mg_binds = binds' }
 
@@ -298,3 +306,35 @@ exprToString (App (Var f) (Lit (LitString bs)))
       Just (BS8.unpack bs)
 exprToString (Lit (LitString bs)) = Just (BS8.unpack bs)
 exprToString _ = Nothing
+
+-- | Scans the Core bindings for any call to 'pantomimeMarker' and returns the
+-- names of all assertions that are referenced by a splice but lack the corresponding
+-- 'Theory' annotation.
+findMissingAnnotations
+  :: Id
+  -> [String]
+  -> [CoreBind]
+  -> [String]
+findMissingAnnotations markerId resultNames binds = concatMap (goExpr . getExpr) binds
+  where
+    getExpr (NonRec _ e) = e
+    getExpr (Rec bs) = Let (Rec bs) (Var markerId)
+
+    goExpr :: CoreExpr -> [String]
+    goExpr (App (Var v) argExpr)
+      | v == markerId =
+          case exprToString argExpr of
+            Just assertionName
+              | assertionName `notElem` resultNames -> [assertionName]
+            _ -> goExpr argExpr
+    goExpr (Var _) = []
+    goExpr (Lit _) = []
+    goExpr (App f a) = goExpr f ++ goExpr a
+    goExpr (Lam _ e) = goExpr e
+    goExpr (Let (NonRec _ r) e) = goExpr r ++ goExpr e
+    goExpr (Let (Rec bs) e) = concatMap (goExpr . snd) bs ++ goExpr e
+    goExpr (Case e _ _ alts) = goExpr e ++ concatMap (\(Alt _ _ body) -> goExpr body) alts
+    goExpr (Cast e _) = goExpr e
+    goExpr (Tick _ e) = goExpr e
+    goExpr (Type _) = []
+    goExpr (Coercion _) = []
