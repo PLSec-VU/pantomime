@@ -6,9 +6,7 @@ module Main
   ) where
 
 import Test.Hspec
-import Test.HUnit
 
-import Data.List (isInfixOf)
 import Pantomime
 import Pantomime.BuiltIn qualified as Pantomime
 
@@ -46,9 +44,4 @@ main = hspec $ do
       $(pantomime 'validAssertion) `shouldBe` Nothing
 
     it "detects invalidAssertion (should fail with Just Counterexample)" $ do
-      case $(pantomime 'invalidAssertion) of
-        Just counterexamples -> do
-          putStrLn "Counterexamples:"
-          mapM_ (\(name, val) -> putStrLn $ name ++ " = " ++ val) counterexamples
-          counterexamples `shouldSatisfy` any (\(_, v) -> "False" `isInfixOf` v || "True" `isInfixOf` v)
-        Nothing -> assertFailure "Expected invalid counterexample but got Nothing"
+      $(pantomime 'invalidAssertion) `shouldBe` Just (False, True)

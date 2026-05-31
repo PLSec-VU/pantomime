@@ -10,5 +10,5 @@ import Pantomime.Marker
 pantomime :: TH.Name -> TH.Q TH.Exp
 pantomime name = do
   let nameStr = TH.nameBase name
-  [| pantomimeMarker nameStr |]
+  pure $ TH.AppE (TH.AppE (TH.VarE 'pantomimeMarker') (TH.VarE name)) (TH.LitE (TH.StringL nameStr))
 

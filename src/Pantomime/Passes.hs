@@ -4,6 +4,7 @@ module Pantomime.Passes
   ) where
 
 import GHC.Plugins hiding (empty, (<>), thNameToGhcName, getFirstAnnotations)
+import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.Lint
 import GHC.Driver.Config.Core.Lint (initLintConfig)
 
@@ -211,13 +212,17 @@ checkValidityAndEmbed
      , HasAnnotations :> es
      , CoreE :> es
      , IOE :> es
+     , HasDynFlagsE :> es
      )
   => ModGuts
   -> Eff es ModGuts
 checkValidityAndEmbed guts = do
   (_, anns) <- getFirstAnnotations @Theory deserializeWithData guts
 
-  markerId <- thNameToGhcName 'pantomimeMarker >>= lookupIdAll
+  dflags <- getDynFlags
+  let platform = targetPlatform dflags
+
+  markerPrimeId <- thNameToGhcName 'pantomimeMarker' >>= lookupIdAll
   nothingId <- thNameToGhcName 'pantomimeNothing >>= lookupIdAll
   justId <- thNameToGhcName 'pantomimeJust >>= lookupIdAll
 
@@ -226,69 +231,76 @@ checkValidityAndEmbed guts = do
       axioms' <- resolvePluginAxioms axioms
       mCounterexample <- checkValid axioms' e
       let varNameStr = getOccString x
+      let ty = varType x
+          (_, funTy) = splitForAllTyVars ty
+          (argTys, _resTy) = splitFunTys funTy
+          argTys' = map scaledThing argTys
+          tupleTy = case argTys' of
+            [] -> mkBoxedTupleTy []
+            [t] -> t
+            ts -> mkBoxedTupleTy ts
       case mCounterexample of
         Nothing -> do
-          let replacementExpr = Var nothingId
-          pure (NonRec x e, Just (varNameStr, replacementExpr))
+          let replacementExpr = App (Var nothingId) (Type tupleTy)
+          pure (NonRec x e, Just (varNameStr, (tupleTy, replacementExpr)))
         Just counterexample -> do
-          let counterexamplePairs = counterexampleToPairs counterexample
-          pairExprs <- for counterexamplePairs \(nameStr, valStr) -> do
-            nameExpr <- liftCore $ mkStringExpr nameStr
-            valExpr  <- liftCore $ mkStringExpr valStr
-            pure $ mkCoreTup [nameExpr, valExpr]
-          let pairTy = mkBoxedTupleTy [stringTy, stringTy]
-          let listExpr = mkListExpr pairTy pairExprs
-          let replacementExpr = App (Var justId) listExpr
-          pure (NonRec x e, Just (varNameStr, replacementExpr))
+          let valBindings = filter (isId . fst) (counterexampleBindings counterexample)
+          valExprs <- for valBindings \(_, arg) -> do
+            liftCore $ argToCoreExpr platform arg
+          let tupleExpr = case valExprs of
+                [] -> mkCoreTup []
+                [expr'] -> expr'
+                exprs -> mkCoreTup exprs
+          let replacementExpr = App (App (Var justId) (Type tupleTy)) tupleExpr
+          pure (NonRec x e, Just (varNameStr, (tupleTy, replacementExpr)))
     b -> pure (b, Nothing)
 
   let results' = catMaybes results
 
   let resultNames = map fst results'
-  case findMissingAnnotations markerId resultNames binds of
+  case findMissingAnnotations markerPrimeId resultNames binds of
     [] -> pure ()
     (missing : _) ->
       throwIO $ PprProgramError "checkValidityPass" $
         text ("Symbolic check result not found for '" ++ missing ++ "'. Did you forget to add the {-# ANN " ++ missing ++ " (Theory ...) #-} annotation?")
 
-  let binds' = replaceMarkerInBinds markerId results' binds
+  let binds' = replaceMarkerInBinds markerPrimeId results' binds
   pure guts { mg_binds = binds' }
 
 -- | Recursively traverses all bindings in the module and replaces occurrences of
 -- the 'pantomimeMarker' call with the pre-generated proof result expressions.
 replaceMarkerInBinds
   :: Id
-  -> [(String, CoreExpr)]
+  -> [(String, (Type, CoreExpr))]
   -> [CoreBind]
   -> [CoreBind]
-replaceMarkerInBinds markerId results = map goBind
+replaceMarkerInBinds markerPrimeId results = map goBind
   where
-    goBind (NonRec b e) = NonRec b (replaceMarker markerId results e)
-    goBind (Rec bs) = Rec (map (\(b, e) -> (b, replaceMarker markerId results e)) bs)
+    goBind (NonRec b e) = NonRec b (replaceMarker markerPrimeId results e)
+    goBind (Rec bs) = Rec (map (\(b, e) -> (b, replaceMarker markerPrimeId results e)) bs)
 
 -- | Replaces any application of the 'pantomimeMarker' with its corresponding
--- compile-time Z3 proof result expression (either 'pantomimeNothing' or
--- 'pantomimeJust "counterexample"').
+-- compile-time Z3 proof result expression.
 replaceMarker
   :: Id
-  -> [(String, CoreExpr)]
+  -> [(String, (Type, CoreExpr))]
   -> CoreExpr
   -> CoreExpr
-replaceMarker markerId results expr = go expr
+replaceMarker markerPrimeId results expr = go expr
   where
     go :: CoreExpr -> CoreExpr
-    go (App (Var v) argExpr)
-      | v == markerId =
-          case exprToString argExpr of
+    go (App f a)
+      | Just () <- isMarkerPrimeCall f =
+          case exprToString a of
             Just assertionName ->
               case lookup assertionName results of
-                Just replacementExpr -> replacementExpr
-                Nothing -> App (Var v) (go argExpr)
-            Nothing -> App (Var v) (go argExpr)
+                Just (_, replacementExpr) -> replacementExpr
+                Nothing -> App (go f) (go a)
+            Nothing -> App (go f) (go a)
+      | otherwise = App (go f) (go a)
             
     go (Var v) = Var v
     go (Lit l) = Lit l
-    go (App f a) = App (go f) (go a)
     go (Lam b e) = Lam b (go e)
     go (Let (NonRec b r) e) = Let (NonRec b (go r)) (go e)
     go (Let (Rec bs) e) = Let (Rec (map (\(b, r) -> (b, go r)) bs)) (go e)
@@ -299,6 +311,13 @@ replaceMarker markerId results expr = go expr
     go (Coercion c) = Coercion c
 
     goAlt (Alt con binders e) = Alt con binders (go e)
+
+    isMarkerPrimeCall :: CoreExpr -> Maybe ()
+    isMarkerPrimeCall (Var v) | v == markerPrimeId = Just ()
+    isMarkerPrimeCall (App f' _) = isMarkerPrimeCall f'
+    isMarkerPrimeCall (Cast e' _) = isMarkerPrimeCall e'
+    isMarkerPrimeCall (Tick _ e') = isMarkerPrimeCall e'
+    isMarkerPrimeCall _ = Nothing
 
 -- | Rxtract a Haskell 'String' value from a GHC 'CoreExpr'
 -- representing a string literal. Return Nothing if the expression is not
@@ -320,21 +339,22 @@ findMissingAnnotations
   -> [String]
   -> [CoreBind]
   -> [String]
-findMissingAnnotations markerId resultNames binds = concatMap (goExpr . getExpr) binds
+findMissingAnnotations markerPrimeId resultNames binds = concatMap (goExpr . getExpr) binds
   where
     getExpr (NonRec _ e) = e
-    getExpr (Rec bs) = Let (Rec bs) (Var markerId)
+    getExpr (Rec bs) = Let (Rec bs) (Var markerPrimeId)
 
     goExpr :: CoreExpr -> [String]
-    goExpr (App (Var v) argExpr)
-      | v == markerId =
-          case exprToString argExpr of
+    goExpr (App f a) =
+      case isMarkerPrimeCall f of
+        Just () ->
+          case exprToString a of
             Just assertionName
               | assertionName `notElem` resultNames -> [assertionName]
-            _ -> goExpr argExpr
+            _ -> goExpr f ++ goExpr a
+        Nothing -> goExpr f ++ goExpr a
     goExpr (Var _) = []
     goExpr (Lit _) = []
-    goExpr (App f a) = goExpr f ++ goExpr a
     goExpr (Lam _ e) = goExpr e
     goExpr (Let (NonRec _ r) e) = goExpr r ++ goExpr e
     goExpr (Let (Rec bs) e) = concatMap (goExpr . snd) bs ++ goExpr e
@@ -343,3 +363,10 @@ findMissingAnnotations markerId resultNames binds = concatMap (goExpr . getExpr)
     goExpr (Tick _ e) = goExpr e
     goExpr (Type _) = []
     goExpr (Coercion _) = []
+
+    isMarkerPrimeCall :: CoreExpr -> Maybe ()
+    isMarkerPrimeCall (Var v) | v == markerPrimeId = Just ()
+    isMarkerPrimeCall (App f' _) = isMarkerPrimeCall f'
+    isMarkerPrimeCall (Cast e' _) = isMarkerPrimeCall e'
+    isMarkerPrimeCall (Tick _ e') = isMarkerPrimeCall e'
+    isMarkerPrimeCall _ = Nothing

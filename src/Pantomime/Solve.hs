@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE TypeApplications #-}
 -- TODO: I want to remove many of these pragmas, also for the other files. Most
 -- of them should just be included in the top-level flags. There also seems to
 -- be a lot of obsolete stuff. Perhaps its good to first find out which flags
@@ -17,6 +19,7 @@ module Pantomime.Solve
   ( checkValid
   , Counterexample (..)
   , counterexampleToPairs
+  , argToCoreExpr
   ) where
 
 import GHC.Core qualified as GHC
@@ -35,7 +38,13 @@ import GHC.Plugins
   , getOccString
   , showSDocUnsafe
   , isId
+  , dataConWorkId
+  , tyConDataCons
+  , trueDataCon
+  , falseDataCon
   )
+import GHC.Core.Make (mkIntegerExpr)
+import GHC.Platform (Platform)
 import GHC.Types.Id.Make (nospecId)
 import GHC.Utils.Outputable
   ( Outputable (..)
@@ -45,7 +54,7 @@ import GHC.Utils.Outputable
   , empty
   )
 
-import Grisette (LogicalOp (..), EvalSym (..), Union, SymBool, onUnion)
+import Grisette (LogicalOp (..), EvalSym (..), Union, SymBool, onUnion, toCon, ToCon (..), pattern Single)
 
 import Control.DeepSeq (NFData (..))
 
@@ -62,12 +71,13 @@ import Pantomime.Expr
   , pprArg
   , runRuntime
   , throwE
+  , Constructor (..)
   )
 import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Symbolise
 import Pantomime.Subst
 import Pantomime.Fresh
-import Pantomime.Util (dbg)
+import Pantomime.Util (dbg, BitVec)
 import Pantomime.Axiom (PluginAxiomsR (..))
 import Pantomime.PrimOps (PrimOp)
 import Pantomime.Defer (defer, withDeferrable)
@@ -271,3 +281,22 @@ collectValBinders expr = go expr
     go (GHC.Cast e _) = go e
     go (GHC.Let _ e)  = go e
     go _ = []
+
+argToCoreExpr :: MonadThings m => Platform -> Arg -> m CoreExpr
+argToCoreExpr platform arg =
+  case runRuntime arg of
+    Single (Right (Lit (Bool sb)))
+      | Just b <- toCon sb ->
+          pure $ if b then GHC.Var (dataConWorkId trueDataCon) else GHC.Var (dataConWorkId falseDataCon)
+    Single (Right (Lit (Integer si)))
+      | Just i <- toCon si ->
+          pure $ mkIntegerExpr platform i
+    Single (Right (Con (DataCon dc))) ->
+      pure $ GHC.Var (dataConWorkId dc)
+    Single (Right (Con (EnumCon @n tag tc)))
+      | Just t <- toCon @_ @(BitVec n) tag -> do
+          let dcs = tyConDataCons tc
+              dc = dcs !! fromIntegral t
+          pure $ GHC.Var (dataConWorkId dc)
+    _ ->
+      error "Unsupported counterexample argument type"
