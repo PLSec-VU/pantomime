@@ -374,7 +374,7 @@ projectLitTy'
   -> Eff es SomeLiteralType
 projectLitTy' ty = do
   -- TODO: We should fix the recursive callstack grow!
-  (tc, targs) <- failWith "projectLitTy': expected a TyCon application" $ splitTyConApp_maybe ty
+  (tc, targs) <- failWith @String "projectLitTy': expected a TyCon application" $ splitTyConApp_maybe ty
   BuiltInTyCon { .. } <- get
   if
     | tc == tcBool
@@ -386,8 +386,8 @@ projectLitTy' ty = do
     | tc == tcBitVec
     , [narg] <- targs -> do
       let knownNatTy = isNumLitTy >=> someNatVal
-      SomeNat @n _ <- failWith "projectLitTy': expected a KnownNat literal" $ knownNatTy narg
-      Dict <- failWith "projectLitTy': expected a positive Nat for BitVec size" $ posNat @n
+      SomeNat @n _ <- failWith @String "projectLitTy': expected a KnownNat literal" $ knownNatTy narg
+      Dict <- failWith @String "projectLitTy': expected a positive Nat for BitVec size" $ posNat @n
       pure $ SomeLiteralType (BitVecType @n)
 
     | tc == tcArray
@@ -396,4 +396,4 @@ projectLitTy' ty = do
       SomeLiteralType valTy' <- projectLitTy' valTy
       pure $ SomeLiteralType (ArrayType keyTy' valTy')
 
-    | otherwise -> throwError "projectLitTy': unsupported literal type"
+    | otherwise -> throwError @String "projectLitTy': unsupported literal type"

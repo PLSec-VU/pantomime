@@ -50,7 +50,6 @@ import GHC.Utils.Outputable
   ( Outputable (..)
   , IsLine (..)
   , SDoc
-  , text
   , (<+>)
   , empty
   )

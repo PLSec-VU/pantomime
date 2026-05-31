@@ -30,7 +30,6 @@ import GHC.Plugins
   , extendVarEnv
   , lookupVarEnv
   )
-import GHC.Utils.Outputable (SDoc, text)
 
 import Control.Monad (foldM)
 

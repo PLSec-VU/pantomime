@@ -7,7 +7,7 @@ module Pantomime.Symbolise
   ) where
 
 import GHC.Plugins qualified as GHC
-import GHC.Utils.Outputable (SDoc, text, ($+$), (<+>), showSDocUnsafe)
+import GHC.Utils.Outputable (text, ($+$), (<+>), showSDocUnsafe)
 import GHC.Builtin.Types.Prim
   ( intPrimTyCon
   , int8PrimTyCon

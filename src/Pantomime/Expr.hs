@@ -446,9 +446,9 @@ mkEnumCon
   -> Eval es Expr
 mkEnumCon tag ty = do
   -- Ensure we have an enumeration type.
-  (tc, targs) <- failWithE "Expected a TyCon application for enumeration type" $ splitTyConApp_maybe ty
+  (tc, targs) <- failWithE @String "Expected a TyCon application for enumeration type" $ splitTyConApp_maybe ty
   unless (isEnumerationTyCon tc) do
-    throwE "Expected an enumeration TyCon for mkEnumCon"
+    throwE @String "Expected an enumeration TyCon for mkEnumCon"
 
   -- Construct the data constructor and its type arguments.
   let dc = mkCon $ EnumCon tag tc
@@ -471,7 +471,7 @@ constructorType con = do
     DataCon dc -> pure dc
     EnumCon _tag tc
       | dc : _ <- tyConDataCons tc -> pure dc
-      | otherwise -> throwError "Cannot get constructor type: enumeration TyCon has no data constructors"
+      | otherwise -> throwError @String "Cannot get constructor type: enumeration TyCon has no data constructors"
   pure $ varType (dataConWorkId dc)
 
 pprExpr
@@ -628,7 +628,7 @@ mkApp fun arg = case fun of
       | isForAllTy ty -> do
         forced <- forceTyCo arg
         pure $ App fun (Forced forced)
-      | otherwise -> throwError "Cannot apply argument: expression type is neither a function nor a forall"
+      | otherwise -> throwError @String "Cannot apply argument: expression type is neither a function nor a forall"
 
 pushCoArg
   :: HasCallStack
@@ -645,14 +645,14 @@ pushCoArg co arg = if
     ty <- forceTy arg
 
     -- Attempt to push the coercion into the type argument.
-    (ty', rco) <- failWith "pushCoArg: could not push coercion into type argument" $ pushCoTyArg co ty
+    (ty', rco) <- failWith @String "pushCoArg: could not push coercion into type argument" $ pushCoTyArg co ty
 
     -- Return the type argument and result coercion.
     pure (pure $ mkType ty', rco)
 
   | otherwise -> do
     -- Attempt to split the coercion into an argument and result coercion.
-    (aco, rco) <- failWith "pushCoArg: could not push coercion into value argument" $ pushCoValArg co
+    (aco, rco) <- failWith @String "pushCoArg: could not push coercion into value argument" $ pushCoValArg co
 
     -- Cast the argument and return the result coercion.
     arg' <- defer do
@@ -692,12 +692,12 @@ mkCast
 mkCast expr co = do
   -- Ensure the coercion has role representational.
   unless (coercionRole co == Representational) do
-    throwE "mkCast: coercion role must be Representational"
+    throwE @String "mkCast: coercion role must be Representational"
 
   -- Ensure the cast can be applied to the expression.
   ty <- liftEff $ exprType expr
   unless (eqType ty $ coercionLKind co) do
-    throwE "mkCast: expression type does not match coercion source type"
+    throwE @String "mkCast: expression type does not match coercion source type"
 
   case expr of
     Cast body co' -> do
@@ -756,7 +756,7 @@ forceTyCo = runRuntime >>> \case
     | Coercion co <- value -> pure $ Right co
 
   -- The expression was not in the expected shape.
-  _ -> throwError "forceTyCo: expected a single Type or Coercion expression"
+  _ -> throwError @String "forceTyCo: expected a single Type or Coercion expression"
 
 -- | Force an expression into a type using 'forceTyCo'.
 forceTy
@@ -764,7 +764,7 @@ forceTy
   => Error String :> es
   => Arg
   -> Eff es Type
-forceTy = forceTyCo >=> either pure (const $ throwError "forceTy: expected a Type, got a Coercion")
+forceTy = forceTyCo >=> either pure (const $ throwError @String "forceTy: expected a Type, got a Coercion")
 
 -- | Force an expression into a coercion using 'forceTyCo'.
 forceCo
@@ -772,7 +772,7 @@ forceCo
   => Error String :> es
   => Arg
   -> Eff es Coercion
-forceCo = forceTyCo >=> either (const $ throwError "forceCo: expected a Coercion, got a Type") pure
+forceCo = forceTyCo >=> either (const $ throwError @String "forceCo: expected a Coercion, got a Type") pure
 
 -- | Equivalence between constructors.
 --
@@ -789,7 +789,7 @@ eqCon = \cases
   (EnumCon @l ltag ltc) (EnumCon @r rtag rtc)
     | ltc == rtc
     , Just Refl <- eqT @l @r -> pure $ ltag .== rtag
-  _ _ -> throwError "eqCon: mismatched constructor types"
+  _ _ -> throwError @String "eqCon: mismatched constructor types"
 
 -- TODO: This function deserves some clean-up! My syntax highlighter is even
 -- breaking on it...
@@ -802,7 +802,7 @@ exprType
 exprType = \case
   Lit lit -> embedLitTyOf lit
   Con con -> constructorType con
-  Type _ -> throwError "exprType: cannot get the type of a Type expression"
+  Type _ -> throwError @String "exprType: cannot get the type of a Type expression"
   Coercion co -> pure $ coercionType co
   Lam ty _ -> pure ty
   App fun arg -> do
@@ -813,14 +813,14 @@ exprType = \case
         aty <- case arg of
           Forced (Right co) -> pure $ mkCoercionTy co
           Forced (Left ty) -> pure ty
-          _ -> throwError "exprType: expected a forced Type or Coercion argument"
+          _ -> throwError @String "exprType: expected a forced Type or Coercion argument"
         let scope = mkInScopeSet $ tyCoVarsOfTypes [aty, rty]
         let subst = GHC.extendTCvSubst (GHC.mkEmptySubst scope) var aty
         pure $ GHC.substTy subst rty
 
       | Just (_, _, _, rty) <- splitFunTy_maybe fty -> pure rty
 
-      | otherwise -> throwError "exprType: expected a function or forall type in application"
+      | otherwise -> throwError @String "exprType: expected a function or forall type in application"
   Cast _ co -> pure $ coercionRKind co
 
 -- | Collect the arguments of an application.
@@ -883,7 +883,7 @@ collectScrut = \case
     let (spine, args) = collectThunks body'
     spine' <- case spine of
       Con lit -> pure lit
-      _ -> throwE "collectScrut: expected a constructor at the spine of a cast expression"
+      _ -> throwE @String "collectScrut: expected a constructor at the spine of a cast expression"
 
     -- Only a DataCon spine may have its arguments pushed.
     dc <- case spine' of
@@ -891,7 +891,7 @@ collectScrut = \case
       -- Any Enum DataCon suffices, as we only use its type (and all enum con
       -- have the same type).
       EnumCon _ tc | dc : _ <- tyConDataCons tc -> pure dc
-      _ -> throwE "collectScrut: expected a DataCon or EnumCon with data constructors"
+      _ -> throwE @String "collectScrut: expected a DataCon or EnumCon with data constructors"
 
     -- Push the coercion into the arguments.
     (_univ, args') <- liftEff $ pushCoDataCon dc args co
@@ -926,9 +926,9 @@ pushCoDataCon
 pushCoDataCon dc args co = do
   -- Check whether the outer type is a TyConAppCo.
   let tyR = coercionRKind co
-  (tcR, univArgsR) <- failWith "pushCoDataCon: expected a TyConApp coercion" $ splitTyConApp_maybe tyR
+  (tcR, univArgsR) <- failWith @String "pushCoDataCon: expected a TyConApp coercion" $ splitTyConApp_maybe tyR
   unless (tcR == dataConTyCon dc) do
-    throwError "pushCoDataCon: TyCon mismatch in coercion"
+    throwError @String "pushCoDataCon: TyCon mismatch in coercion"
 
   -- Gather information on type variables of the DataCon.
   let dcUnivVars = dataConUnivTyVars dc
@@ -940,10 +940,10 @@ pushCoDataCon dc args co = do
     exTys <- for exArgs \case
       -- TODO: Do we need to wrap Coercions with mkCoercionTy?
       Forced (Left ty) -> pure ty
-      _ -> throwError "pushCoDataCon: expected forced type arguments for existential type variables"
+      _ -> throwError @String "pushCoDataCon: expected forced type arguments for existential type variables"
     valArgs' <- for valArgs \case
       Thunked value -> pure value
-      Forced _ -> throwError "pushCoDataCon: expected thunked value arguments"
+      Forced _ -> throwError @String "pushCoDataCon: expected thunked value arguments"
     pure (exTys, valArgs')
 
   -- Get coercions for the universal type variables.

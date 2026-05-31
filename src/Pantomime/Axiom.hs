@@ -44,7 +44,6 @@ import GHC.Utils.Outputable
   ( Outputable (..)
   , IsDoc (..)
   , IsLine (fsep, (<+>), text)
-  , SDoc
   , hang
   , punctuate
   , comma
@@ -351,7 +350,7 @@ resolvePluginAxioms PluginAxioms { .. } = do
 
     -- Throw an error if we could not create any.
     when (null dictsNew) do
-      throwError "resolvePluginAxioms: could not create any Embeddable or Coercible dictionaries for the given axioms"
+      throwError @String "resolvePluginAxioms: could not create any Embeddable or Coercible dictionaries for the given axioms"
 
     -- Insert all dictionaries.
     pure $ foldlBy dicts dictsNew \acc dict -> do
