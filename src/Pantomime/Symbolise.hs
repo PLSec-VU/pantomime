@@ -7,6 +7,7 @@ module Pantomime.Symbolise
   ) where
 
 import GHC.Plugins qualified as GHC
+import GHC.Utils.Outputable (SDoc, text, ($+$), (<+>), showSDocUnsafe)
 import GHC.Builtin.Types.Prim
   ( intPrimTyCon
   , int8PrimTyCon
@@ -41,7 +42,7 @@ import Effectful.Context
 symbolise
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader InterfaceThings :> es
   => Subst
@@ -90,7 +91,12 @@ symbolise = go
             , GHC.ppr var
             , GHC.ppr $ GHC.idDetails var
             ]
-          throwE ()
+          throwE $ showSDocUnsafe $
+            text "Unbound variable in symbolise:" <+> GHC.ppr var
+            <+> text "of type:" <+> GHC.ppr (GHC.varType var)
+            $+$ text "The variable is not in the substitution, has no unfolding,"
+            <+> text "is not a data constructor, and is not erased evidence."
+            $+$ text "Consider providing a term axiom mapping for this variable."
 
       GHC.Lit lit -> symboliseLit subst lit
 
@@ -120,7 +126,8 @@ symbolise = go
         let expectedTy = substTy subst $ GHC.varType bndr
         scrutTy <- liftEff $ exprType scrut'
         unless (eqType scrutTy expectedTy) do
-          throwE ()
+          throwE $ showSDocUnsafe $ text "Case scrutinee type mismatch: expected"
+            <+> GHC.ppr expectedTy <+> text "but got" <+> GHC.ppr scrutTy
 
         -- TODO: This is a bit ugly now. I guess it handles all the cases, but
         -- it could deserve some cleanup. It somehow feels weird to gather the
@@ -158,7 +165,7 @@ symbolise = go
             GHC.LitAlt lit | Left spine' <- spine -> do
               symboliseEqLit subst spine' lit
             GHC.DEFAULT -> pure true
-            _ -> throwE ()
+            _ -> throwE "Unsupported case alternative: expected DataAlt, LitAlt, or DEFAULT"
 
           -- TODO: Perhaps it's a good idea to check that the number of
           -- arguments match the binders (unless it is a DEFAULT, in which case
@@ -195,7 +202,7 @@ symboliseBind
   :: forall es
    . HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader InterfaceThings :> es
   => Subst
@@ -219,7 +226,7 @@ symboliseBindMany
    . HasCallStack
   => Deferrable es
   => Foldable f
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader InterfaceThings :> es
   => Subst
@@ -251,7 +258,7 @@ isPrimType ty = case GHC.splitTyConApp_maybe ty of
 symboliseLit
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader InterfaceThings :> es
   => Subst
@@ -278,11 +285,11 @@ symboliseLit subst lit = do
         GHC.LitNumWord16 -> pure (toWord16Id, BitVec @16 num')
         GHC.LitNumWord32 -> pure (toWord32Id, BitVec @32 num')
         GHC.LitNumWord64 -> pure (toWord64Id, BitVec @64 num')
-        GHC.LitNumBigNat -> throwE ()
-    _ -> throwE ()
+        GHC.LitNumBigNat -> throwE "BigNat literals are not supported"
+    _ -> throwE "Unsupported literal type"
 
   -- Lookup the equality function.
-  convert <- failWithE () $ lookupIdSubst subst convertId
+  convert <- failWithE "Conversion function for literal type not found in substitution" $ lookupIdSubst subst convertId
   convert' <- hoistEff convert
 
   mkApps convert' [pure $ mkLit lit']
@@ -294,7 +301,7 @@ symboliseLit subst lit = do
 symboliseEqLit
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader InterfaceThings :> es
   => Context Reader BuiltInTyCon :> es
   => Subst
@@ -316,11 +323,11 @@ symboliseEqLit subst lhs rhs = do
       GHC.LitNumWord16 -> pure eqWord16Id
       GHC.LitNumWord32 -> pure eqWord32Id
       GHC.LitNumWord64 -> pure eqWord64Id
-      GHC.LitNumBigNat -> throwE ()
-    _ -> throwE ()
+      GHC.LitNumBigNat -> throwE "BigNat literals are not supported in equality check"
+    _ -> throwE "Unsupported literal type in equality check"
 
   -- Lookup the equality function.
-  eq <- failWithE () $ GHC.maybeUnfoldingTemplate (GHC.realIdUnfolding eqId)
+  eq <- failWithE "Equality function for literal type not found" $ GHC.maybeUnfoldingTemplate (GHC.realIdUnfolding eqId)
   eq' <- symbolise subst eq
 
   lit <- deferE $ symboliseLit subst rhs
@@ -329,4 +336,4 @@ symboliseEqLit subst lhs rhs = do
   result <- mkApps eq' [pure lhs, lit]
   case result of
     Lit (Bool result') -> pure result'
-    _ -> throwE ()
+    _ -> throwE "Literal equality check did not produce a Boolean result"

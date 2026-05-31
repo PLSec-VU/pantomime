@@ -388,7 +388,7 @@ unifyExprs lhs rhs = do
 -- functions in this module as well!
 subsumeExpr
   :: HasCallStack
-  => Error () :> es
+  => Error String :> es
   => TypeMap CoreExpr
   -> CoreExpr
   -> Type
@@ -399,7 +399,7 @@ subsumeExpr dicts expr ty = do
   let (reqTv, reqEv, reqTy) = tcSplitSigmaTy ty
 
   -- Match the types and add all dictionaries we care about.
-  let err = () -- TODO: This should be a better error.
+  let err = "subsumeExpr: type matching failed" -- TODO: This should be a better error.
   subst <- failWith err $ tcMatchTy curTy reqTy
 
   -- Make evidence variables.
@@ -412,7 +412,7 @@ subsumeExpr dicts expr ty = do
         insertTM (varType ev) (Var ev) acc
   let curEv' = substTy subst <$> curEv
   argsEv <- for curEv' \ev -> do
-    failWith () $ lookupTM ev dicts'
+    failWith "subsumeExpr: type variable instance not found in dictionary" $ lookupTM ev dicts'
 
   -- Construct the new expression.
   let open = mkApps expr $ fmap Type argsTv <> argsEv

@@ -104,7 +104,7 @@ runSymbolic
     , Error OversaturatedError
     , Error UnificationError
     , Error SolverError
-    , Error ()
+    , Error String
     , Provider_ Solver ()
     , HasAnnotations
     , THNameToGHCName
@@ -135,7 +135,7 @@ runSymbolic guts
   . runThNameToGhcName
   . runHasAnnotations
   . runProvider_ (const $ runSolver solver)
-  . runErrorWith @() propagateErrorShow
+  . runErrorWith @String propagateErrorShow
   . runErrorWith @SolverError propagateErrorShow
   . runErrorWith @UnificationError propagateError
   . runErrorWith @OversaturatedError propagateError
@@ -199,7 +199,7 @@ printAndLint bind = do
 
 checkValidityAndEmbed
   :: ( HasCallStack
-     , Error () :> es
+     , Error String :> es
      , Error (LookupError Name) :> es
      , Error (LookupError TH.Name) :> es
      , Error SolverError :> es

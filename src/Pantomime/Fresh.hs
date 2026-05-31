@@ -12,7 +12,7 @@ import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
 import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
 import GHC.Core.Unify (tcUnifyTysFG, alwaysBindFun, UnifyResultM (..))
 import GHC.Types.Unique (Uniquable (..), getKey)
-import GHC.Utils.Outputable (Outputable (..))
+import GHC.Utils.Outputable (Outputable (..), text, (<+>), showSDocUnsafe)
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
   ( Var
@@ -159,7 +159,7 @@ symbolicVar var dst = case varArgs var of
 freshExpr
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader FamInstEnvs :> es
   => Context Reader BuiltInTyCon :> es
   => TyConEnv TyCon
@@ -193,7 +193,7 @@ freshExpr axioms root = do
         -- some sort of 'asum' like operation? Actually, NonDet from 'effectful'
         -- would be perfect! We should move the code that deals with
         -- reifyLitType adjecent to its call once we do this!
-        result <- liftEff . runErrorNoCallStack @() $ projectLitTy ty
+        result <- liftEff . runErrorNoCallStack @String $ projectLitTy ty
 
         let isEqPred' ty' = do
               (tc, args) <- splitTyConApp_maybe ty'
@@ -383,10 +383,9 @@ freshExpr axioms root = do
             -- For enum TyCon, we of course do plan to use it, so there we do need
             -- the Unreachable statement.
 
-          -- TODO: Throw proper error!
           | otherwise -> do
             dbgE ["could not create fresh value for", ppr ty]
-            throwE ()
+            throwE $ showSDocUnsafe $ text "Could not create a fresh symbolic value for type:" <+> ppr ty
 
   go Variable
     { varName = GHC.varName root
@@ -398,7 +397,7 @@ freshExpr axioms root = do
 freshArgs
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => TypeAxiomsR

@@ -30,6 +30,7 @@ import GHC.Plugins
   , extendVarEnv
   , lookupVarEnv
   )
+import GHC.Utils.Outputable (SDoc, text)
 
 import Control.Monad (foldM)
 
@@ -60,7 +61,7 @@ mkEmptySubst = Subst
 -- | Extend the substitution with the given mapping.
 extendSubst
   :: HasCallStack
-  => Error () :> es
+  => Error String :> es
   => Subst
   -> Var
   -> Arg
@@ -92,7 +93,7 @@ extendSubst subst var arg = if
 -- | Extend the substitution with the given mappings.
 extendSubstMany
   :: HasCallStack
-  => Error () :> es
+  => Error String :> es
   => Foldable f
   => Subst
   -> f (Var, Arg)
@@ -102,7 +103,7 @@ extendSubstMany = foldM $ uncurry . extendSubst
 -- | Extend the identifier substitution with the given mapping.
 extendIdSubst
   :: HasCallStack
-  => Error () :> es
+  => Error String :> es
   => Subst
   -> Id
   -> Spine
@@ -112,12 +113,12 @@ extendIdSubst subst var arg = if
     -- Extend the identifier substitution.
     let idSubst' = extendVarEnv (idSubst subst) var arg
     pure subst { idSubst = idSubst' }
-  | otherwise -> throwError ()
+  | otherwise -> throwError "extendIdSubst: expected an Id variable"
 
 -- | Extend the identifier substitution with the given mappings.
 extendIdSubstMany
   :: HasCallStack
-  => Error () :> es
+  => Error String :> es
   => Foldable f
   => Subst
   -> f (Id, Spine)

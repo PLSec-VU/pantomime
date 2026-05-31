@@ -47,6 +47,7 @@ import GHC.Plugins
   , Outputable (..)
   , SDoc
   , IsLine (..)
+  , text
   , mkTyConTy
   , mkNumLitTy
   , mkTyConApp
@@ -347,7 +348,7 @@ embedLitTyOf (Literal ty _) = embedLitTy ty
 -- reduced.
 projectLitTy
   :: HasCallStack
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Type
@@ -367,13 +368,13 @@ projectLitTy ty = do
 -- any type families or aliases.
 projectLitTy'
   :: HasCallStack
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Type
   -> Eff es SomeLiteralType
 projectLitTy' ty = do
   -- TODO: We should fix the recursive callstack grow!
-  (tc, targs) <- failWith () $ splitTyConApp_maybe ty
+  (tc, targs) <- failWith "projectLitTy': expected a TyCon application" $ splitTyConApp_maybe ty
   BuiltInTyCon { .. } <- get
   if
     | tc == tcBool
@@ -385,8 +386,8 @@ projectLitTy' ty = do
     | tc == tcBitVec
     , [narg] <- targs -> do
       let knownNatTy = isNumLitTy >=> someNatVal
-      SomeNat @n _ <- failWith () $ knownNatTy narg
-      Dict <- failWith () $ posNat @n
+      SomeNat @n _ <- failWith "projectLitTy': expected a KnownNat literal" $ knownNatTy narg
+      Dict <- failWith "projectLitTy': expected a positive Nat for BitVec size" $ posNat @n
       pure $ SomeLiteralType (BitVecType @n)
 
     | tc == tcArray
@@ -395,4 +396,4 @@ projectLitTy' ty = do
       SomeLiteralType valTy' <- projectLitTy' valTy
       pure $ SomeLiteralType (ArrayType keyTy' valTy')
 
-    | otherwise -> throwError ()
+    | otherwise -> throwError "projectLitTy': unsupported literal type"

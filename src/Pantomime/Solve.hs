@@ -50,6 +50,7 @@ import GHC.Utils.Outputable
   ( Outputable (..)
   , IsLine (..)
   , SDoc
+  , text
   , (<+>)
   , empty
   )
@@ -118,7 +119,7 @@ type SymboliseEff =
   [ Context Reader BuiltInTyCon
   , Context Reader InterfaceThings
   , Context Reader FamInstEnvs
-  , Error ()
+  , Error String
   ]
 
 newtype Lie a where
@@ -133,7 +134,7 @@ construct
   => Context Reader BuiltInTyCon :> es
   => Context Reader InterfaceThings :> es
   => Context Reader FamInstEnvs :> es
-  => Error () :> es
+  => Error String :> es
   => [(Var, forall fs. PrimOp fs)]
   -> PluginAxiomsR
   -> CoreProgram
@@ -173,7 +174,7 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
     res <- mkApps fun $ fmap snd args
     case res of
       Lit (Bool value) -> pure value
-      _ -> throwE ()
+      _ -> throwE @String "Result of symbolic evaluation is not a Boolean literal"
 
   -- TODO: What to do about raise? Do we really just want to return false? I
   -- guess for now it is fine.
@@ -209,7 +210,7 @@ instance Outputable Counterexample where
 checkValid
   :: forall es
    . HasCallStack
-  => Error () :> es
+  => Error String :> es
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => Error SolverError :> es
