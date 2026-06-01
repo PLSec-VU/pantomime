@@ -4,9 +4,10 @@ module Pantomime.Passes
   ) where
 
 import GHC.Plugins hiding (empty, (<>), thNameToGhcName, getFirstAnnotations)
-import GHC.Core.TyCo.Rep (scaledThing)
 import GHC.Core.Lint
 import GHC.Driver.Config.Core.Lint (initLintConfig)
+
+import GHC.Core.Make (mkStringExpr)
 
 import Grisette
   ( GrisetteSMTConfig (..)
@@ -25,8 +26,8 @@ import Control.Error
 
 import Language.Haskell.TH qualified as TH
 
-import Pantomime.Unification
 import Pantomime.Solve
+import Pantomime.Unification
 import Pantomime.Axiom (resolvePluginAxioms)
 import Pantomime.Annotation
 
@@ -219,10 +220,7 @@ checkValidityAndEmbed
 checkValidityAndEmbed guts = do
   (_, anns) <- getFirstAnnotations @Theory deserializeWithData guts
 
-  dflags <- getDynFlags
-  let platform = targetPlatform dflags
-
-  markerPrimeId <- thNameToGhcName 'pantomimeMarker' >>= lookupIdAll
+  markerPrimeId <- thNameToGhcName 'pantomimeMarker >>= lookupIdAll
   nothingId <- thNameToGhcName 'pantomimeNothing >>= lookupIdAll
   justId <- thNameToGhcName 'pantomimeJust >>= lookupIdAll
 
@@ -231,28 +229,13 @@ checkValidityAndEmbed guts = do
       axioms' <- resolvePluginAxioms axioms
       mCounterexample <- checkValid axioms' e
       let varNameStr = getOccString x
-      let ty = varType x
-          (_, funTy) = splitForAllTyVars ty
-          (argTys, _resTy) = splitFunTys funTy
-          argTys' = map scaledThing argTys
-          tupleTy = case argTys' of
-            [] -> mkBoxedTupleTy []
-            [t] -> t
-            ts -> mkBoxedTupleTy ts
       case mCounterexample of
         Nothing -> do
-          let replacementExpr = App (Var nothingId) (Type tupleTy)
-          pure (NonRec x e, Just (varNameStr, (tupleTy, replacementExpr)))
+          pure (NonRec x e, Just (varNameStr, Var nothingId))
         Just counterexample -> do
-          let valBindings = filter (isId . fst) (counterexampleBindings counterexample)
-          valExprs <- for valBindings \(_, arg) -> do
-            liftCore $ argToCoreExpr platform arg
-          let tupleExpr = case valExprs of
-                [] -> mkCoreTup []
-                [expr'] -> expr'
-                exprs -> mkCoreTup exprs
-          let replacementExpr = App (App (Var justId) (Type tupleTy)) tupleExpr
-          pure (NonRec x e, Just (varNameStr, (tupleTy, replacementExpr)))
+          let ceStr = showSDocUnsafe (ppr counterexample)
+          ceExpr <- liftCore $ mkStringExpr ceStr
+          pure (NonRec x e, Just (varNameStr, App (Var justId) ceExpr))
     b -> pure (b, Nothing)
 
   let results' = catMaybes results
@@ -271,7 +254,7 @@ checkValidityAndEmbed guts = do
 -- the 'pantomimeMarker' call with the pre-generated proof result expressions.
 replaceMarkerInBinds
   :: Id
-  -> [(String, (Type, CoreExpr))]
+  -> [(String, CoreExpr)]
   -> [CoreBind]
   -> [CoreBind]
 replaceMarkerInBinds markerPrimeId results = map goBind
@@ -283,7 +266,7 @@ replaceMarkerInBinds markerPrimeId results = map goBind
 -- compile-time Z3 proof result expression.
 replaceMarker
   :: Id
-  -> [(String, (Type, CoreExpr))]
+  -> [(String, CoreExpr)]
   -> CoreExpr
   -> CoreExpr
 replaceMarker markerPrimeId results expr = go expr
@@ -294,7 +277,7 @@ replaceMarker markerPrimeId results expr = go expr
           case exprToString a of
             Just assertionName ->
               case lookup assertionName results of
-                Just (_, replacementExpr) -> replacementExpr
+                Just replacementExpr -> replacementExpr
                 Nothing -> App (go f) (go a)
             Nothing -> App (go f) (go a)
       | otherwise = App (go f) (go a)

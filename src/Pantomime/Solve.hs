@@ -19,11 +19,11 @@ module Pantomime.Solve
   ( checkValid
   , Counterexample (..)
   , counterexampleToPairs
-  , argToCoreExpr
   ) where
 
 import GHC.Core qualified as GHC
 import GHC.Core.FamInstEnv (FamInstEnvs)
+import GHC.Types.Id.Make (nospecId)
 import GHC.Generics (Generic)
 import GHC.Plugins
   ( CoreProgram
@@ -38,23 +38,17 @@ import GHC.Plugins
   , getOccString
   , showSDocUnsafe
   , isId
-  , dataConWorkId
-  , tyConDataCons
-  , trueDataCon
-  , falseDataCon
   )
-import GHC.Core.Make (mkIntegerExpr)
-import GHC.Platform (Platform)
-import GHC.Types.Id.Make (nospecId)
 import GHC.Utils.Outputable
   ( Outputable (..)
   , IsLine (..)
   , SDoc
+  , text
   , (<+>)
   , empty
   )
 
-import Grisette (LogicalOp (..), EvalSym (..), Union, SymBool, onUnion, toCon, ToCon (..), pattern Single)
+import Grisette (LogicalOp (..), EvalSym (..), Union, SymBool, onUnion)
 
 import Control.DeepSeq (NFData (..))
 
@@ -71,13 +65,12 @@ import Pantomime.Expr
   , pprArg
   , runRuntime
   , throwE
-  , Constructor (..)
   )
 import Pantomime.Literal (BuiltInTyCon (..))
 import Pantomime.Symbolise
 import Pantomime.Subst
 import Pantomime.Fresh
-import Pantomime.Util (dbg, BitVec)
+import Pantomime.Util (dbg)
 import Pantomime.Axiom (PluginAxiomsR (..))
 import Pantomime.PrimOps (PrimOp)
 import Pantomime.Defer (defer, withDeferrable)
@@ -185,24 +178,20 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
   pure (eq, Lie $ pure args)
 
 data Counterexample = Counterexample
-  { counterexampleBindings :: [(Var, Arg)]
+  { counterexampleBindings :: [(String, String)]
   }
 
 -- | Formats a counterexample into a list of name-value string pairs.
 counterexampleToPairs :: Counterexample -> [(String, String)]
-counterexampleToPairs (Counterexample bindings) = map formatBinding bindings
-  where
-    formatBinding (bndr, arg) =
-      (getOccString bndr, showSDocUnsafe (pprArg id arg))
+counterexampleToPairs = counterexampleBindings
 
 instance Outputable Counterexample where
   ppr (Counterexample bindings) = pprBindings bindings
     where
       pprBindings [] = empty
-      pprBindings ((bndr, arg) : rest) = vcat
+      pprBindings ((name, val) : rest) = vcat
         [ "==================="
-        , ppr bndr <+> "::" <+> ppr (varType bndr)
-        , pprArg id arg
+        , text name <+> "=" <+> text val
         , pprBindings rest
         ]
 
@@ -262,7 +251,9 @@ checkValid axioms expr = runBuiltInTypes do
       args' <- inject args
       let bindings = flip map args' \(bndr, arg) ->
             let arg' = evalSym True model arg
-            in (bndr, arg')
+                name = getOccString bndr
+                value = showSDocUnsafe (pprArg id arg')
+            in (name, value)
       pure $ Just (Counterexample bindings)
     Unsatisfiable -> do
       dbg @SDoc "Expression was valid!"
@@ -281,22 +272,3 @@ collectValBinders expr = go expr
     go (GHC.Cast e _) = go e
     go (GHC.Let _ e)  = go e
     go _ = []
-
-argToCoreExpr :: MonadThings m => Platform -> Arg -> m CoreExpr
-argToCoreExpr platform arg =
-  case runRuntime arg of
-    Single (Right (Lit (Bool sb)))
-      | Just b <- toCon sb ->
-          pure $ if b then GHC.Var (dataConWorkId trueDataCon) else GHC.Var (dataConWorkId falseDataCon)
-    Single (Right (Lit (Integer si)))
-      | Just i <- toCon si ->
-          pure $ mkIntegerExpr platform i
-    Single (Right (Con (DataCon dc))) ->
-      pure $ GHC.Var (dataConWorkId dc)
-    Single (Right (Con (EnumCon @n tag tc)))
-      | Just t <- toCon @_ @(BitVec n) tag -> do
-          let dcs = tyConDataCons tc
-              dc = dcs !! fromIntegral t
-          pure $ GHC.Var (dataConWorkId dc)
-    _ ->
-      error "Unsupported counterexample argument type"

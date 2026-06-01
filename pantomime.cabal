@@ -156,6 +156,7 @@ test-suite pantomime-test
     , ghc-paths
     , grisette >=0.13.0.0
     , hspec
+    , hspec-expectations
     , mtl
     , pantomime
     , silently

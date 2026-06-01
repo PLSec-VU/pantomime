@@ -9,7 +9,6 @@ module Pantomime
   , pantomimeMarker
   , pantomimeNothing
   , pantomimeJust
-  , PantomimeType (..)
   ) where
 
 import GHC.Plugins hiding (empty, (<>))

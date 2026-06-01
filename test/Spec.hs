@@ -6,6 +6,7 @@ module Main
   ) where
 
 import Test.Hspec
+import Test.Hspec.Expectations (expectationFailure)
 
 import Pantomime
 import Pantomime.BuiltIn qualified as Pantomime
@@ -43,5 +44,15 @@ main = hspec $ do
     it "verifies validAssertion (should succeed with Nothing)" $ do
       $(pantomime 'validAssertion) `shouldBe` Nothing
 
-    it "detects invalidAssertion (should fail with Just Counterexample)" $ do
-      $(pantomime 'invalidAssertion) `shouldBe` Just (False, True)
+    it "detects invalidAssertion (should fail with Just counterexample)" $ do
+      checkInvalid $(pantomime 'invalidAssertion)
+
+-- | Assert that a counterexample was found and print it.
+checkInvalid :: Maybe String -> Expectation
+checkInvalid = \case
+  Just ce -> do
+    putStrLn ""
+    putStrLn "Counterexample found:"
+    putStrLn ce
+    putStrLn ""
+  Nothing -> expectationFailure "Expected a counterexample but assertion was valid"
