@@ -626,6 +626,7 @@ pattern False <- (convert -> Prelude.False)
 {-# COMPLETE True, False #-}
 
 -- | Convert the standard Haskell Boolean to a symbolic Boolean.
+{-# INLINE boolean #-}
 boolean :: Prelude.Bool -> Bool
 boolean = \case
   Prelude.True -> True

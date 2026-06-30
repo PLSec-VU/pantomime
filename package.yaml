@@ -80,6 +80,7 @@ library:
   - text
   - hashable
   - deepseq
+  - bytestring
 
 tests:
   pantomime-test:
@@ -93,6 +94,7 @@ tests:
     dependencies:
     - pantomime
     - hspec
+    - hspec-expectations
     - HUnit
     - ghc-paths
     - directory

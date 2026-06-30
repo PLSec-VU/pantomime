@@ -274,7 +274,7 @@ embed
   :: forall a es
    . HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Reflect a
@@ -287,7 +287,7 @@ project
   :: forall a es
    . HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Reflect a
@@ -301,7 +301,7 @@ project subst = project' subst $ reflect @a
 embed'
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Subst
@@ -323,7 +323,7 @@ embed' subst sty repr = case sty of
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
     let co' = mkSymCo $ mkSubCo co
     mkCast lit co'
-  SPrimitiveTy _ -> throwE ()
+  SPrimitiveTy _ -> throwE @String "embed': cannot directly embed a PrimitiveTy — use project' first"
   SLambda aty rty -> do
     -- Gather the type for the lambda.
     ty <- liftEff $ embedSTy subst sty
@@ -353,8 +353,8 @@ embed' subst sty repr = case sty of
   SNaturalTy -> hoistEff repr >>= absurd
   SNatural -> hoistEff repr >>= absurd
   SAddTy _ _ -> hoistEff repr >>= absurd
-  SLEqTy _ _ -> throwE ()
-  SKnownNatTy _n -> throwE ()
+  SLEqTy _ _ -> throwE @String "embed': SLEqTy cannot be embedded directly"
+  SKnownNatTy _n -> throwE @String "embed': SKnownNatTy cannot be embedded directly"
   STYPE _ -> absurd <$> hoistEff repr
   SRuntimeRepTy -> absurd <$> hoistEff repr
   SBoxedRep _ -> absurd <$> hoistEff repr
@@ -363,12 +363,12 @@ embed' subst sty repr = case sty of
   SUnsafeEqualityTy {} -> do
     -- Get the type of the expression.
     ty <- liftEff $ embedSTy subst sty
-    (tc, args) <- failWithE () $ splitTyConApp_maybe ty
+    (tc, args) <- failWithE @String "embed': expected TyCon application for UnsafeEqualityTy" $ splitTyConApp_maybe ty
 
     -- Fetch the 'UnsafeRefl' DataCon.
     dc <- case tyConDataCons_maybe tc of
       Just [dc] -> pure dc
-      _ -> throwE ()
+      _ -> throwE @String "embed': expected a single data constructor for UnsafeEqualityTy"
 
     -- Construct the spine.
     let spine = mkCon $ mkDataCon @64 dc
@@ -376,7 +376,7 @@ embed' subst sty repr = case sty of
     -- Fetch the type arguments directly.
     (kind, tyL, tyR) <- case args of
       [kind, tyL, tyR] -> pure (kind, tyL, tyR)
-      _ -> throwE ()
+      _ -> throwE @String "embed': expected exactly three type arguments for UnsafeEqualityTy"
 
     -- Force the coercion.
     co <- hoistEff repr
@@ -387,7 +387,7 @@ embed' subst sty repr = case sty of
 project'
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Subst
@@ -397,24 +397,24 @@ project'
 project' subst sty expr = case sty of
   SBoolTy -> hoistEff expr >>= \case
     Lit (Bool b) -> pure b
-    _ -> throwE ()
+    _ -> throwE @String "project': expected a Bool literal"
   SIntegerTy -> hoistEff expr >>= \case
     Lit (Integer i) -> pure i
-    _ -> throwE ()
+    _ -> throwE @String "project': expected an Integer literal"
   SBitVecTy _n -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
     inner <- hoistEff expr
     expr' <- mkCast inner $ mkSubCo co
     case expr' of
       Lit (BitVec bv) -> pure $ SomeBitVec bv
-      _ -> throwE ()
+      _ -> throwE @String "project': expected a BitVec literal"
   SArrayTy _ _ -> do
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
     inner <- hoistEff expr
     expr' <- mkCast inner $ mkSubCo co
     case expr' of
       Lit (Array bv) -> pure $ SomeArray bv
-      _ -> throwE ()
+      _ -> throwE @String "project': expected an Array literal"
   SPrimitiveTy pty -> do
     _ <- hoistEff expr
     pty' <- liftEff $ embedSTy subst pty
@@ -440,9 +440,9 @@ project' subst sty expr = case sty of
     Reduction co _ <- liftEff $ normaliseSTy subst Nominal sty
     repr <- hoistEff expr
     mkCast repr $ mkSubCo co
-  SNaturalTy -> throwE ()
-  SNatural -> throwE ()
-  SAddTy _ _ -> throwE ()
+  SNaturalTy -> throwE @String "project': SNaturalTy cannot be projected directly"
+  SNatural -> throwE @String "project': SNatural cannot be projected directly"
+  SAddTy _ _ -> throwE @String "project': SAddTy cannot be projected directly"
   SLEqTy _ _ -> do
     -- TODO: I guess we should actually ensure that this is well formed? It's
     -- a type family though, so I'm not sure how much actually remains of this
@@ -455,7 +455,7 @@ project' subst sty expr = case sty of
     -- Construct a coercion from the Pantomime 'KnownNat' to 'Integer'. Note
     -- that we do not want to fully instantiate newtypes as this would lead us
     -- to the Haskell 'Integer'.
-    co <- failWithE () do
+    co <- failWithE @String "project': could not construct KnownNat to Integer coercion" do
       (tc, args) <- splitTyConApp_maybe ty
       (ty', co) <- instNewTyCon_maybe tc args
       (tc', args') <- splitTyConApp_maybe ty'
@@ -471,18 +471,18 @@ project' subst sty expr = case sty of
       -- value, the error should be something closed to an 'unknown' SMT solver
       -- result. Nothing in fact is invalid, it is just not solvable.
       Lit (Integer i) | Just n <- toCon i >>= someNatVal -> pure n
-      _ -> throwE ()
-  STYPE _ -> throwE ()
-  SRuntimeRepTy -> throwE ()
-  SBoxedRep _ -> throwE ()
-  SLevityTy -> throwE ()
-  SLifted -> throwE ()
+      _ -> throwE @String "project': expected a concrete Integer for KnownNat projection"
+  STYPE _ -> throwE @String "project': STYPE cannot be projected directly"
+  SRuntimeRepTy -> throwE @String "project': SRuntimeRepTy cannot be projected directly"
+  SBoxedRep _ -> throwE @String "project': SBoxedRep cannot be projected directly"
+  SLevityTy -> throwE @String "project': SLevityTy cannot be projected directly"
+  SLifted -> throwE @String "project': SLifted cannot be projected directly"
   SUnsafeEqualityTy {} -> do
     expr' <- hoistEff expr
     let (_spine, args) = collectArgs expr'
     case args of
       [_kind, _ty, co] -> liftEff $ forceCo co
-      _ -> throwE ()
+      _ -> throwE @String "project': expected exactly three arguments for UnsafeEqualityTy"
 
 embedSTy
   :: HasCallStack

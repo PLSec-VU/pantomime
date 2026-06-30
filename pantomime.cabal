@@ -49,6 +49,7 @@ library
       Pantomime.Grisette.Mergeable
       Pantomime.Grisette.UnionT
       Pantomime.Literal
+      Pantomime.Marker
       Pantomime.Orphan.GHC
       Pantomime.Orphan.Grisette
       Pantomime.Passes
@@ -56,6 +57,7 @@ library
       Pantomime.Solve
       Pantomime.Subst
       Pantomime.Symbolise
+      Pantomime.TH
       Pantomime.Unification
       Pantomime.Util
   other-modules:
@@ -92,6 +94,7 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -Wprepositive-qualified-module
   build-depends:
       base >=4.7 && <5
+    , bytestring
     , composition
     , constraints >=0.14.2
     , containers
@@ -153,6 +156,7 @@ test-suite pantomime-test
     , ghc-paths
     , grisette >=0.13.0.0
     , hspec
+    , hspec-expectations
     , mtl
     , pantomime
     , silently

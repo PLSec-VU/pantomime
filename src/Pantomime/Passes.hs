@@ -7,6 +7,8 @@ import GHC.Plugins hiding (empty, (<>), thNameToGhcName, getFirstAnnotations)
 import GHC.Core.Lint
 import GHC.Driver.Config.Core.Lint (initLintConfig)
 
+import GHC.Core.Make (mkStringExpr)
+
 import Grisette
   ( GrisetteSMTConfig (..)
   , SMTConfig (..)
@@ -16,13 +18,16 @@ import Grisette
 
 import Data.Data (Data)
 import Data.Traversable (for)
+import Data.Maybe (catMaybes)
+import Data.ByteString.Char8 qualified as BS8
+import Pantomime.Marker
 
 import Control.Error
 
 import Language.Haskell.TH qualified as TH
 
-import Pantomime.Unification
 import Pantomime.Solve
+import Pantomime.Unification
 import Pantomime.Axiom (resolvePluginAxioms)
 import Pantomime.Annotation
 
@@ -100,7 +105,7 @@ runSymbolic
     , Error OversaturatedError
     , Error UnificationError
     , Error SolverError
-    , Error ()
+    , Error String
     , Provider_ Solver ()
     , HasAnnotations
     , THNameToGHCName
@@ -131,7 +136,7 @@ runSymbolic guts
   . runThNameToGhcName
   . runHasAnnotations
   . runProvider_ (const $ runSolver solver)
-  . runErrorWith @() propagateErrorShow
+  . runErrorWith @String propagateErrorShow
   . runErrorWith @SolverError propagateErrorShow
   . runErrorWith @UnificationError propagateError
   . runErrorWith @OversaturatedError propagateError
@@ -174,7 +179,7 @@ runSymbolic guts
 checkValidityPass :: CoreToDo
 checkValidityPass = do
   let name = TH.nameBase 'checkValidityPass
-  let pass guts = runSymbolic guts $ annBindsPass checkValidity guts
+  let pass guts = runSymbolic guts $ checkValidityAndEmbed guts
   CoreDoPluginPass name pass
 
 printAndLint
@@ -193,24 +198,158 @@ printAndLint bind = do
   debug res
   pure bind
 
-checkValidity
-  :: HasCallStack
-  => Error () :> es
-  => Error (LookupError Name) :> es
-  => Error (LookupError TH.Name) :> es
-  => Error SolverError :> es
-  => Context Reader CoreProgram :> es
-  => Context Reader [TyCon] :> es
-  => Provider_ Solver () :> es
-  => HasFamInstEnvs :> es
-  => HasThings :> es
-  => THNameToGHCName :> es
-  => Theory
-  -> CoreBind'
-  -> Eff es CoreBind'
--- TODO: The check itself permits recursive binders, so we should not restrict
--- the input here really!
-checkValidity (Theory axioms) (Bind' var expr) = do
-  axioms' <- resolvePluginAxioms axioms
-  checkValid axioms' expr
-  pure $ Bind' var expr
+checkValidityAndEmbed
+  :: ( HasCallStack
+     , Error String :> es
+     , Error (LookupError Name) :> es
+     , Error (LookupError TH.Name) :> es
+     , Error SolverError :> es
+     , Context Reader CoreProgram :> es
+     , Context Reader [TyCon] :> es
+     , Provider_ Solver () :> es
+     , HasFamInstEnvs :> es
+     , HasThings :> es
+     , THNameToGHCName :> es
+     , HasAnnotations :> es
+     , CoreE :> es
+     , IOE :> es
+     , HasDynFlagsE :> es
+     )
+  => ModGuts
+  -> Eff es ModGuts
+checkValidityAndEmbed guts = do
+  (_, anns) <- getFirstAnnotations @Theory deserializeWithData guts
+
+  markerPrimeId <- thNameToGhcName 'pantomimeMarker >>= lookupIdAll
+  nothingId <- thNameToGhcName 'pantomimeNothing >>= lookupIdAll
+  justId <- thNameToGhcName 'pantomimeJust >>= lookupIdAll
+
+  (binds, results) <- fmap unzip $ for (mg_binds guts) \case
+    NonRec x e | Just (Theory axioms) <- lookupUFM anns $ varName x -> do
+      axioms' <- resolvePluginAxioms axioms
+      mCounterexample <- checkValid axioms' e
+      let varNameStr = getOccString x
+      case mCounterexample of
+        Nothing -> do
+          pure (NonRec x e, Just (varNameStr, Var nothingId))
+        Just counterexample -> do
+          let ceStr = showSDocUnsafe (ppr counterexample)
+          ceExpr <- liftCore $ mkStringExpr ceStr
+          pure (NonRec x e, Just (varNameStr, App (Var justId) ceExpr))
+    b -> pure (b, Nothing)
+
+  let results' = catMaybes results
+
+  let resultNames = map fst results'
+  case findMissingAnnotations markerPrimeId resultNames binds of
+    [] -> pure ()
+    (missing : _) ->
+      throwIO $ PprProgramError "checkValidityPass" $
+        text ("Symbolic check result not found for '" ++ missing ++ "'. Did you forget to add the {-# ANN " ++ missing ++ " (Theory ...) #-} annotation?")
+
+  let binds' = replaceMarkerInBinds markerPrimeId results' binds
+  pure guts { mg_binds = binds' }
+
+-- | Recursively traverses all bindings in the module and replaces occurrences of
+-- the 'pantomimeMarker' call with the pre-generated proof result expressions.
+replaceMarkerInBinds
+  :: Id
+  -> [(String, CoreExpr)]
+  -> [CoreBind]
+  -> [CoreBind]
+replaceMarkerInBinds markerPrimeId results = map goBind
+  where
+    goBind (NonRec b e) = NonRec b (replaceMarker markerPrimeId results e)
+    goBind (Rec bs) = Rec (map (\(b, e) -> (b, replaceMarker markerPrimeId results e)) bs)
+
+-- | Replaces any application of the 'pantomimeMarker' with its corresponding
+-- compile-time Z3 proof result expression.
+replaceMarker
+  :: Id
+  -> [(String, CoreExpr)]
+  -> CoreExpr
+  -> CoreExpr
+replaceMarker markerPrimeId results expr = go expr
+  where
+    go :: CoreExpr -> CoreExpr
+    go (App f a)
+      | Just () <- isMarkerPrimeCall f =
+          case exprToString a of
+            Just assertionName ->
+              case lookup assertionName results of
+                Just replacementExpr -> replacementExpr
+                Nothing -> App (go f) (go a)
+            Nothing -> App (go f) (go a)
+      | otherwise = App (go f) (go a)
+            
+    go (Var v) = Var v
+    go (Lit l) = Lit l
+    go (Lam b e) = Lam b (go e)
+    go (Let (NonRec b r) e) = Let (NonRec b (go r)) (go e)
+    go (Let (Rec bs) e) = Let (Rec (map (\(b, r) -> (b, go r)) bs)) (go e)
+    go (Case e b t alts) = Case (go e) b t (map goAlt alts)
+    go (Cast e c) = Cast (go e) c
+    go (Tick t e) = Tick t (go e)
+    go (Type t) = Type t
+    go (Coercion c) = Coercion c
+
+    goAlt (Alt con binders e) = Alt con binders (go e)
+
+    isMarkerPrimeCall :: CoreExpr -> Maybe ()
+    isMarkerPrimeCall (Var v) | v == markerPrimeId = Just ()
+    isMarkerPrimeCall (App f' _) = isMarkerPrimeCall f'
+    isMarkerPrimeCall (Cast e' _) = isMarkerPrimeCall e'
+    isMarkerPrimeCall (Tick _ e') = isMarkerPrimeCall e'
+    isMarkerPrimeCall _ = Nothing
+
+-- | Rxtract a Haskell 'String' value from a GHC 'CoreExpr'
+-- representing a string literal. Return Nothing if the expression is not
+-- a string literal.
+exprToString :: CoreExpr -> Maybe String
+exprToString (Tick _ e) = exprToString e
+exprToString (Cast e _) = exprToString e
+exprToString (App (Var f) (Lit (LitString bs)))
+  | getOccString f == "unpackCString#" || getOccString f == "unpackCStringUtf8#" =
+      Just (BS8.unpack bs)
+exprToString (Lit (LitString bs)) = Just (BS8.unpack bs)
+exprToString _ = Nothing
+
+-- | Scans the Core bindings for any call to 'pantomimeMarker' and returns the
+-- names of all assertions that are referenced by a splice but lack the corresponding
+-- 'Theory' annotation.
+findMissingAnnotations
+  :: Id
+  -> [String]
+  -> [CoreBind]
+  -> [String]
+findMissingAnnotations markerPrimeId resultNames binds = concatMap (goExpr . getExpr) binds
+  where
+    getExpr (NonRec _ e) = e
+    getExpr (Rec bs) = Let (Rec bs) (Var markerPrimeId)
+
+    goExpr :: CoreExpr -> [String]
+    goExpr (App f a) =
+      case isMarkerPrimeCall f of
+        Just () ->
+          case exprToString a of
+            Just assertionName
+              | assertionName `notElem` resultNames -> [assertionName]
+            _ -> goExpr f ++ goExpr a
+        Nothing -> goExpr f ++ goExpr a
+    goExpr (Var _) = []
+    goExpr (Lit _) = []
+    goExpr (Lam _ e) = goExpr e
+    goExpr (Let (NonRec _ r) e) = goExpr r ++ goExpr e
+    goExpr (Let (Rec bs) e) = concatMap (goExpr . snd) bs ++ goExpr e
+    goExpr (Case e _ _ alts) = goExpr e ++ concatMap (\(Alt _ _ body) -> goExpr body) alts
+    goExpr (Cast e _) = goExpr e
+    goExpr (Tick _ e) = goExpr e
+    goExpr (Type _) = []
+    goExpr (Coercion _) = []
+
+    isMarkerPrimeCall :: CoreExpr -> Maybe ()
+    isMarkerPrimeCall (Var v) | v == markerPrimeId = Just ()
+    isMarkerPrimeCall (App f' _) = isMarkerPrimeCall f'
+    isMarkerPrimeCall (Cast e' _) = isMarkerPrimeCall e'
+    isMarkerPrimeCall (Tick _ e') = isMarkerPrimeCall e'
+    isMarkerPrimeCall _ = Nothing

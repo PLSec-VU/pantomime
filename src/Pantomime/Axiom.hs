@@ -236,7 +236,7 @@ instance Monoid PluginAxiomsR where
 resolvePluginAxioms
   :: HasCallStack
   -- TODO: Adjust these errors!
-  => Error () :> es
+  => Error String :> es
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => THNameToGHCName :> es
@@ -350,7 +350,7 @@ resolvePluginAxioms PluginAxioms { .. } = do
 
     -- Throw an error if we could not create any.
     when (null dictsNew) do
-      throwError ()
+      throwError @String "resolvePluginAxioms: could not create any Embeddable or Coercible dictionaries for the given axioms"
 
     -- Insert all dictionaries.
     pure $ foldlBy dicts dictsNew \acc dict -> do

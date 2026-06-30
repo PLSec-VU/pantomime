@@ -138,6 +138,7 @@ import Prelude
   , Num (..)
   , Integral (..)
   , Maybe (..)
+  , String
   , type (~)
   , ($)
   , (<$>)
@@ -159,7 +160,7 @@ import Prelude
 type PrimOp es
   =  HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => Eval es Expr
@@ -190,7 +191,7 @@ type TagToEnumOp
 tagToEnum :: PrimOp es
 tagToEnum = embed2 @TagToEnumOp \ty bvE -> do
   SomeBitVec @n bv <- hoistEff bvE
-  Refl <- failWithE () $ eqT @n @64
+  Refl <- failWithE @String "tagToEnum: expected 64-bit bitvector" $ eqT @n @64
   -- TODO: I'm not sure how this interacts with the whole type normalisation.
   -- I don't think this is correct. Maybe we should reduce the type first? I
   -- guess we could also opt to do this within the embedding. This one is likely
@@ -221,7 +222,7 @@ embed2
   => Wrapped (Deferred a) ~ Runtime (Repr ty)
   => Defer es a
   => Wrap (Deferred a)
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => a
@@ -245,7 +246,7 @@ dataToTag = embed2 @DataToTagOp \_ _ valueE -> do
   case fst $ collectArgs value of
     Con (DataCon dc) -> pure $ SomeBitVec @64 (fromIntegral $ dataConTagZ dc)
     Con (EnumCon @n tag _) | Just Refl <- eqT @n @64 -> pure $ SomeBitVec tag
-    _ -> throwE ()
+    _ -> throwE @String "dataToTag: expected a DataCon or EnumCon constructor"
 
 type RaiseOp
   =   Forall 0 LevityTy
@@ -285,7 +286,7 @@ not = embed2 @(BoolTy :-> BoolTy) \value -> do
 boolbinary
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => (SymBool -> SymBool -> SymBool)
@@ -320,7 +321,7 @@ type IntegerBitVecOp
 i2bv :: PrimOp es
 i2bv = embed2 @IntegerBitVecOp \_ n _ i -> do
   SomeNat @n _ <- hoistEff n
-  Dict <- failWithE () $ posNat @n
+  Dict <- failWithE @String "i2bv: expected a positive Nat" $ posNat @n
   i' <- hoistEff i
   pure $ SomeBitVec @n (symFromIntegral i')
 
@@ -335,7 +336,7 @@ iabs = embed2 @(IntegerTy :-> IntegerTy) \value -> do
 ibinary
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => (SymInteger -> SymInteger -> SymInteger)
@@ -360,7 +361,7 @@ imod = ibinary mod
 icompare
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => (SymInteger -> SymInteger -> SymBool)
@@ -410,7 +411,7 @@ type UnBitVecOp
 bvunary
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => (forall n. KnownPos n => SymBitVec n -> SymBitVec n)
@@ -436,7 +437,7 @@ type BinBitVecOp
 bvbinary
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => (forall n. KnownPos n => SymBitVec n -> SymBitVec n -> SymBitVec n)
@@ -444,7 +445,7 @@ bvbinary
 bvbinary f = embed2 @BinBitVecOp \_n lhs rhs -> do
   SomeBitVec @nl lhs' <- hoistEff lhs
   SomeBitVec @nr rhs' <- hoistEff rhs
-  Refl <- failWithE () $ eqT @nl @nr
+  Refl <- failWithE @String "Bitvector binary operation: width mismatch" $ eqT @nl @nr
   pure $ SomeBitVec (f lhs' rhs')
 
 asSignedBin
@@ -522,7 +523,7 @@ type CompareBitVecOp
 bvcompare
   :: HasCallStack
   => Deferrable es
-  => Error () :> es
+  => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
   => (forall n. KnownPos n => SymBitVec n -> SymBitVec n -> SymBool)
@@ -530,7 +531,7 @@ bvcompare
 bvcompare f = embed2 @CompareBitVecOp \_ lhs rhs -> do
   SomeBitVec @nl lhs' <- hoistEff lhs
   SomeBitVec @nr rhs' <- hoistEff rhs
-  Refl <- failWithE () $ eqT @nl @nr
+  Refl <- failWithE @String "Bitvector comparison: width mismatch" $ eqT @nl @nr
   pure $ f lhs' rhs'
 
 asSignedCmp
@@ -598,8 +599,8 @@ bvextend
 bvextend f = embed2 @ExtendBitVecOp \_ _ r _ bv -> do
   SomeBitVec @l bv' <- hoistEff bv
   SomeNat @r _ <- hoistEff r
-  Dict <- failWithE () $ leqNat @l @r
-  Dict <- failWithE () $ posNat @r
+  Dict <- failWithE @String "Bitvector extend: size constraint violation (l <= r)" $ leqNat @l @r
+  Dict <- failWithE @String "Bitvector extend: expected positive result size" $ posNat @r
   pure $ SomeBitVec (f (Proxy @r) bv')
 
 bvzext :: PrimOp es
@@ -631,9 +632,9 @@ bvselect = embed2 @SelectBitVecOp \_ _ _ idx width _ _  bv -> do
   SomeNat @idx _ <- hoistEff idx
   SomeNat @width _ <- hoistEff width
   SomeBitVec @n bv' <- hoistEff bv
-  Dict <- failWithE () $ posNat @width
+  Dict <- failWithE @String "Bitvector select: expected positive width" $ posNat @width
   SNat @sum <- pure $ SNat @idx %+ SNat @width
-  Dict <- failWithE () $ leqNat @sum @n
+  Dict <- failWithE @String "Bitvector select: index+width exceeds bitvector size" $ leqNat @sum @n
   pure $ SomeBitVec (sizedBVSelect (Proxy @idx) (Proxy @width) bv')
 
 -- :: forall k v. Primitive k => Primitive v => v -> Array k v
@@ -653,7 +654,7 @@ aconst = embed2 @ArrayConstOp \_ _ pk _ valE -> do
   -- Gather the literal, knowing it is one due to the constraint.
   Literal @v vty val <- hoistEff valE >>= \case
     Lit lit -> pure lit
-    _ -> throwE ()
+    _ -> throwE @String "aconst: expected a literal value"
 
   -- Gather evidence required to perform the array operation.
   Dict <- pure $ evidence kty
@@ -679,10 +680,10 @@ aselect = embed2 @ArraySelectOp \_ _ arrE keyE -> do
   -- Gather the literal, knowing it is one due to the constraint.
   Literal kty key <- hoistEff keyE >>= \case
     Lit lit -> pure lit
-    _ -> throwE ()
+    _ -> throwE @String "aselect: expected a literal key"
 
   -- Gather evidence required to perform the array operation.
-  Refl <- failWithE () $ eqLiteralType (literalType @k) kty
+  Refl <- failWithE @String "aselect: key type mismatch" $ eqLiteralType (literalType @k) kty
 
   -- Select the value out of the array and wrap it back into an expression.
   let val = Literal (literalType @v) $ Array.select arr key
@@ -705,16 +706,16 @@ astore = embed2 @ArrayStoreOp \_ _ arrE keyE valE -> do
   -- Gather the literal, knowing it is one due to the constraint.
   Literal kty key <- hoistEff keyE >>= \case
     Lit lit -> pure lit
-    _ -> throwE ()
+    _ -> throwE @String "astore: expected a literal key"
 
   -- Gather the literal, knowing it is one due to the constraint.
   Literal vty val <- hoistEff valE >>= \case
     Lit lit -> pure lit
-    _ -> throwE ()
+    _ -> throwE @String "astore: expected a literal value"
 
   -- Gather evidence required to perform the array operation.
-  Refl <- failWithE () $ eqLiteralType (literalType @k) kty
-  Refl <- failWithE () $ eqLiteralType (literalType @v) vty
+  Refl <- failWithE @String "astore: key type mismatch" $ eqLiteralType (literalType @k) kty
+  Refl <- failWithE @String "astore: value type mismatch" $ eqLiteralType (literalType @v) vty
 
   -- Create the modified array.
   let array = Array.store arr key val
@@ -732,6 +733,6 @@ aeq = embed2 @ArrayEqOp \_ _ arrL arrR -> do
   SomeArray @kL @vL arrL' <- hoistEff arrL
   SomeArray @kR @vR arrR' <- hoistEff arrR
 
-  Refl <- failWithE () $ eqLiteralType (literalType @kL) (literalType @kR)
-  Refl <- failWithE () $ eqLiteralType (literalType @vL) (literalType @vR)
+  Refl <- failWithE @String "Array equality: key type mismatch" $ eqLiteralType (literalType @kL) (literalType @kR)
+  Refl <- failWithE @String "Array equality: value type mismatch" $ eqLiteralType (literalType @vL) (literalType @vR)
   pure $ arrL' .== arrR'
