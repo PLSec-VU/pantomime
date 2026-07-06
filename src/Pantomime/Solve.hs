@@ -249,11 +249,13 @@ checkValid axioms expr = runBuiltInTypes do
       -- TODO: I should probably check whether the arguments are recursive
       -- before printing? Alternatively, I could just have a maximum depth.
       args' <- inject args
-      let bindings = flip map args' \(bndr, arg) ->
-            let arg' = evalSym True model arg
-                name = getOccString bndr
-                value = showSDocUnsafe (pprArg id arg')
-            in (name, value)
+      -- Force each binding's value string fully here, so we can display the
+      -- counterexample.
+      bindings <- for args' \(bndr, arg) -> do
+        let arg' = evalSym True model arg
+            name = getOccString bndr
+            value = showSDocUnsafe (pprArg id arg')
+        length value `seq` pure (name, value)
       pure $ Just (Counterexample bindings)
     Unsatisfiable -> do
       dbg @SDoc "Expression was valid!"
