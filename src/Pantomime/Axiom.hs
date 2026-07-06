@@ -52,7 +52,7 @@ import GHC.Utils.Outputable
 
 import GHC.Exts (IsList (..))
 
-import Control.Monad ((>=>), guard, when)
+import Control.Monad ((>=>), guard)
 import Control.Applicative (Alternative (..))
 
 import Data.Data (Data)
@@ -348,9 +348,8 @@ resolvePluginAxioms PluginAxioms { .. } = do
     let dictEm' = maybe [] (: []) dictEm
     let dictsNew = dictCo' <> dictEm'
 
-    -- Throw an error if we could not create any.
-    when (null dictsNew) do
-      throwError @String "resolvePluginAxioms: could not create any Embeddable or Coercible dictionaries for the given axioms"
+    -- Skip if we could not create any dictionaries. This happens for
+    -- kind-polymorphic primitive TyCons like State#.
 
     -- Insert all dictionaries.
     pure $ foldlBy dicts dictsNew \acc dict -> do
