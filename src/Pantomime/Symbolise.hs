@@ -84,7 +84,13 @@ symbolise = go
           let dc = mkDataCon @64 GHC.unitDataCon
           pure $ mkCon dc
 
-        -- TODO: Give this a proper error.
+        -- Variables of type `forall a. a` are error/bottom functions
+        -- (overflowError, succError, predError, etc.). Treat as UB.
+        | Just (bv, rty) <- GHC.splitForAllTyCoVar_maybe (GHC.varType var)
+        , GHC.isTyVar bv
+        , GHC.isTyVarTy rty
+        -> mkUB
+
         | otherwise -> do
           dbgE
             [ GHC.ppr $ GHC.varType var

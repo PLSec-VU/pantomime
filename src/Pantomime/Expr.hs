@@ -893,8 +893,24 @@ collectScrut = \case
       EnumCon _ tc | dc : _ <- tyConDataCons tc -> pure dc
       _ -> throwE @String "collectScrut: expected a DataCon or EnumCon with data constructors"
 
-    -- Push the coercion into the arguments.
-    (_univ, args') <- liftEff $ pushCoDataCon dc args co
+    -- Push the coercion into the arguments. When TyCons differ (e.g. because a
+    -- type axiom remapped Ptr to FakePtr), the data constructor's field
+    -- structure may not match the coercion target. Keep the original args in
+    -- that case.
+    let dcTyCon = dataConTyCon dc
+    let coTyCon = fmap fst (splitTyConApp_maybe (coercionRKind co))
+    (_univ, args') <-
+      if Just dcTyCon == coTyCon
+        then liftEff $ pushCoDataCon dc args co
+        else do
+          -- Skipping the coercion push is only safe when the data constructor
+          -- has no existential type variables. Otherwise, the field types
+          -- could reference those existentials and would need remapping.
+          let exVars = dataConExTyCoVars dc
+          unless (null exVars) $ throwE @String $
+            "collectScrut: cannot skip coercion push for data constructor with existential type variables: "
+            ++ GHC.showSDocUnsafe (GHC.ppr dc)
+          pure ([], drop (length (dataConUnivTyVars dc)) args)
     pure (Right spine', unthunk <$> args')
 
   -- If not a cast, we attempt to get the literal at the spine and return the
@@ -927,8 +943,6 @@ pushCoDataCon dc args co = do
   -- Check whether the outer type is a TyConAppCo.
   let tyR = coercionRKind co
   (tcR, univArgsR) <- failWith @String "pushCoDataCon: expected a TyConApp coercion" $ splitTyConApp_maybe tyR
-  unless (tcR == dataConTyCon dc) do
-    throwError @String "pushCoDataCon: TyCon mismatch in coercion"
 
   -- Gather information on type variables of the DataCon.
   let dcUnivVars = dataConUnivTyVars dc

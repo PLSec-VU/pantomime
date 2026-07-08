@@ -81,6 +81,7 @@ library:
   - hashable
   - deepseq
   - bytestring
+  - time
 
 tests:
   pantomime-test:

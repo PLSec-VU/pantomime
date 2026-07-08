@@ -108,6 +108,7 @@ library
     , primitive
     , template-haskell
     , text
+    , time
     , transformers
     , unordered-containers
   default-language: Haskell2010
