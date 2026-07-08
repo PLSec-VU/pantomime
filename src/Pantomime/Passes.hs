@@ -20,6 +20,9 @@ import Data.Data (Data)
 import Data.Traversable (for)
 import Data.Maybe (catMaybes)
 import Data.ByteString.Char8 qualified as BS8
+import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime)
+import System.IO (hPutStrLn, stderr)
+import Text.Printf (printf)
 import Pantomime.Marker
 
 import Control.Error
@@ -144,10 +147,14 @@ runSymbolic guts
   . runErrorWith @(LookupError TH.Name) propagateErrorShow
   where
     -- TODO: We could let the user decide which solver no?
+    -- Per-property timing is measured and reported explicitly in
+    -- 'checkValidityAndEmbed' instead, so each number is attributable to a
+    -- property name rather than relying on interleaved, unlabelled solver
+    -- output ('verbose'/'PrintTiming').
     solver = z3
       { sbvConfig = (sbvConfig z3)
-        { verbose = True
-        , timing = PrintTiming
+        { verbose = False
+        , timing = NoTiming
         }
       }
 
@@ -198,6 +205,14 @@ printAndLint bind = do
   debug res
   pure bind
 
+-- | Wall-clock milliseconds between two timestamps, for reporting per-property
+-- verification time. Printed to stderr as it is measured, rather than parsed
+-- out of the solver's own (unlabelled, interleaved) timing output, so each
+-- number can be attributed to the property that produced it.
+elapsedMs :: UTCTime -> UTCTime -> Double
+elapsedMs startTime endTime =
+  realToFrac (diffUTCTime endTime startTime) * 1000
+
 checkValidityAndEmbed
   :: ( HasCallStack
      , Error String :> es
@@ -226,9 +241,13 @@ checkValidityAndEmbed guts = do
 
   (binds, results) <- fmap unzip $ for (mg_binds guts) \case
     NonRec x e | Just (Theory axioms) <- lookupUFM anns $ varName x -> do
-      axioms' <- resolvePluginAxioms axioms
-      mCounterexample <- checkValid axioms' e
       let varNameStr = getOccString x
+      axioms' <- resolvePluginAxioms axioms
+      startTime <- liftIO getCurrentTime
+      mCounterexample <- checkValid axioms' e
+      endTime <- liftIO getCurrentTime
+      liftIO $ hPutStrLn stderr $
+        printf "PANTOMIME-TIMING %s %.3fms" varNameStr (elapsedMs startTime endTime)
       case mCounterexample of
         Nothing -> do
           pure (NonRec x e, Just (varNameStr, Var nothingId))
