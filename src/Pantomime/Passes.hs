@@ -7,8 +7,6 @@ import GHC.Plugins hiding (empty, (<>), thNameToGhcName, getFirstAnnotations)
 import GHC.Core.Lint
 import GHC.Driver.Config.Core.Lint (initLintConfig)
 
-import GHC.Core.Make (mkStringExpr)
-
 import Grisette
   ( GrisetteSMTConfig (..)
   , SMTConfig (..)
@@ -28,7 +26,7 @@ import Language.Haskell.TH qualified as TH
 
 import Pantomime.Solve
 import Pantomime.Unification
-import Pantomime.Axiom (resolvePluginAxioms)
+import Pantomime.Axiom (resolveEmbeddings)
 import Pantomime.Annotation
 
 import Effectful
@@ -45,6 +43,7 @@ import Effectful.GHC.Display
 import Effectful.GHC.TyThing
 import Effectful.GHC.External
 import Effectful.GHC.Annotations
+import Effectful.GHC.Unique (HasUnique)
 
 -- | An always non-recursive binder.
 data Bind' a = Bind' a (Expr a)
@@ -106,12 +105,14 @@ runSymbolic
     , Error UnificationError
     , Error SolverError
     , Error String
+    , Error SDoc
     , Provider_ Solver ()
     , HasAnnotations
     , THNameToGHCName
     , HasThings
     , Context Reader CoreProgram
     , Context Reader [TyCon]
+    , HasUnique
     , HasInstEnvs
     , HasFamInstEnvs
     , HasExternalPackageState
@@ -130,12 +131,14 @@ runSymbolic guts
   . runHasExternalPackageState
   . runHasFamInstEnv guts
   . runHasInstEnvs guts
+  . runHasUnique
   . runContextReader (mg_tcs guts)
   . runContextReader (mg_binds guts)
   . runHasThings
   . runThNameToGhcName
   . runHasAnnotations
   . runProvider_ (const $ runSolver solver)
+  . runErrorWith @SDoc propagateError
   . runErrorWith @String propagateErrorShow
   . runErrorWith @SolverError propagateErrorShow
   . runErrorWith @UnificationError propagateError
@@ -201,6 +204,7 @@ printAndLint bind = do
 checkValidityAndEmbed
   :: ( HasCallStack
      , Error String :> es
+     , Error SDoc :> es
      , Error (LookupError Name) :> es
      , Error (LookupError TH.Name) :> es
      , Error SolverError :> es
@@ -209,11 +213,11 @@ checkValidityAndEmbed
      , Provider_ Solver () :> es
      , HasFamInstEnvs :> es
      , HasThings :> es
+     , HasUnique :> es
      , THNameToGHCName :> es
      , HasAnnotations :> es
      , CoreE :> es
      , IOE :> es
-     , HasDynFlagsE :> es
      )
   => ModGuts
   -> Eff es ModGuts
@@ -225,9 +229,9 @@ checkValidityAndEmbed guts = do
   justId <- thNameToGhcName 'pantomimeJust >>= lookupIdAll
 
   (binds, results) <- fmap unzip $ for (mg_binds guts) \case
-    NonRec x e | Just (Theory axioms) <- lookupUFM anns $ varName x -> do
-      axioms' <- resolvePluginAxioms axioms
-      mCounterexample <- checkValid axioms' e
+    NonRec x e | Just (Theory embeddings) <- lookupUFM anns $ varName x -> do
+      embeddings' <- resolveEmbeddings embeddings
+      mCounterexample <- checkValid embeddings' e
       let varNameStr = getOccString x
       case mCounterexample of
         Nothing -> do

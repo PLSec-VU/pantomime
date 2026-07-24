@@ -81,6 +81,7 @@ library:
   - hashable
   - deepseq
   - bytestring
+  - syb
 
 tests:
   pantomime-test:

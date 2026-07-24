@@ -32,7 +32,6 @@ import GHC.Plugins
   , Bind (..)
   , Var
   , exprType
-  , varType
   , vcat
   , emptyInScopeSet
   , getOccString
@@ -71,7 +70,7 @@ import Pantomime.Symbolise
 import Pantomime.Subst
 import Pantomime.Fresh
 import Pantomime.Util (dbg)
-import Pantomime.Axiom (PluginAxiomsR (..))
+import Pantomime.Axiom (EmbeddingsR (..))
 import Pantomime.PrimOps (PrimOp)
 import Pantomime.Defer (defer, withDeferrable)
 import Pantomime.Binding
@@ -128,14 +127,14 @@ construct
   => Context Reader FamInstEnvs :> es
   => Error String :> es
   => [(Var, forall fs. PrimOp fs)]
-  -> PluginAxiomsR
+  -> EmbeddingsR
   -> CoreProgram
   -> CoreExpr
   -- FIXME: This 'Lie' evades the check NFData constraint on 'withDeferrable'.
   -- I'm not sure how to go around this, so for now we just let it crash if it
   -- does occur.. :/
   -> Eff es (SymBool, Lie (Eff SymboliseEff [(Var, Arg)]))
-construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDeferrable do
+construct prim EmbeddingsR { .. } program expr = inject @SymboliseEff $ withDeferrable do
   prim' <- for prim \(bndr, rhs) -> do
     rhs' <- defer rhs
     pure (bndr, rhs')
@@ -207,7 +206,7 @@ checkValid
   => THNameToGHCName :> es
   => HasFamInstEnvs :> es
   => Provider_ Solver () :> es
-  => PluginAxiomsR
+  => EmbeddingsR
   -> CoreExpr
   -> Eff es (Maybe Counterexample)
 checkValid axioms expr = runBuiltInTypes do

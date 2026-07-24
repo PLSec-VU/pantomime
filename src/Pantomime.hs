@@ -4,7 +4,8 @@ module Pantomime
   ( plugin
 
   , Theory (..)
-  , PluginAxioms (..)
+  , Embeddings (..)
+  , ArgType (..)
   , pantomime
   , pantomimeMarker
   , pantomimeNothing

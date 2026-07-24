@@ -1,19 +1,21 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Pantomime.Axiom
-  ( PluginAxioms (..)
-  , PluginAxiomsR (..)
+  ( Embeddings (..)
+  , ArgType (..)
+  , EmbeddingsR (..)
   , TypeAxiomsR
   , TermAxiomsR
-  , resolvePluginAxioms
+  , resolveEmbeddings
   ) where
 
 import Prelude hiding (break)
 import Language.Haskell.TH qualified as TH
 
-import GHC.Core.TyCo.Rep (UnivCoProvenance(..))
-import GHC.Core.TyCon.Env (TyConEnv, mkTyConEnv)
-import GHC.Data.TrieMap (TrieMap (..), insertTM)
+import GHC.Core.InstEnv (mkLocalClsInst, emptyInstEnv, extendInstEnv)
+import GHC.Core.TyCo.Rep (UnivCoProvenance (..), Coercion (..))
+import GHC.Core.TyCon.Env (TyConEnv)
+import GHC.Core.Unfold.Make (mkDFunUnfolding)
 import GHC.Plugins
   ( TyCon (..)
   , Name
@@ -23,56 +25,80 @@ import GHC.Plugins
   , Role (..)
   , Expr (..)
   , Var (..)
-  , TypeOrConstraint (..)
+  , Type
+  , MonadUnique (..)
+  , OverlapFlag (..)
+  , OverlapMode (..)
+  , TyVar
+  , Unique
   , mkTyConTy
   , mkUnivCo
   , dataConWorkId
   , mkApps
-  , mkCast
-  , mkSymCo
-  , exprType
+  , mkAppTy
+  , mkTyVarTy
+  , mkVarOccFS
+  , mkSystemName
+  , mkTyVar
   , classDataCon
   , typeKind
-  , unitExpr
-  , unrestricted
-  , emptyInScopeSet
-  , sORTKind_maybe
   , coercibleDataCon
+  , generatedSrcSpan
+  , setIdUnfolding
+  , splitFunTy_maybe
+  , isTypeSynonymTyCon
+  , mkFastString
+  , expandTypeSynonyms
+  , splitTyConAppNoView_maybe
+  , unitDataConId
   )
 import GHC.Tc.Utils.TcType (eqType)
+import GHC.Types.Id.Make (mkDictFunId)
+import GHC.Types.Name (mkInternalName)
 import GHC.Utils.Outputable
   ( Outputable (..)
   , IsDoc (..)
-  , IsLine (fsep, (<+>), text)
+  , IsLine (fsep, (<+>), text, hcat)
+  , SDoc
   , hang
   , punctuate
   , comma
   , brackets
+  , parens
   )
+import GHC.Types.SourceText (SourceText(..))
+import GHC.Types.Unique (incrUnique, minLocalUnique)
 
-import GHC.Exts (IsList (..))
-
-import Control.Monad ((>=>), guard, when)
-import Control.Applicative (Alternative (..))
+import Control.Monad ((>=>), unless)
 
 import Data.Data (Data)
-import Data.Function (on)
-import Data.Map (Map)
+import Data.Foldable (for_)
+import Data.Generics.Aliases (mkQ)
+import Data.Generics.Schemes (something)
+import Data.HashMap.Internal.Strict (HashMap)
+import Data.HashMap.Strict qualified as HashMap
+import Data.List (sort)
+import Data.Text (Text, unpack)
 import Data.Traversable (for)
 
 import Effectful
+import Effectful.Break (runBreak, break)
 import Effectful.Error.Static
 import Effectful.GHC.TH
 import Effectful.GHC.TyThing
+import Effectful.GHC.Unique (HasUnique)
 import Effectful.Context
 
-import Pantomime.BuiltIn (Embeddable)
+import Pantomime.BuiltIn (Embeddable, Embedding (..))
 import Pantomime.Unification (subsumeExpr)
-import Pantomime.Util (foldM', freshId, foldlBy)
+import Pantomime.Util (foldM', dbg, failWith)
 
--- TODO: We're switching away from using 'Coercible' as it requires same runtime
+-- TODO: This should be renamed to 'Embeddings' instead of 'Axioms'. We can
+-- probably drop the 'Plugin' portion as well.
 -- kinded types: something we don't care about within the evaluator. Instead,
 -- we provide a custom typeclass. The comments should mirror this!
+-- TODO: The text below should be updated to reflect the current state of
+-- embeddings. We should at some point link the paper also.
 -- | User axioms only visible to the plugin.
 --
 -- The kinds and types of the mapped terms should match up exactly. The
@@ -112,15 +138,13 @@ import Pantomime.Util (foldM', freshId, foldlBy)
 -- 'BitVec'. The importance lies in using a coercion 'Coercible IntN BitVec'.
 --
 -- > plusInterp
--- >   :: Coercible IntN BitVec
+-- >   :: Embeddable bv BitVec
 -- >   => KnownNat n
--- >   => IntN n
--- >   -> IntN n
--- >   -> IntN n
--- > plusInterp = go
--- >   where
--- >     go :: bv ~ BitVec => bv n -> bv n -> bv n
--- >     go = coerce plusIntN
+-- >   => bv n
+-- >   -> bv n
+-- >   -> bv n
+-- > plusInterp = case embedding @bv @BitVec of
+-- >   Embedding -> coerce SMT.bvadd
 --
 -- Note, the where clause is only to trick Haskell into allowing the coercion
 -- to appear at the top level. With this defintion in place, we supply the
@@ -132,20 +156,24 @@ import Pantomime.Util (foldM', freshId, foldlBy)
 -- one-to-one. That is, to complete the interpretation, we supply 'plusInterp'
 -- with the user-supplied coercion that 'Coercible IntN BitVec'. Afterwards, the
 -- types match up and the function is a valid interpretation.
-data PluginAxioms where
-  PluginAxioms ::
-    { typeAxioms :: Map TH.Name TH.Name
-    -- ^ Type-level representational equivalence axioms.
+data Embeddings where
+  Embeddings ::
+    -- TODO: Probably want to remove the comment about fresh symbolic values
+    -- once we change the interface on this.
+    { typeEmbeddings :: [(ArgType, ArgType)]
+    -- ^ Type-level embeddings.
     --
-    -- Both the key and value of these mappings should be resolvable to 'TyCon'.
-    -- One may think about this as providing an instance 'Coercible' to just the
-    -- plugin between the given 'TyCon'. This instance is used within the solver
-    -- when constructing fresh symbolic values and when resolving instances
-    -- for term-axioms.
+    -- Both the key and value of these mappings should be resolvable to a GHC
+    -- 'Type'. One may think about this as providing an instance 'Embeddable'
+    -- to the plugin between for the given types. This instance is used within
+    -- the solver when constructing fresh symbolic values and when resolving
+    -- instances for term-embeddings.
     -- TODO: Term axioms should allow for recursive definitions also. It
     -- probably won't be used much, but it would be good! I guess we would want
     -- a 'Bind' from GHC, but for template haskell names.
-    , termAxioms :: [(TH.Name, TH.Name)]
+    -- Actually, the above is not really required I think: the embedding can
+    -- always form a local recursive group. Will have to think about this!
+    , termEmbeddings :: [(TH.Name, TH.Name)]
     -- ^ Term-level representational equivalence axioms.
     --
     -- Both the key and value of these mappings should be resolvable to 'Id'.
@@ -157,28 +185,28 @@ data PluginAxioms where
     -- Note that this is a list because the ordering of the definitions does
     -- matter: any later definitions may use ones defined earlier. Duplicate
     -- definitions are considered an error.
-    } -> PluginAxioms
+    } -> Embeddings
   deriving (Show, Data)
 
-instance Outputable PluginAxioms where
-  ppr PluginAxioms { .. } = do
+instance Outputable Embeddings where
+  ppr Embeddings { .. } = do
     let pprKV (key, value) = text (show key) <+> ":->" <+> text (show value)
     let pprKVList pairs = brackets $ fsep $ punctuate comma $ pprKV <$> pairs
-    hang "PluginAxioms" 2 $ vcat
-      [ hang "Type Axioms:" 2 $ pprKVList (toList typeAxioms)
-      , hang "Term Axioms:" 2 $ pprKVList termAxioms
+    hang "Embeddings" 2 $ vcat
+      [ hang "Type Embeddings:" 2 $ pprKVList typeEmbeddings
+      , hang "Term Embeddings:" 2 $ pprKVList termEmbeddings
       ]
 
-instance Semigroup PluginAxioms where
-  (<>) l r = PluginAxioms
-    { typeAxioms = typeAxioms l <> typeAxioms r
-    , termAxioms = termAxioms l <> termAxioms r
+instance Semigroup Embeddings where
+  (<>) l r = Embeddings
+    { typeEmbeddings = typeEmbeddings l <> typeEmbeddings r
+    , termEmbeddings = termEmbeddings l <> termEmbeddings r
     }
 
-instance Monoid PluginAxioms where
-  mempty = PluginAxioms
-    { typeAxioms = mempty
-    , termAxioms = mempty
+instance Monoid Embeddings where
+  mempty = Embeddings
+    { typeEmbeddings = mempty
+    , termEmbeddings = mempty
     }
 
 type TypeAxiomsR = TyConEnv TyCon
@@ -189,8 +217,8 @@ type TermAxiomsR = [(Id, CoreExpr)]
 -- TODO: I think it would be good to have type synonyms for both of these fields
 -- as we use them independently as well.
 -- | Fully resolved plugin axioms. These may be used as-is by the solver.
-data PluginAxiomsR where
-  PluginAxiomsR ::
+data EmbeddingsR where
+  EmbeddingsR ::
     { typeAxiomsR :: TypeAxiomsR
     -- ^ Type-level axioms, mainly used to construct symbolic values.
     , termAxiomsR :: TermAxiomsR
@@ -198,26 +226,149 @@ data PluginAxiomsR where
     -- resolved by the type-axioms, where applicable.
     --
     -- This may be used to extend substitution environments.
-    } -> PluginAxiomsR
-    deriving (Data)
+    } -> EmbeddingsR
 
-instance Outputable PluginAxiomsR where
-  ppr PluginAxiomsR { .. } = hang "PluginAxiomsR" 2 $ vcat
-    [ hang "Type Axioms:" 2 $ ppr typeAxiomsR
-    , hang "Term Axioms:" 2 $ ppr termAxiomsR
+instance Outputable EmbeddingsR where
+  ppr EmbeddingsR { .. } = hang "EmbeddingsR" 2 $ vcat
+    [ hang "Type Embeddings:" 2 $ ppr typeAxiomsR
+    , hang "Term Embeddings:" 2 $ ppr termAxiomsR
     ]
 
-instance Semigroup PluginAxiomsR where
-  (<>) l r = PluginAxiomsR
+instance Semigroup EmbeddingsR where
+  (<>) l r = EmbeddingsR
+    -- { typeAxiomsR = unionInstEnv (typeAxiomsR l) (typeAxiomsR r)
     { typeAxiomsR = typeAxiomsR l <> typeAxiomsR r
     , termAxiomsR = termAxiomsR l <> termAxiomsR r
     }
 
-instance Monoid PluginAxiomsR where
-  mempty = PluginAxiomsR
+instance Monoid EmbeddingsR where
+  mempty = EmbeddingsR
+    -- { typeAxiomsR = emptyInstEnv
     { typeAxiomsR = mempty
     , termAxiomsR = mempty
     }
+
+-- | A restricted form of types used for user defined 'Embeddable' instances.
+data ArgType where
+  ATApp :: ArgType -> ArgType -> ArgType
+  ATCon :: TH.Name -> ArgType
+  ATVar :: Text -> ArgType -> ArgType
+  deriving (Show, Data)
+
+instance Outputable ArgType where
+  ppr = do
+    let go par = \case
+          ATApp fun arg -> par $ go id fun <+> go parens arg
+          ATCon con -> text $ show con
+          ATVar var _kind -> text $ unpack var
+    go id
+
+-- | Variable store, used to track variable occurences and create new ones.
+--
+-- NOTE: As the uniques in the TyVar's are just incremented local Unique values,
+-- we can get a deterministic order of their occurence by sorting based on the
+-- Unique.
+type VarStore = (HashMap Text TyVar, Unique)
+
+-- | Reify an 'ArgType' for a typeclass instance into a full Haskell type.
+--
+-- The 'Unique' on the 'TyVar' in the 'VarStore' can be sorted for a
+-- deterministic declaration order for the type variables.
+reifyArgType
+  :: HasCallStack
+  => Error SDoc :> es
+  => Error (LookupError TH.Name) :> es
+  => Error (LookupError Name) :> es
+  => THNameToGHCName :> es
+  => HasThings :> es
+  => Context Reader [TyCon] :> es
+  => Context Writer VarStore :> es
+  => Context Reader VarStore :> es
+  => ArgType
+  -> Eff es Type
+-- TODO: Fix call stack growth.
+reifyArgType = \case
+  ATApp fun arg -> do
+    -- Get function type and check if has a function kind.
+    fun' <- reifyArgType fun
+    let err = "Type application function does not have function kind."
+    (_, _, farg, _) <- failWith @SDoc err $ splitFunTy_maybe (typeKind fun')
+
+    -- Get the argument and check if its kind mathes the function argument.
+    arg' <- reifyArgType arg
+    unless (eqType farg $ typeKind arg') do
+      throwError_ @SDoc "Argument kind does not equal expected kind."
+
+    -- Return the application.
+    pure $ mkAppTy fun' arg'
+
+  ATCon name -> do
+    name' <- thNameToGhcName name
+    tc <- lookupTyConAll name'
+    pure $ mkTyConTy tc
+
+  ATVar name kind -> runBreak do
+    -- Fetch the variable store.
+    (mapping, unique) <- get @VarStore
+
+    -- Reify the kind of the variable.
+    kind' <- reifyArgType kind
+
+    -- Early break if we already have a type variable for the name.
+    let existing = HashMap.lookup name mapping
+    for_ existing \tv -> do
+      let kind2 = varType tv
+      unless (eqType kind' kind2) do
+        throwError_ @SDoc $ hcat
+          [ "Type variable '"
+          , text $ unpack name
+          , "' occurs with different kinds '"
+          , ppr kind'
+          , "' and '"
+          , ppr kind2
+          , "'"
+          ]
+      break $ mkTyVarTy tv
+
+    -- Create the fresh type variable.
+    let occ = mkFastString $ unpack name -- TODO: Not the best conversion...
+    let name' = mkSystemName unique $ mkVarOccFS occ
+    let tv = mkTyVar name' kind'
+
+    -- Extend the store with the type variable and increment the unique.
+    let mapping' = HashMap.insert name tv mapping
+    let unique' = incrUnique unique
+    put (mapping', unique')
+
+    -- Return the type variable.
+    pure $ mkTyVarTy tv
+
+-- | Finds a type synonym in a 'Type'.
+hasSynonym :: Type -> Maybe TyCon
+hasSynonym = something $ mkQ Nothing \ty -> do
+  case splitTyConAppNoView_maybe ty of
+    Just (tc, _) | isTypeSynonymTyCon tc -> Just tc
+    _ -> Nothing
+
+-- | Expand all type synonyms from a type.
+--
+-- Throws an error if any type synonym still remains.
+expandTypeSynonyms'
+  :: Error SDoc :> es
+  => Type
+  -> Eff es Type
+expandTypeSynonyms' ty = do
+  let ty' = expandTypeSynonyms ty
+  case hasSynonym ty' of
+    Just tc -> throwError_ @SDoc $ hcat
+      [ "Type '"
+      , ppr ty'
+      , "' contains unsaturated type constructor '"
+      , ppr tc
+      , "' after type alias expansion."
+      ]
+    Nothing -> pure ()
+  pure ty'
 
 -- | Resolve user-supplied axioms in terms of Template Haskell names to their
 -- internal Core representation.
@@ -233,136 +384,120 @@ instance Monoid PluginAxiomsR where
 -- Lastly, this also ensures that mappings are only made for OPAQUE functions.
 -- A special case here we do allow is a NOINLINE function without an unfolding.
 -- For these, we do not use any of the user-provided coercions.
-resolvePluginAxioms
+resolveEmbeddings
   :: HasCallStack
   -- TODO: Adjust these errors!
   => Error String :> es
+  => Error SDoc :> es
   => Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => THNameToGHCName :> es
   => HasThings :> es
+  => HasUnique :> es
   => Context Reader CoreProgram :> es
   => Context Reader [TyCon] :> es
-  => PluginAxioms
-  -> Eff es PluginAxiomsR
-resolvePluginAxioms PluginAxioms { .. } = do
+  => Embeddings
+  -> Eff es EmbeddingsR
+resolveEmbeddings Embeddings { .. } = do
   -- Get the typeclass we want to instantiate.
-  embedCls <- thNameToGhcName >=> lookupClass $ ''Embeddable
+  embeddable <- thNameToGhcName >=> lookupClass $ ''Embeddable
+  embedding <- thNameToGhcName >=> lookupDataCon $ 'Embedding
 
-  -- Resolve the type-level axioms. This is simply a lookup for the TyCon.
-  typeAxiomsRList <- for (toList typeAxioms) \(orig, interp) -> do
-    let resolve = thNameToGhcName >=> lookupTyConAll
-    -- TODO: Should we ensure that the original TyCon is a data-type or newtype?
-    -- Otherwise, the conversion might be very fragile! Not sure if I'm missing
-    -- any here.
-    orig' <- resolve orig
-    interp' <- resolve interp
-    pure (orig', interp')
+  -- Gather the instance environment for resolution.
+  instEnv <- foldM' emptyInstEnv typeEmbeddings \instEnv (tyL, tyR) -> do
+    -- Reify the instance head into GHC Types.
+    let runReify = runContextLocal @VarStore (mempty, minLocalUnique)
+    ((tyL', tyR'), store') <- runReify do
+      tyL' <- reifyArgType tyL
+      tyR' <- reifyArgType tyR
+      pure (tyL', tyR')
 
-  -- Gather the dictionary map for instance resolution.
-  dicts <- foldM' emptyTM typeAxiomsRList \dicts (tcR, tcL) -> do
+    -- Expand the type synonyms in the types.
+    tyL'' <- expandTypeSynonyms' tyL'
+    tyR'' <- expandTypeSynonyms' tyR'
+
+    -- FIXME: We should ensure that the kinds for the type match up
+    -- (up to runtime representation).
+
     -- Gather the information to construct the coercion.
-    let prov = PluginProv "pantomime user-defined"
-    let tyL = mkTyConTy tcL
-    let tyR = mkTyConTy tcR
-    let co = mkUnivCo prov [] Representational tyL tyR
+    let prov = PluginProv "sym-fc embedding (user-defined)"
+    let kindL = typeKind tyL''
+    let kindR = typeKind tyR''
+    let co = mkUnivCo prov [] Representational tyL'' tyR''
 
-    -- Gather the dictionaries for 'Coercible'.
-    let dictCo = do
-          -- Get the kind of the coercible TyCon.
-          let kind = tyConKind tcL
+    -- Create a unique name for the embedding.
+    unique <- getUniqueM
+    let occ = mkVarOccFS "embedding"
+    let name = mkInternalName unique occ generatedSrcSpan
 
-          -- Ensure the kind and roles match up.
-          let eqKind = eqType kind $ tyConKind tcR
-          let eqRoles = all (uncurry (==)) $ on zip tyConRoles tcL tcR
-          guard $ eqKind && eqRoles
+    -- Type variables used in the instance declaration.
+    -- NOTE: We can sort the type variables by Unique to get the declaration
+    -- order per 'reifyArgType'.
+    let tvs = sort $ HashMap.elems (fst store')
 
-          -- Box the coercion.
-          let eqVar = Var $ dataConWorkId coercibleDataCon
-          let dictL = mkApps eqVar
-                [ Type kind
-                , Type tyL
-                , Type tyR
-                , Coercion co
-                ]
-          let dictR = mkApps eqVar
-                [ Type kind
-                , Type tyR
-                , Type tyL
-                , Coercion $ mkSymCo co
-                ]
-          pure (dictL, dictR)
+    -- We don't support typeclass requirements (not sure if we ever need them)?
+    let theta = []
 
-    -- TODO: At some point I want to have 'Embeddable' to act like 'Coercible',
-    -- with the adjustment that we can also generate dictionaries here where
-    -- the final kind can differ. So to be precise, the kinds need to match up
-    -- precisely except the result kind. This one always has to be of kind
-    -- 'TYPE r' but the runtime representations do not have to match.
-    -- Gather the information to construct the final dictionary.
-    --
-    -- Note that for all normal intents and purposes, 'Embeddable' should only
-    -- have instances when the kinds match up exactly. Only axioms may have
-    -- their representation differ, as these will never reach the runtime.
-    --
-    -- At that point, we can also just evict the 'Coercible' instance that we
-    -- build up here.
-    -- Gather the dictionaries for 'Embeddable'.
-    let dictEm = do
-          -- Gather the RuntimeRep of the given types.
-          let runtimeRep ty = do
-                (sort, rty) <- sORTKind_maybe $ typeKind ty
-                case sort of
-                  TypeLike -> pure rty
-                  ConstraintLike -> empty
+    -- Construct the initial 'DFunId', without unfolding.
+    let tys = [kindL, kindR, tyL'', tyR'']
+    let dfun = mkDictFunId name tvs theta embeddable tys
 
-          repL <- runtimeRep tyL
-          repR <- runtimeRep tyR
-          let con = Var . dataConWorkId . classDataCon $ embedCls
-          -- TODO: For now, we're not really constructing the private typeclass
-          -- correctly. I don't think it's important for our use case, but it is
-          -- not very nice to do it like this.
-          let private = unitExpr
+    -- Create the 'Coercible' dictionary.
+    let coercibleDict = mkApps (Var $ dataConWorkId coercibleDataCon)
+          [ Type kindL
+          , Type tyL''
+          , Type tyR''
+          , Coercion co
+          ]
 
-          -- Construct the embed function.
-          let (idE, _) = freshId "arg" (unrestricted tyL) emptyInScopeSet
-          let embed = Lam idE $ mkCast (Var idE) co
+    -- Create the 'Embedding' data type.
+    let coK = mkUnivCo prov [] Nominal kindL kindR
+    let embed = mkApps (Var $ dataConWorkId embedding)
+          [ Type kindL
+          , Type kindR
+          , Type tyL''
+          , Type tyR''
+          , Type tyR''
+          , Coercion coK
+          , Coercion $ Refl tyR''
+          , coercibleDict
+          ]
 
-          -- Construct the project function.
-          let (idP, _) = freshId "arg" (unrestricted tyR) emptyInScopeSet
-          let project = Lam idP $ mkCast (Var idP) (mkSymCo co)
+    -- The 'Embeddable' typeclass has a 'PrivateEmbeddable' requirement that is
+    -- there just so users cannot create an instance manually. It is essentially
+    -- a unit value with a different type, so we just pass in a unit as it is
+    -- never used. Slightly hacky, but it works (we cannot create the instance
+    -- correctly as it is not exported).
+    let private = Var unitDataConId
 
-          -- Construct the typeclass dictionary.
-          pure $ mkApps con
-            [ Type repL
-            , Type repR
-            , Type tyL
-            , Type tyR
-            , private
-            , private
-            , embed
-            , project
-            ]
+    -- Create the 'DFunUnfolding'.
+    let bndrs = []
+    let dc = classDataCon embeddable
+    let args = [Type kindL, Type kindR, Type tyL'', Type tyR'', private, embed]
+    let unfolding = mkDFunUnfolding bndrs dc args
 
-    -- Actually collect all dictionaries.
-    let dictCo' = maybe [] (\(l, r) -> [l, r]) dictCo
-    let dictEm' = maybe [] (: []) dictEm
-    let dictsNew = dictCo' <> dictEm'
+    -- Set the unfolding of the 'DFunId'.
+    let dfun' = setIdUnfolding dfun unfolding
 
-    -- Throw an error if we could not create any.
-    when (null dictsNew) do
-      throwError @String "resolvePluginAxioms: could not create any Embeddable or Coercible dictionaries for the given axioms"
+    -- Create the local typeclass instance.
+    let overlap = OverlapFlag
+          { overlapMode = NoOverlap NoSourceText
+          , isSafeOverlap = False
+          }
+    let warn = Nothing
+    let inst = mkLocalClsInst dfun' overlap tvs embeddable tys warn
 
-    -- Insert all dictionaries.
-    pure $ foldlBy dicts dictsNew \acc dict -> do
-      let ty = exprType dict
-      insertTM ty dict acc
+    -- Extend the instance environment with the embedding.
+    pure $ extendInstEnv instEnv inst
+
+  dbg instEnv
 
   -- TODO: We should first ensure that termAxioms do not contain duplicate
   -- definitions.
 
   -- Gather a binder mapping for a substitution. This will use the dictionary
   -- map to supply coercions to any Opaque values that require it.
-  termAxiomsR <- for termAxioms \(orig, interp) -> do
+  _termAxiomsR <- for termEmbeddings \(orig, interp) -> do
     -- Resolve the names as identifiers.
     let resolve = thNameToGhcName >=> lookupIdAll
     orig' <- resolve orig
@@ -401,13 +536,14 @@ resolvePluginAxioms PluginAxioms { .. } = do
     --   _ -> pure emptyTM
 
     -- Check whether the interpretation matches.
+    let dicts = undefined
     expr' <- subsumeExpr dicts (Var interp') $ varType orig'
 
     -- Return the mapping.
     pure (orig', expr')
 
   -- Collect the resolved type and term mappings.
-  pure PluginAxiomsR
-    { typeAxiomsR = mkTyConEnv typeAxiomsRList
-    , termAxiomsR
+  pure EmbeddingsR
+    { typeAxiomsR = mempty
+    , termAxiomsR = mempty
     }
