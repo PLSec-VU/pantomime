@@ -212,6 +212,7 @@ checkValidityAndEmbed
      , Context Reader [TyCon] :> es
      , Provider_ Solver () :> es
      , HasFamInstEnvs :> es
+     , HasInstEnvs :> es
      , HasThings :> es
      , HasUnique :> es
      , THNameToGHCName :> es

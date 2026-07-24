@@ -5,7 +5,6 @@ module Pantomime
 
   , Theory (..)
   , Embeddings (..)
-  , ArgType (..)
   , pantomime
   , pantomimeMarker
   , pantomimeNothing

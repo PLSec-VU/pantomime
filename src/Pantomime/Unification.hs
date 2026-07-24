@@ -4,16 +4,15 @@
 -- naming from GHC.
 -- TODO: Add module docs.
 module Pantomime.Unification
-  ( UnificationError (..),
-    OversaturatedError (..),
-    unifyApp,
-    unifyApps,
-    unifyExprs,
-    resolveInstances,
-    resolveInstancesWith,
-    subsumeExpr,
-  )
-where
+  ( UnificationError (..)
+  , OversaturatedError (..)
+  , unifyApp
+  , unifyApps
+  , unifyExprs
+  , resolveInstances
+  , resolveInstancesWith
+  , subsumeExpr
+  ) where
 
 import Control.Applicative (Alternative ((<|>)))
 import Control.Error (LookupError (..))
@@ -26,7 +25,7 @@ import Effectful.Context
 import Effectful.Error.Static
 import Effectful.GHC.External (HasInstEnvs, lookupUniqueInst)
 import GHC.Core.Class (Class)
-import GHC.Core.InstEnv (instanceDFunId)
+import GHC.Core.InstEnv (InstEnvs, instanceDFunId, lookupUniqueInstEnv)
 import GHC.Core.Map.Type (TypeMap)
 import GHC.Core.Predicate (isEvVar)
 import GHC.Core.TyCo.Rep (Scaled (..), Type (..), scaledThing)
@@ -34,7 +33,7 @@ import GHC.Core.Unify (alwaysBindFun, tcMatchTy, tcUnifyTys)
 import GHC.Data.Maybe (rightToMaybe, whenIsJust)
 import GHC.Data.TrieMap (TrieMap (..), insertTM)
 import GHC.Plugins hiding ((<>))
-import GHC.Tc.Utils.TcType (substTy, tcSplitSigmaTy)
+import GHC.Tc.Utils.TcType (substTy, tcSplitSigmaTy, tcSplitDFunHead)
 import Lens.Micro
 import Lens.Micro.Extras (view)
 import Pantomime.Util
@@ -387,26 +386,27 @@ unifyExprs lhs rhs = do
 -- TODO: Using 'TypeMap CoreExpr' for instances is extremely fragile. It would
 -- be a lot better to use InstEnv to resolve typeclasses. This goes for other
 -- functions in this module as well!
-subsumeExpr ::
-  (HasCallStack) =>
-  (Error String :> es) =>
-  TypeMap CoreExpr ->
-  CoreExpr ->
-  Type ->
-  Eff es CoreExpr
-subsumeExpr dicts expr ty = do
+subsumeExpr
+  :: HasCallStack
+  => Error SDoc :> es
+  => InstEnvs
+  -> CoreExpr
+  -> Type
+  -> Eff es CoreExpr
+subsumeExpr insts expr ty = do
   -- Get the unifiable part of the type.
   let (curTv, curEv, curTy) = splitExprTy expr
   let (reqTv, reqEv, reqTy) = tcSplitSigmaTy ty
 
   -- Match the types and add all dictionaries we care about.
-  let err =
-        "subsumeExpr: type matching failed"
-          <> "\n  current type:  "
-          <> showSDocUnsafe (ppr curTy)
-          <> "\n  required type: "
-          <> showSDocUnsafe (ppr reqTy)
-  subst <- failWith err $ tcMatchTy curTy reqTy
+  let err = hcat
+        [ "Could not match '"
+        , ppr curTy
+        , "' to the required type '"
+        , ppr reqTy
+        , "'."
+        ]
+  subst <- failWith @SDoc err $ tcMatchTy curTy reqTy
 
   -- Make evidence variables.
   let names = ("dict",) . unrestricted <$> reqEv
@@ -414,15 +414,21 @@ subsumeExpr dicts expr ty = do
 
   -- Construct the arguments to supply to the expression to unify.
   let argsTv = substTy subst . mkTyVarTy <$> curTv
-  let dicts' = foldlBy dicts lamEv \acc ev -> do
-        insertTM (varType ev) (Var ev) acc
+  let dicts = foldlBy emptyTM lamEv \acc ev -> do
+        insertTM @TypeMap (varType ev) ev acc
   let curEv' = substTy subst <$> curEv
-  argsEv <- for curEv' \ev -> do
-    let err' =
-          "subsumeExpr: type variable instance not found in dictionary"
-            <> "\n  type: "
-            <> showSDocUnsafe (ppr ev)
-    failWith @String err' $ lookupTM ev dicts'
+  argsEv <- for curEv' \ev -> runBreak do
+    whenIsJust (lookupTM ev dicts) $ break . Var @CoreBndr
+
+    let (cls, args) = tcSplitDFunHead ev
+    case lookupUniqueInstEnv insts cls args of
+      Right (inst, targs) -> pure $ mkTyApps (Var $ instanceDFunId inst) targs
+      -- TODO: Improve error message!
+      Left _err -> throwError_ @SDoc $ hcat
+        [ "Instance lookup of typeclass '"
+        , ppr ev
+        , "' failed when subsuming expression."
+        ]
 
   -- Construct the new expression.
   let open = mkApps expr $ fmap Type argsTv <> argsEv
