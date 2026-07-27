@@ -395,8 +395,8 @@ resolveEmbeddings Embeddings { .. } = do
         { ie_local = unionInstEnv typeEmbeddingsR $ ie_local instEnvs
         }
 
-  -- TODO: We should first ensure that type embeddings and termAxioms do not contain duplicate
-  -- definitions.
+  -- TODO: We should ensure that type embeddings and termAxioms do not
+  -- contain duplicate definitions.
 
   -- Gather a binder mapping for a substitution. This will use the dictionary
   -- map to supply coercions to any Opaque values that require it.

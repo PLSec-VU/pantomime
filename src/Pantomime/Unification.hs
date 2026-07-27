@@ -412,14 +412,19 @@ subsumeExpr insts expr ty = do
   let names = ("dict",) . unrestricted <$> reqEv
   let (lamEv, _) = freshIds names $ mkInScopeSetList reqTv
 
-  -- Construct the arguments to supply to the expression to unify.
+  -- Construct the local arguments to supply to the expression to unify.
   let argsTv = substTy subst . mkTyVarTy <$> curTv
   let dicts = foldlBy emptyTM lamEv \acc ev -> do
         insertTM @TypeMap (varType ev) ev acc
+
+  -- Get the required typeclasses.
   let curEv' = substTy subst <$> curEv
   argsEv <- for curEv' \ev -> runBreak do
+    -- First try to find a local instance that is supplied to the function.
     whenIsJust (lookupTM ev dicts) $ break . Var @CoreBndr
 
+    -- If no local instance exists, try to resolve the through the instance
+    -- environment.
     let (cls, args) = tcSplitDFunHead ev
     case lookupUniqueInstEnv insts cls args of
       Right (inst, targs) -> pure $ mkTyApps (Var $ instanceDFunId inst) targs
