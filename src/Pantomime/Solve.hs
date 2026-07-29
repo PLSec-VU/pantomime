@@ -89,6 +89,7 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
+import GHC.Core.InstEnv (InstEnvs)
 
 -- TODO: Definitely not the cleanest place to add these effects. I should look
 -- into where to do this.
@@ -96,21 +97,24 @@ runBuiltInTypes
   :: Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
-  => THNameToGHCName :> es
   => HasFamInstEnvs :> es
-  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : Context Reader FamInstEnvs : es) a
+  => HasInstEnvs :> es
+  => THNameToGHCName :> es
+  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : Context Reader FamInstEnvs : Context Reader InstEnvs : es) a
   -> Eff es a
 runBuiltInTypes eff = do
   tys <- getBuiltinTyCon
   ids <- getInterfaceThings
   fam <- getFamInstEnvs
-  runContextReader fam . runContextReader ids . runContextReader tys $ eff
+  env <- getInstEnvs
+  runContextReader env . runContextReader fam . runContextReader ids . runContextReader tys $ eff
 
 type SymboliseEff =
   [ Context Reader BuiltInTyCon
   , Context Reader InterfaceThings
   , Context Reader FamInstEnvs
   , Error String
+  , Context Reader InstEnvs
   ]
 
 newtype Lie a where
@@ -126,6 +130,7 @@ construct
   => Context Reader InterfaceThings :> es
   => Context Reader FamInstEnvs :> es
   => Error String :> es
+  => Context Reader InstEnvs :> es
   => [(Var, forall fs. PrimOp fs)]
   -> EmbeddingsR
   -> CoreProgram
@@ -143,7 +148,7 @@ construct prim EmbeddingsR { .. } program expr = inject @SymboliseEff $ withDefe
   subst0 <- extendIdSubstMany mkEmptySubst prim'
 
   -- Add the term bindings to the substitution.
-  let termAxiomsR' = uncurry NonRec <$> termAxiomsR
+  let termAxiomsR' = uncurry NonRec <$> termEmbeddingsR
   subst1 <- symboliseBindMany subst0 termAxiomsR'
 
   -- TODO: I think there is an ordering problem here between user
@@ -158,7 +163,7 @@ construct prim EmbeddingsR { .. } program expr = inject @SymboliseEff $ withDefe
 
   -- Create fresh arguments.
   let ty = exprType expr
-  (args, _scope) <- freshArgs typeAxiomsR (collectValBinders expr) ty emptyInScopeSet
+  (args, _scope) <- freshArgs typeEmbeddingsR (collectValBinders expr) ty emptyInScopeSet
 
   result <- defer do
     fun <- symbolise subst expr
@@ -202,6 +207,7 @@ checkValid
   => Error (LookupError Name) :> es
   => Error SolverError :> es
   => Context Reader CoreProgram :> es
+  => HasInstEnvs :> es
   => HasThings :> es
   => THNameToGHCName :> es
   => HasFamInstEnvs :> es
@@ -218,7 +224,7 @@ checkValid axioms expr = runBuiltInTypes do
   -- TODO: Is there perhaps a better place to add this? Ideally we just do it
   -- as a normal axiom, but I cannot find where 'nospec' is defined...
   idId <- thNameToGhcName 'id >>= lookupIdAll
-  let axioms' = axioms { termAxiomsR = (nospecId, GHC.Var idId) : termAxiomsR axioms } 
+  let axioms' = axioms { termEmbeddingsR = (nospecId, GHC.Var idId) : termEmbeddingsR axioms } 
 
   (eq, Lie args) <- construct prim axioms' program expr
 

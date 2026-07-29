@@ -6,8 +6,8 @@
 module Pantomime.Axiom
   ( Embeddings (..)
   , EmbeddingsR (..)
-  , TypeAxiomsR
-  , TermAxiomsR
+  , TypeEmbeddingsR
+  , TermEmbeddingsR
   , resolveEmbeddings
   ) where
 
@@ -16,13 +16,13 @@ import Language.Haskell.TH qualified as TH
 
 import GHC.Core.InstEnv
   ( InstEnvs (..)
+  , InstEnv
   , mkLocalClsInst
   , emptyInstEnv
   , extendInstEnv
   , unionInstEnv
   )
-import GHC.Core.TyCo.Rep (UnivCoProvenance (..), Coercion (..))
-import GHC.Core.TyCon.Env (TyConEnv)
+import GHC.Core.TyCo.Rep (UnivCoProvenance (..))
 import GHC.Core.Unfold.Make (mkDFunUnfolding)
 import GHC.Plugins
   ( TyCon (..)
@@ -44,6 +44,8 @@ import GHC.Plugins
   , mkAppTys
   , mkTyVarTy
   , mkVarOccFS
+  , mkGReflRightCo
+  , mkCastTy
   , classDataCon
   , typeKind
   , coercibleDataCon
@@ -77,6 +79,7 @@ import Data.Traversable (for)
 
 import Effectful
 import Effectful.Error.Static
+import Effectful.GHC.External (HasInstEnvs, getInstEnvs)
 import Effectful.GHC.TH
 import Effectful.GHC.TyThing
 import Effectful.GHC.Unique (HasUnique)
@@ -85,7 +88,6 @@ import Effectful.Context
 import Pantomime.BuiltIn (Embeddable, Embedding (..))
 import Pantomime.Unification (subsumeExpr)
 import Pantomime.Util (foldM')
-import Effectful.GHC.External (HasInstEnvs, getInstEnvs)
 
 -- TODO: This should be renamed to 'Embeddings' instead of 'Axioms'. We can
 -- probably drop the 'Plugin' portion as well.
@@ -203,19 +205,19 @@ instance Monoid Embeddings where
     , termEmbeddings = mempty
     }
 
-type TypeAxiomsR = TyConEnv TyCon
+type TypeEmbeddingsR = InstEnv
 
 -- TODO: I guess these might be better suited as CoreBind no?
-type TermAxiomsR = [(Id, CoreExpr)]
+type TermEmbeddingsR = [(Id, CoreExpr)]
 
 -- TODO: I think it would be good to have type synonyms for both of these fields
 -- as we use them independently as well.
 -- | Fully resolved plugin axioms. These may be used as-is by the solver.
 data EmbeddingsR where
   EmbeddingsR ::
-    { typeAxiomsR :: TypeAxiomsR
+    { typeEmbeddingsR :: TypeEmbeddingsR
     -- ^ Type-level axioms, mainly used to construct symbolic values.
-    , termAxiomsR :: TermAxiomsR
+    , termEmbeddingsR :: TermEmbeddingsR
     -- ^ Term-level axioms, these already have their 'Coercible' instances
     -- resolved by the type-axioms, where applicable.
     --
@@ -224,24 +226,25 @@ data EmbeddingsR where
 
 instance Outputable EmbeddingsR where
   ppr EmbeddingsR { .. } = hang "EmbeddingsR" 2 $ vcat
-    [ hang "Type Embeddings:" 2 $ ppr typeAxiomsR
-    , hang "Term Embeddings:" 2 $ ppr termAxiomsR
+    [ hang "Type Embeddings:" 2 $ ppr typeEmbeddingsR
+    , hang "Term Embeddings:" 2 $ ppr termEmbeddingsR
     ]
 
 instance Semigroup EmbeddingsR where
   (<>) l r = EmbeddingsR
-    -- { typeAxiomsR = unionInstEnv (typeAxiomsR l) (typeAxiomsR r)
-    { typeAxiomsR = typeAxiomsR l <> typeAxiomsR r
-    , termAxiomsR = termAxiomsR l <> termAxiomsR r
+    { typeEmbeddingsR = unionInstEnv (typeEmbeddingsR l) (typeEmbeddingsR r)
+    , termEmbeddingsR = termEmbeddingsR l <> termEmbeddingsR r
     }
 
 instance Monoid EmbeddingsR where
   mempty = EmbeddingsR
-    -- { typeAxiomsR = emptyInstEnv
-    { typeAxiomsR = mempty
-    , termAxiomsR = mempty
+    { typeEmbeddingsR = emptyInstEnv
+    , termEmbeddingsR = mempty
     }
 
+-- TODO: I guess we should change this to 'isValidHeadArg' or something. Then
+-- check if there are not any quantifiers or typeclass constraints in there, as
+-- these are also disallowed!
 -- | Finds a type synonym in a 'Type'.
 hasSynonym :: Type -> Maybe TyCon
 hasSynonym = something $ mkQ Nothing \ty -> do
@@ -313,6 +316,12 @@ resolveEmbeddings Embeddings { .. } = do
     -- runtime representation. This latter part is hard though...
 
     -- Type variables that we will use in the instance declaration.
+    -- TODO: Should there be a functional dependency from the left type to
+    -- the right? I think yes: the left type should uniquely identify the rhs
+    -- (otherwise, the embedding is ambiguous). Would this change what we do
+    -- here? I think the way we instantiate the type variables here, you always
+    -- get the function dependency (unless there is an overlapping instance
+    -- perhaps?)
     let tvs = tyConTyVars tcL'
 
     -- Apply the type variables to both type constructors and expand any type
@@ -323,42 +332,36 @@ resolveEmbeddings Embeddings { .. } = do
     tyL <- expand tcL'
     tyR <- expand tcR'
 
-    -- Gather the information to construct the coercion.
+    -- Construct the kind coercion used to create the 'Embedding' instance.
     let prov = PluginProv "SymFC embedding (user-defined)"
     let kindL = typeKind tyL
     let kindR = typeKind tyR
-    let co = mkUnivCo prov [] Representational tyL tyR
+    let coK = mkUnivCo prov [] Nominal kindR kindL
 
-    -- Create a unique name for the embedding.
-    unique <- getUniqueM
-    let occ = mkVarOccFS "embedding"
-    let name = mkInternalName unique occ generatedSrcSpan
+    -- Use the coercion to make a version of the right-hand side that has the
+    -- same kind as the left-hand side.
+    let tyR' = mkCastTy tyR coK
 
-    -- We don't support typeclass requirements (not sure if we ever need them)?
-    let theta = []
-
-    -- Construct the initial 'DFunId', without unfolding.
-    let tys = [kindL, kindR, tyL, tyR]
-    let dfun = mkDictFunId name tvs theta embeddable tys
+    -- Construct the type coercion that will be exposed by `Coercible`.
+    let co = mkUnivCo prov [] Representational tyL tyR'
 
     -- Create the 'Coercible' dictionary.
     let coercibleDict = mkApps (Var $ dataConWorkId coercibleDataCon)
           [ Type kindL
           , Type tyL
-          , Type tyR
+          , Type tyR'
           , Coercion co
           ]
 
     -- Create the 'Embedding' data type.
-    let coK = mkUnivCo prov [] Nominal kindL kindR
     let embed = mkApps (Var $ dataConWorkId embedding)
           [ Type kindL
           , Type kindR
           , Type tyL
           , Type tyR
-          , Type tyR
+          , Type tyR'
           , Coercion coK
-          , Coercion $ Refl tyR
+          , Coercion $ mkGReflRightCo Nominal tyR coK
           , coercibleDict
           ]
 
@@ -374,6 +377,16 @@ resolveEmbeddings Embeddings { .. } = do
     let dc = classDataCon embeddable
     let args = [Type kindL, Type kindR, Type tyL, Type tyR, private, embed]
     let unfolding = mkDFunUnfolding bndrs dc args
+
+    -- Create a unique name for the embedding.
+    unique <- getUniqueM
+    let occ = mkVarOccFS "embedding"
+    let name = mkInternalName unique occ generatedSrcSpan
+
+    -- Construct the initial 'DFunId', without unfolding.
+    let theta = [] -- No typeclass requirements in embeddings
+    let tys = [kindL, kindR, tyL, tyR']
+    let dfun = mkDictFunId name tvs theta embeddable tys
 
     -- Set the unfolding of the 'DFunId'.
     let dfun' = setIdUnfolding dfun unfolding
@@ -400,11 +413,11 @@ resolveEmbeddings Embeddings { .. } = do
 
   -- Gather a binder mapping for a substitution. This will use the dictionary
   -- map to supply coercions to any Opaque values that require it.
-  _termEmbeddingsR <- for termEmbeddings \(orig, interp) -> do
+  termEmbeddingsR <- for termEmbeddings \(orig, interp) -> do
     -- Resolve the names as identifiers.
-    let resolve = thNameToGhcName >=> lookupIdAll
-    orig' <- resolve orig
-    interp' <- resolve interp
+    let lookupIdTH = thNameToGhcName >=> lookupIdAll
+    orig' <- lookupIdTH orig
+    interp' <- lookupIdTH interp
 
     -- Check whether the interpretation matches.
     expr' <- subsumeExpr instEnvs' (Var interp') $ varType orig'
@@ -414,6 +427,6 @@ resolveEmbeddings Embeddings { .. } = do
 
   -- Collect the resolved type and term mappings.
   pure EmbeddingsR
-    { typeAxiomsR = mempty
-    , termAxiomsR = mempty
+    { typeEmbeddingsR
+    , termEmbeddingsR
     }
