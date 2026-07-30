@@ -4,13 +4,15 @@ module Pantomime.Fresh
   ( freshArgs
   ) where
 
-import GHC.Builtin.Types.Prim (eqPrimTyCon, eqReprPrimTyCon, alphaTy)
+import GHC.Builtin.Types.Prim (eqPrimTyCon, eqReprPrimTyCon)
 import GHC.Core.FamInstEnv (FamInstEnvs, topReduceTyFamApp_maybe)
-import GHC.Core.InstEnv (InstEnvs (..), lookupUniqueInstEnv, unionInstEnv)
+import GHC.Core.InstEnv (InstEnvs (..), unionInstEnv)
 import GHC.Core.Reduction (Reduction (..), mkReduction, homogeniseHetRedn)
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
 import GHC.Core.Unify (tcUnifyTysFG, alwaysBindFun, UnifyResultM (..))
-import GHC.Types.Unique (Uniquable (..), getKey)
+import GHC.Data.Pair (Pair(..))
+import GHC.Tc.Instance.FunDeps (improveFromInstEnv, FunDepEqn (..))
+import GHC.Types.Unique (Uniquable (..), getKey, minLocalUnique, incrUnique)
 import GHC.Utils.Outputable (Outputable (..), text, (<+>), showSDocUnsafe)
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
@@ -35,11 +37,13 @@ import GHC.Plugins
   , mkReflCo
   , mkSymCo
   , mkSubCo
+  , mkTyConTy
   , coreFullView
   , coercionRKind
   , instNewTyCon_maybe
   , getOccFS
   , bytesFS
+  , tyConKind
   )
 
 import Grisette
@@ -215,13 +219,26 @@ freshExpr embeddings root = do
 
           -- User Interpretation:
           -----------------------
-          | Right (_inst, [tyL, tyR]) <- lookupUniqueInstEnv instEnvs' clsEmbeddable [ty, alphaTy] -> do
+          | Just (tc, targs) <- splitTyConApp_maybe ty
+
+          -- Construct a fresh type and kind variable.
+          , let namekv = GHC.mkSystemName minLocalUnique $ GHC.mkVarOccFS "k"
+          , let k = GHC.mkTyVarTy $ GHC.mkTyVar namekv GHC.liftedTypeKind
+          , let namea = GHC.mkSystemName (incrUnique minLocalUnique) $ GHC.mkVarOccFS "a"
+          , let a = GHC.mkTyVarTy $ GHC.mkTyVar namea k
+
+          -- Lookup an instance using the functional dependency.
+          , let kind = tyConKind tc
+          , let args = [kind, k, mkTyConTy tc, a]
+          , let deps = improveFromInstEnv instEnvs' (const ()) clsEmbeddable args
+          , [FDEqn { fd_eqs = [Pair tyR _]}] <- deps -> do
             -- Construct the plugin coercion
             let prov = PluginProv "SymFC embedding (user-defined)"
-            let co = mkUnivCo prov [] Representational tyL tyR
+            let co = mkUnivCo prov [] Representational (GHC.mkTyConTy tc) tyR
+            let co' = GHC.mkAppCos co $ mkReflCo Nominal <$> targs
 
             -- Create the final expression.
-            mkReductionCast $ mkReduction co (coercionRKind co)
+            mkReductionCast $ mkReduction co' (coercionRKind co')
 
           -- Type-Family:
           ---------------

@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE PolyKinds #-}
@@ -269,12 +270,21 @@ class PrivateEmbeddable
 -- are only safe under symbolic evaluation given a coherent set of embeddings.
 --
 -- Of course, a user is free to construct an instance for a homogenous coercion.
-class PrivateEmbeddable => Embeddable (a :: k1) (b :: k2) where
+--
+-- Unlike 'Coercible', 'Embeddable' is not symmetric. The first type argument is
+-- the source type (i.e. the type to embed) and the second type argument is the
+-- destination type (i.e. the interpretation).
+class PrivateEmbeddable => Embeddable (a :: k1) (b :: k2) | a -> b where
   -- | Get the 'Embedding' instance of the typeclass.
   --
   -- We expose 'embedding' as it keeps the kind arguments invisible, which is
   -- more ergonomic.
   embedding' :: Embedding a b
+
+-- Instance to allow resolution of embeddings with more type saturation than
+-- strictly required.
+instance (PrivateEmbeddable, Embeddable a b) => Embeddable (a c) (b c) where
+  embedding' = case embedding @a of Embedding -> Embedding
 
 -- | Get the 'Embedding' instance of the typeclass.
 embedding

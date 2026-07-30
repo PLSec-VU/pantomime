@@ -78,12 +78,12 @@ import Data.Generics.Schemes (something)
 import Data.Traversable (for)
 
 import Effectful
+import Effectful.Context
 import Effectful.Error.Static
 import Effectful.GHC.External (HasInstEnvs, getInstEnvs)
 import Effectful.GHC.TH
 import Effectful.GHC.TyThing
 import Effectful.GHC.Unique (HasUnique)
-import Effectful.Context
 
 import Pantomime.BuiltIn (Embeddable, Embedding (..))
 import Pantomime.Unification (subsumeExpr)
@@ -315,19 +315,22 @@ resolveEmbeddings Embeddings { .. } = do
     -- FIXME: We should ensure that the kinds for the type match up, up to
     -- runtime representation. This latter part is hard though...
 
+    -- TODO: There is a note in GHC that says the type variables in instance
+    -- declarations should be completely fresh. I don't think the type variables
+    -- on a TyCon are? If yes, this should be fine. If not, we should swap out
+    -- their 'Unique'.
     -- Type variables that we will use in the instance declaration.
-    -- TODO: Should there be a functional dependency from the left type to
-    -- the right? I think yes: the left type should uniquely identify the rhs
-    -- (otherwise, the embedding is ambiguous). Would this change what we do
-    -- here? I think the way we instantiate the type variables here, you always
-    -- get the function dependency (unless there is an overlapping instance
-    -- perhaps?)
-    let tvs = tyConTyVars tcL'
+    let tvs = case isTypeSynonymTyCon tcL' of
+          True -> tyConTyVars tcL'
+          False -> []
 
     -- Apply the type variables to both type constructors and expand any type
     -- synonyms.
     let expand tc = do
           let ty = mkAppTys (mkTyConTy tc) $ fmap mkTyVarTy tvs
+          -- TODO: Should we ensure that the expansion is actually only a
+          -- newtype or data declaration? I think yes. In fact, we should also
+          -- disallow quantifiers and typeclass requirements in this type!
           expandTypeSynonyms' ty
     tyL <- expand tcL'
     tyR <- expand tcR'
@@ -385,7 +388,7 @@ resolveEmbeddings Embeddings { .. } = do
 
     -- Construct the initial 'DFunId', without unfolding.
     let theta = [] -- No typeclass requirements in embeddings
-    let tys = [kindL, kindR, tyL, tyR']
+    let tys = [kindL, kindR, tyL, tyR]
     let dfun = mkDictFunId name tvs theta embeddable tys
 
     -- Set the unfolding of the 'DFunId'.
@@ -398,6 +401,10 @@ resolveEmbeddings Embeddings { .. } = do
           }
     let warn = Nothing
     let inst = mkLocalClsInst dfun' overlap tvs embeddable tys warn
+
+    -- TODO: We should check whether the function dependency is being upheld.
+    -- We can do so with the function 'checkFundeps' from
+    -- 'GHC.Tc.Instance.FunDeps'
 
     -- Extend the instance environment with the embedding.
     pure $ extendInstEnv instEnv inst
