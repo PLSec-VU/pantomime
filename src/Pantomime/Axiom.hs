@@ -402,7 +402,7 @@ resolveEmbeddings Embeddings { .. } = do
     let warn = Nothing
     let inst = mkLocalClsInst dfun' overlap tvs embeddable tys warn
 
-    -- TODO: We should check whether the function dependency is being upheld.
+    -- TODO: We should check whether the functional dependency is being upheld.
     -- We can do so with the function 'checkFundeps' from
     -- 'GHC.Tc.Instance.FunDeps'
 
