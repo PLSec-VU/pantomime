@@ -27,7 +27,7 @@ module Pantomime.Literal
 import Control.Applicative (Alternative(..))
 import Control.Monad ((>=>))
 
-import Data.Constraint
+import Data.Constraint (Dict (..), HasDict (..), withDict)
 import Data.Functor.Identity (Identity(..))
 import Data.Maybe (isJust)
 import Data.Proxy (Proxy(..))
@@ -37,6 +37,7 @@ import Effectful
 import Effectful.Context
 import Effectful.Error.Static
 
+import GHC.Core.Class (Class)
 import GHC.Core.Reduction (Reduction(..))
 import GHC.Core.FamInstEnv (normaliseType, FamInstEnvs)
 import GHC.Plugins
@@ -306,6 +307,7 @@ data BuiltInTyCon where
     , tcKnownNat :: TyCon
     , tcLEqNat :: TyCon
     , tcUnsafeEquality :: TyCon
+    , clsEmbeddable :: Class
     } -> BuiltInTyCon
 
 -- | Convert a 'LiteralType' into a Haskell 'Type'.

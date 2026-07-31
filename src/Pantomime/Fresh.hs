@@ -1,22 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Pantomime.Fresh
-  ( FreshInstEnv (..)
-  , freshArgs
+  ( freshArgs
   ) where
 
 import GHC.Builtin.Types.Prim (eqPrimTyCon, eqReprPrimTyCon)
-import GHC.Core.FamInstEnv (topReduceTyFamApp_maybe, FamInstEnvs)
+import GHC.Core.FamInstEnv (FamInstEnvs, topReduceTyFamApp_maybe)
+import GHC.Core.InstEnv (InstEnvs (..), unionInstEnv)
 import GHC.Core.Reduction (Reduction (..), mkReduction, homogeniseHetRedn)
 import GHC.Core.TyCo.Rep (scaledThing, UnivCoProvenance (..))
-import GHC.Core.TyCon.Env (TyConEnv, lookupTyConEnv)
 import GHC.Core.Unify (tcUnifyTysFG, alwaysBindFun, UnifyResultM (..))
-import GHC.Types.Unique (Uniquable (..), getKey)
+import GHC.Data.Pair (Pair(..))
+import GHC.Tc.Instance.FunDeps (improveFromInstEnv, FunDepEqn (..))
+import GHC.Types.Unique (Uniquable (..), getKey, minLocalUnique, incrUnique)
 import GHC.Utils.Outputable (Outputable (..), text, (<+>), showSDocUnsafe)
 import GHC.Plugins qualified as GHC
 import GHC.Plugins
   ( Var
-  , TyCon
   , Name
   , DataCon
   , InScopeSet
@@ -33,17 +33,17 @@ import GHC.Plugins
   , splitTyConApp_maybe
   , tyConFamilySize
   , tyVarKind
-  , mkTyConTy
   , mkUnivCo
-  , mkAppCos
   , mkReflCo
   , mkSymCo
   , mkSubCo
+  , mkTyConTy
   , coreFullView
   , coercionRKind
   , instNewTyCon_maybe
   , getOccFS
   , bytesFS
+  , tyConKind
   )
 
 import Grisette
@@ -62,11 +62,11 @@ import Data.Constraint (Dict (..))
 import Data.Text.Encoding (decodeUtf8)
 import Data.Traversable (for)
 
-import Pantomime.Axiom (TypeAxiomsR)
+import Pantomime.Axiom (TypeEmbeddingsR)
 import Pantomime.Defer (Deferrable, defer)
 import Pantomime.Expr
 import Pantomime.Literal
-  ( BuiltInTyCon
+  ( BuiltInTyCon (..)
   , SomeLiteralType (..)
   , HasDict (..)
   , projectLitTy
@@ -76,11 +76,6 @@ import Pantomime.Util (freshIds, freshTyVars, foldlBy, SymBitVec)
 import Effectful
 import Effectful.Error.Static
 import Effectful.Context (Context, ContextMode (..), get)
-
-data FreshInstEnv where
-  FreshInstEnv ::
-    { fieUser :: TyConEnv TyCon
-    } -> FreshInstEnv
 
 data Variable where
   Variable ::
@@ -161,16 +156,22 @@ freshExpr
   => Deferrable es
   => Error String :> es
   => Context Reader FamInstEnvs :> es
+  => Context Reader InstEnvs :> es
   => Context Reader BuiltInTyCon :> es
-  => TyConEnv TyCon
+  => TypeEmbeddingsR
   -> Var
   -> Eval es Expr
-freshExpr axioms root = do
+freshExpr embeddings root = do
   -- TODO: Is it better to this lookup once? Whilst it is a reader-like effect,
   -- it is implemented through IO, so I'm a bit wary of running it in a hot loop
   -- like this one. The only way to know is just to profile I guess, but for now
   -- I'll put it outside.
   fam <- liftEff $ get @FamInstEnvs
+  instEnvs <- liftEff $ get @InstEnvs
+  let instEnvs' = instEnvs
+        { ie_local = unionInstEnv embeddings $ ie_local instEnvs
+        }
+  BuiltInTyCon { clsEmbeddable } <- liftEff $ get @BuiltInTyCon
   -- TODO: Add note on callstack and recursion
   -- TODO: I don't like the nesting this gives. Maybe we should move these
   -- definitions inwards somehow. Perhaps just a standalone helper definition?
@@ -218,17 +219,26 @@ freshExpr axioms root = do
 
           -- User Interpretation:
           -----------------------
-          | Just (tc, args) <- splitTyConApp_maybe ty
-          , Just tc' <- lookupTyConEnv axioms tc -> do
+          | Just (tc, targs) <- splitTyConApp_maybe ty
+
+          -- Construct a fresh type and kind variable.
+          , let namekv = GHC.mkSystemName minLocalUnique $ GHC.mkVarOccFS "k"
+          , let k = GHC.mkTyVarTy $ GHC.mkTyVar namekv GHC.liftedTypeKind
+          , let namea = GHC.mkSystemName (incrUnique minLocalUnique) $ GHC.mkVarOccFS "a"
+          , let a = GHC.mkTyVarTy $ GHC.mkTyVar namea k
+
+          -- Lookup an instance using the functional dependency.
+          , let kind = tyConKind tc
+          , let args = [kind, k, mkTyConTy tc, a]
+          , let deps = improveFromInstEnv instEnvs' (const ()) clsEmbeddable args
+          , [FDEqn { fd_eqs = [Pair tyR _]}] <- deps -> do
             -- Construct the plugin coercion
-            let prov = PluginProv "pantomime user-defined"
-            let tyL = mkTyConTy tc
-            let tyR = mkTyConTy tc'
-            let univ = mkUnivCo prov [] Representational tyL tyR
-            let co = mkAppCos univ $ mkReflCo Nominal <$> args
+            let prov = PluginProv "SymFC embedding (user-defined)"
+            let co = mkUnivCo prov [] Representational (GHC.mkTyConTy tc) tyR
+            let co' = GHC.mkAppCos co $ mkReflCo Nominal <$> targs
 
             -- Create the final expression.
-            mkReductionCast $ mkReduction co (coercionRKind co)
+            mkReductionCast $ mkReduction co' (coercionRKind co')
 
           -- Type-Family:
           ---------------
@@ -400,12 +410,13 @@ freshArgs
   => Error String :> es
   => Context Reader BuiltInTyCon :> es
   => Context Reader FamInstEnvs :> es
-  => TypeAxiomsR
+  => Context Reader InstEnvs :> es
+  => TypeEmbeddingsR
   -> [String]
   -> Type
   -> InScopeSet
   -> Eff es ([(Var, Arg)], InScopeSet)
-freshArgs axioms valNames ty scope0 = do
+freshArgs embeddings valNames ty scope0 = do
   -- Gather the argument types.
   let (tyVars, funTy) = splitForAllTyVars ty
   let (argTys, _resTy) = splitFunTys funTy
@@ -425,7 +436,7 @@ freshArgs axioms valNames ty scope0 = do
   let args = tyArgs <> valArgs
 
   -- Create symbolic instance of the arguments.
-  symbolic <- for args $ defer . freshExpr axioms
+  symbolic <- for args $ defer . freshExpr embeddings
 
   -- Zip the binders together with their symbolic instance.
   let binders = zip args symbolic

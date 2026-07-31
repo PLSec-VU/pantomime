@@ -14,7 +14,7 @@ import Control.Monad ((>=>))
 import Data.Traversable (for)
 import Effectful
 import Effectful.Error.Static
-import Effectful.GHC.TyThing (HasThings, lookupTyCon, lookupId)
+import Effectful.GHC.TyThing (HasThings, lookupTyCon, lookupId, lookupClass)
 import Effectful.GHC.TH (THNameToGHCName, thNameToGhcName)
 import GHC.Plugins (Name, Var, Id)
 import GHC.TypeNats qualified as Builtin (type (<=))
@@ -100,6 +100,7 @@ getBuiltinTyCon = do
   tcKnownNat <- thNameToTyCon ''Builtin.KnownNat
   tcLEqNat <- thNameToTyCon ''(Builtin.<=)
   tcUnsafeEquality <- thNameToTyCon ''Builtin.UnsafeEquality
+  clsEmbeddable <- (thNameToGhcName >=> lookupClass) ''Builtin.Embeddable
   pure BuiltInTyCon { .. }
 
 bindingsTH :: [(TH.Name, forall es. PrimOp es)]

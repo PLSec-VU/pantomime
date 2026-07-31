@@ -106,6 +106,7 @@ library
     , microlens
     , mtl
     , primitive
+    , syb
     , template-haskell
     , text
     , transformers

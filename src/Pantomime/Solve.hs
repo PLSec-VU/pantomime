@@ -32,7 +32,6 @@ import GHC.Plugins
   , Bind (..)
   , Var
   , exprType
-  , varType
   , vcat
   , emptyInScopeSet
   , getOccString
@@ -71,7 +70,7 @@ import Pantomime.Symbolise
 import Pantomime.Subst
 import Pantomime.Fresh
 import Pantomime.Util (dbg)
-import Pantomime.Axiom (PluginAxiomsR (..))
+import Pantomime.Axiom (EmbeddingsR (..))
 import Pantomime.PrimOps (PrimOp)
 import Pantomime.Defer (defer, withDeferrable)
 import Pantomime.Binding
@@ -90,6 +89,7 @@ import Effectful.GHC.External
 import Effectful.Grisette.Solver
 import Effectful.Provider
 import Effectful.Exception (ErrorCall (..), throwIO)
+import GHC.Core.InstEnv (InstEnvs)
 
 -- TODO: Definitely not the cleanest place to add these effects. I should look
 -- into where to do this.
@@ -97,21 +97,24 @@ runBuiltInTypes
   :: Error (LookupError TH.Name) :> es
   => Error (LookupError Name) :> es
   => HasThings :> es
-  => THNameToGHCName :> es
   => HasFamInstEnvs :> es
-  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : Context Reader FamInstEnvs : es) a
+  => HasInstEnvs :> es
+  => THNameToGHCName :> es
+  => Eff (Context Reader BuiltInTyCon : Context Reader InterfaceThings : Context Reader FamInstEnvs : Context Reader InstEnvs : es) a
   -> Eff es a
 runBuiltInTypes eff = do
   tys <- getBuiltinTyCon
   ids <- getInterfaceThings
   fam <- getFamInstEnvs
-  runContextReader fam . runContextReader ids . runContextReader tys $ eff
+  env <- getInstEnvs
+  runContextReader env . runContextReader fam . runContextReader ids . runContextReader tys $ eff
 
 type SymboliseEff =
   [ Context Reader BuiltInTyCon
   , Context Reader InterfaceThings
   , Context Reader FamInstEnvs
   , Error String
+  , Context Reader InstEnvs
   ]
 
 newtype Lie a where
@@ -127,15 +130,16 @@ construct
   => Context Reader InterfaceThings :> es
   => Context Reader FamInstEnvs :> es
   => Error String :> es
+  => Context Reader InstEnvs :> es
   => [(Var, forall fs. PrimOp fs)]
-  -> PluginAxiomsR
+  -> EmbeddingsR
   -> CoreProgram
   -> CoreExpr
   -- FIXME: This 'Lie' evades the check NFData constraint on 'withDeferrable'.
   -- I'm not sure how to go around this, so for now we just let it crash if it
   -- does occur.. :/
   -> Eff es (SymBool, Lie (Eff SymboliseEff [(Var, Arg)]))
-construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDeferrable do
+construct prim EmbeddingsR { .. } program expr = inject @SymboliseEff $ withDeferrable do
   prim' <- for prim \(bndr, rhs) -> do
     rhs' <- defer rhs
     pure (bndr, rhs')
@@ -144,7 +148,7 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
   subst0 <- extendIdSubstMany mkEmptySubst prim'
 
   -- Add the term bindings to the substitution.
-  let termAxiomsR' = uncurry NonRec <$> termAxiomsR
+  let termAxiomsR' = uncurry NonRec <$> termEmbeddingsR
   subst1 <- symboliseBindMany subst0 termAxiomsR'
 
   -- TODO: I think there is an ordering problem here between user
@@ -159,7 +163,7 @@ construct prim PluginAxiomsR { .. } program expr = inject @SymboliseEff $ withDe
 
   -- Create fresh arguments.
   let ty = exprType expr
-  (args, _scope) <- freshArgs typeAxiomsR (collectValBinders expr) ty emptyInScopeSet
+  (args, _scope) <- freshArgs typeEmbeddingsR (collectValBinders expr) ty emptyInScopeSet
 
   result <- defer do
     fun <- symbolise subst expr
@@ -203,11 +207,12 @@ checkValid
   => Error (LookupError Name) :> es
   => Error SolverError :> es
   => Context Reader CoreProgram :> es
+  => HasInstEnvs :> es
   => HasThings :> es
   => THNameToGHCName :> es
   => HasFamInstEnvs :> es
   => Provider_ Solver () :> es
-  => PluginAxiomsR
+  => EmbeddingsR
   -> CoreExpr
   -> Eff es (Maybe Counterexample)
 checkValid axioms expr = runBuiltInTypes do
@@ -219,7 +224,7 @@ checkValid axioms expr = runBuiltInTypes do
   -- TODO: Is there perhaps a better place to add this? Ideally we just do it
   -- as a normal axiom, but I cannot find where 'nospec' is defined...
   idId <- thNameToGhcName 'id >>= lookupIdAll
-  let axioms' = axioms { termAxiomsR = (nospecId, GHC.Var idId) : termAxiomsR axioms } 
+  let axioms' = axioms { termEmbeddingsR = (nospecId, GHC.Var idId) : termEmbeddingsR axioms } 
 
   (eq, Lie args) <- construct prim axioms' program expr
 
